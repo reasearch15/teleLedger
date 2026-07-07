@@ -1,0 +1,865 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
+from typing import Any
+
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+
+from app.models.cashout import CashoutRequest, CashoutStatus
+from app.models.ledger_adjustment import LedgerAdjustment, LedgerAdjustmentType
+from app.models.payment_event import PaymentEvent, PaymentStatus
+from app.models.staff_settlement import (
+    StaffSettlement,
+    StaffSettlementAuditAction,
+    StaffSettlementAuditLog,
+    StaffSettlementStatus,
+)
+from app.models.user import User, UserRole
+from app.services.base import ApplicationService
+from app.websocket.events import LiveEventType, event_broker
+
+ZERO = Decimal("0.00")
+
+
+class LedgerAuthorizationError(Exception):
+    """Raised when a non-admin attempts a ledger operation."""
+
+
+class LedgerStateConflictError(Exception):
+    """Raised when a settlement workflow transition is invalid."""
+
+
+class SettlementNotFoundError(Exception):
+    """Raised when a settlement record does not exist."""
+
+
+class StaffNotFoundError(Exception):
+    """Raised when a staff user does not exist."""
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerDateRange:
+    start: datetime | None
+    end_exclusive: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerItem:
+    staff_id: int
+    staff_username: str
+    staff_color: str
+    total_in: Decimal
+    total_out: Decimal
+    settled_amount: Decimal
+    net: Decimal
+    payments_count: int
+    cashouts_count: int
+    settlements_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerSummary:
+    total_in: Decimal
+    total_out: Decimal
+    settled_amount: Decimal
+    net: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerReport:
+    items: list[LedgerItem]
+    summary: LedgerSummary
+
+
+@dataclass(frozen=True, slots=True)
+class SettlementRecord:
+    settlement: StaffSettlement
+    staff_username: str
+    staff_color: str
+    created_by_admin_username: str
+    claimed_by_admin_username: str | None
+    completed_by_admin_username: str | None
+    payment_ids: list[int]
+    cashout_ids: list[int]
+    adjustment_ids: list[int]
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerAdjustmentRecord:
+    adjustment: LedgerAdjustment
+    staff_username: str
+    staff_color: str
+    created_by_admin_username: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerAdjustmentListPage:
+    items: list[LedgerAdjustmentRecord]
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SettlementListPage:
+    items: list[SettlementRecord]
+    has_more: bool
+
+
+class LedgerService(ApplicationService):
+    """Admin-only staff ledger aggregation and settlement workflow."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_ledger(
+        self,
+        *,
+        date_from: date | None,
+        date_to: date | None,
+        actor: User,
+    ) -> LedgerReport:
+        self._require_admin(actor)
+        date_range = self._date_range(date_from, date_to)
+        return await self._ledger_report(date_range)
+
+    async def settle_staff(
+        self,
+        *,
+        staff_id: int,
+        date_from: date | None,
+        date_to: date | None,
+        notes: str | None,
+        actor: User,
+    ) -> StaffSettlement:
+        self._require_admin(actor)
+        date_range = self._date_range(date_from, date_to)
+        async with self._session.begin():
+            staff = await self._get_staff_for_update(staff_id)
+            item = await self._ledger_item_for_staff(staff, date_range)
+            if item.net <= ZERO:
+                raise LedgerStateConflictError("Nothing to settle.")
+            payment_ids = await self._unsettled_payment_ids_for_staff(
+                staff.id,
+                date_range,
+            )
+            cashout_ids = await self._unsettled_cashout_ids_for_staff(
+                staff.id,
+                date_range,
+            )
+            adjustment_ids = await self._unsettled_adjustment_ids_for_staff(
+                staff.id,
+                date_range,
+            )
+
+            now = datetime.now(UTC)
+            settlement = StaffSettlement(
+                staff_id=staff.id,
+                amount=item.net,
+                status=StaffSettlementStatus.DONE,
+                completed_by_admin_id=actor.id,
+                completed_at=now,
+                created_by_admin_id=actor.id,
+                notes=notes,
+            )
+            self._session.add(settlement)
+            await self._session.flush()
+            if payment_ids:
+                await self._session.execute(
+                    update(PaymentEvent)
+                    .where(
+                        PaymentEvent.id.in_(payment_ids),
+                        PaymentEvent.settlement_id.is_(None),
+                    )
+                    .values(settlement_id=settlement.id)
+                )
+            if cashout_ids:
+                await self._session.execute(
+                    update(CashoutRequest)
+                    .where(
+                        CashoutRequest.id.in_(cashout_ids),
+                        CashoutRequest.settlement_id.is_(None),
+                    )
+                    .values(settlement_id=settlement.id)
+                )
+            if adjustment_ids:
+                await self._session.execute(
+                    update(LedgerAdjustment)
+                    .where(
+                        LedgerAdjustment.id.in_(adjustment_ids),
+                        LedgerAdjustment.settlement_id.is_(None),
+                    )
+                    .values(settlement_id=settlement.id)
+                )
+            await self._add_audit(
+                settlement,
+                actor=actor,
+                action=StaffSettlementAuditAction.CREATED,
+                previous_status=None,
+                metadata={
+                    "date_from": date_from.isoformat() if date_from else None,
+                    "date_to": date_to.isoformat() if date_to else None,
+                    "total_in": str(item.total_in),
+                    "total_out": str(item.total_out),
+                    "net_settled": str(item.net),
+                    "payment_ids": payment_ids,
+                    "cashout_ids": cashout_ids,
+                    "adjustment_ids": adjustment_ids,
+                },
+            )
+            await self._add_audit(
+                settlement,
+                actor=actor,
+                action=StaffSettlementAuditAction.DONE,
+                previous_status=StaffSettlementStatus.PENDING,
+                metadata={"immediate": True},
+            )
+            await self._session.refresh(settlement)
+        await event_broker.publish(
+            LiveEventType.SETTLEMENT_CREATED,
+            settlement_id=settlement.id,
+        )
+        await event_broker.publish(
+            LiveEventType.SETTLEMENT_DONE,
+            settlement_id=settlement.id,
+        )
+        await event_broker.publish(LiveEventType.LEDGER_CHANGED)
+        return settlement
+
+    async def adjust_total_in(
+        self,
+        *,
+        staff_id: int,
+        new_total_in: Decimal,
+        reason: str,
+        actor: User,
+    ) -> LedgerAdjustment:
+        self._require_admin(actor)
+        clean_reason = reason.strip()
+        if not clean_reason:
+            raise LedgerStateConflictError("Reason is required.")
+        new_total_in = self._money(new_total_in)
+        async with self._session.begin():
+            staff = await self._get_staff_for_update(staff_id)
+            item = await self._ledger_item_for_staff(
+                staff,
+                LedgerDateRange(start=None, end_exclusive=None),
+            )
+            previous_total_in = self._money(item.total_in)
+            adjustment = LedgerAdjustment(
+                staff_id=staff.id,
+                type=LedgerAdjustmentType.TOTAL_IN_ADJUSTMENT,
+                amount_delta=self._money(new_total_in - previous_total_in),
+                previous_total_in=previous_total_in,
+                new_total_in=new_total_in,
+                reason=clean_reason,
+                created_by_admin_id=actor.id,
+            )
+            self._session.add(adjustment)
+            await self._session.flush()
+            await self._session.refresh(adjustment)
+        await event_broker.publish(LiveEventType.LEDGER_CHANGED)
+        return adjustment
+
+    async def list_adjustments(
+        self,
+        *,
+        staff_id: int | None,
+        date_from: date | None,
+        date_to: date | None,
+        include_deleted: bool,
+        limit: int,
+        offset: int,
+        actor: User,
+    ) -> LedgerAdjustmentListPage:
+        self._require_admin(actor)
+        date_range = self._date_range(date_from, date_to)
+        staff = aliased(User, name="adjustment_staff")
+        creator = aliased(User, name="adjustment_creator")
+        conditions = []
+        if staff_id is not None:
+            conditions.append(LedgerAdjustment.staff_id == staff_id)
+        elif not include_deleted:
+            conditions.append(LedgerAdjustment.staff_id.is_not(None))
+        if date_range.start is not None:
+            conditions.append(LedgerAdjustment.created_at >= date_range.start)
+        if date_range.end_exclusive is not None:
+            conditions.append(LedgerAdjustment.created_at < date_range.end_exclusive)
+        statement = (
+            select(
+                LedgerAdjustment,
+                staff.username,
+                staff.staff_color,
+                creator.username,
+            )
+            .outerjoin(staff, LedgerAdjustment.staff_id == staff.id)
+            .outerjoin(creator, LedgerAdjustment.created_by_admin_id == creator.id)
+            .where(*conditions)
+            .order_by(LedgerAdjustment.created_at.desc(), LedgerAdjustment.id.desc())
+            .limit(limit + 1)
+            .offset(offset)
+        )
+        rows = (await self._session.execute(statement)).all()
+        return LedgerAdjustmentListPage(
+            items=[
+                LedgerAdjustmentRecord(
+                    adjustment=row[0],
+                    staff_username=row[1] or "Deleted Staff",
+                    staff_color=row[2] or "#64748B",
+                    created_by_admin_username=row[3],
+                )
+                for row in rows[:limit]
+            ],
+            has_more=len(rows) > limit,
+        )
+
+    async def claim_settlement(
+        self,
+        settlement_id: int,
+        actor: User,
+    ) -> StaffSettlement:
+        self._require_admin(actor)
+        async with self._session.begin():
+            settlement = await self._get_settlement_for_update(settlement_id)
+            if settlement.status != StaffSettlementStatus.PENDING:
+                raise LedgerStateConflictError("Only pending settlements can be claimed.")
+            previous_status = settlement.status
+            settlement.status = StaffSettlementStatus.CLAIMED
+            settlement.claimed_by_admin_id = actor.id
+            settlement.claimed_at = datetime.now(UTC)
+            await self._add_audit(
+                settlement,
+                actor=actor,
+                action=StaffSettlementAuditAction.CLAIMED,
+                previous_status=previous_status,
+                metadata=None,
+            )
+            await self._session.refresh(settlement)
+        await event_broker.publish(LiveEventType.LEDGER_CHANGED)
+        return settlement
+
+    async def complete_settlement(
+        self,
+        settlement_id: int,
+        actor: User,
+    ) -> StaffSettlement:
+        self._require_admin(actor)
+        async with self._session.begin():
+            settlement = await self._get_settlement_for_update(settlement_id)
+            if settlement.status not in (
+                StaffSettlementStatus.PENDING,
+                StaffSettlementStatus.CLAIMED,
+            ):
+                raise LedgerStateConflictError(
+                    "Only pending or claimed settlements can be completed."
+                )
+            previous_status = settlement.status
+            settlement.status = StaffSettlementStatus.DONE
+            settlement.completed_by_admin_id = actor.id
+            settlement.completed_at = datetime.now(UTC)
+            await self._add_audit(
+                settlement,
+                actor=actor,
+                action=StaffSettlementAuditAction.DONE,
+                previous_status=previous_status,
+                metadata=None,
+            )
+            await self._session.refresh(settlement)
+        await event_broker.publish(
+            LiveEventType.SETTLEMENT_DONE,
+            settlement_id=settlement.id,
+        )
+        await event_broker.publish(LiveEventType.LEDGER_CHANGED)
+        return settlement
+
+    async def cancel_settlement(
+        self,
+        settlement_id: int,
+        actor: User,
+    ) -> StaffSettlement:
+        self._require_admin(actor)
+        async with self._session.begin():
+            settlement = await self._get_settlement_for_update(settlement_id)
+            if settlement.status not in (
+                StaffSettlementStatus.PENDING,
+                StaffSettlementStatus.CLAIMED,
+            ):
+                raise LedgerStateConflictError(
+                    "Only pending or claimed settlements can be cancelled."
+                )
+            previous_status = settlement.status
+            settlement.status = StaffSettlementStatus.CANCELLED
+            await self._add_audit(
+                settlement,
+                actor=actor,
+                action=StaffSettlementAuditAction.CANCELLED,
+                previous_status=previous_status,
+                metadata=None,
+            )
+            await self._session.refresh(settlement)
+        await event_broker.publish(LiveEventType.LEDGER_CHANGED)
+        return settlement
+
+    async def list_settlements(
+        self,
+        *,
+        staff_id: int | None,
+        status: StaffSettlementStatus | None,
+        date_from: date | None,
+        date_to: date | None,
+        include_deleted: bool,
+        limit: int,
+        offset: int,
+        actor: User,
+    ) -> SettlementListPage:
+        self._require_admin(actor)
+        date_range = self._date_range(date_from, date_to)
+        staff = aliased(User, name="settlement_staff")
+        creator = aliased(User, name="settlement_creator")
+        claimer = aliased(User, name="settlement_claimer")
+        completer = aliased(User, name="settlement_completer")
+        conditions = []
+        if staff_id is not None:
+            conditions.append(StaffSettlement.staff_id == staff_id)
+        elif not include_deleted:
+            conditions.append(StaffSettlement.staff_id.is_not(None))
+        if status is not None:
+            conditions.append(StaffSettlement.status == status)
+        if date_range.start is not None:
+            conditions.append(StaffSettlement.completed_at >= date_range.start)
+        if date_range.end_exclusive is not None:
+            conditions.append(StaffSettlement.completed_at < date_range.end_exclusive)
+        statement = (
+            select(
+                StaffSettlement,
+                staff.username,
+                staff.staff_color,
+                creator.username,
+                claimer.username,
+                completer.username,
+            )
+            .outerjoin(staff, StaffSettlement.staff_id == staff.id)
+            .join(creator, StaffSettlement.created_by_admin_id == creator.id)
+            .outerjoin(claimer, StaffSettlement.claimed_by_admin_id == claimer.id)
+            .outerjoin(completer, StaffSettlement.completed_by_admin_id == completer.id)
+            .where(*conditions)
+            .order_by(StaffSettlement.created_at.desc(), StaffSettlement.id.desc())
+            .limit(limit + 1)
+            .offset(offset)
+        )
+        rows = (await self._session.execute(statement)).all()
+        transaction_ids = await self._settlement_transaction_ids(
+            [int(row[0].id) for row in rows[:limit]]
+        )
+        return SettlementListPage(
+            items=[
+                SettlementRecord(
+                    settlement=row[0],
+                    staff_username=row[1] or "Deleted Staff",
+                    staff_color=row[2] or "#64748B",
+                    created_by_admin_username=row[3],
+                    claimed_by_admin_username=row[4],
+                    completed_by_admin_username=row[5],
+                    payment_ids=transaction_ids[int(row[0].id)][0],
+                    cashout_ids=transaction_ids[int(row[0].id)][1],
+                    adjustment_ids=transaction_ids[int(row[0].id)][2],
+                )
+                for row in rows[:limit]
+            ],
+            has_more=len(rows) > limit,
+        )
+
+    async def get_settlement_record(
+        self,
+        settlement_id: int,
+        actor: User,
+    ) -> SettlementRecord:
+        self._require_admin(actor)
+        staff = aliased(User, name="settlement_staff")
+        creator = aliased(User, name="settlement_creator")
+        claimer = aliased(User, name="settlement_claimer")
+        completer = aliased(User, name="settlement_completer")
+        row = (
+            await self._session.execute(
+                select(
+                    StaffSettlement,
+                    staff.username,
+                    staff.staff_color,
+                    creator.username,
+                    claimer.username,
+                    completer.username,
+                )
+                .outerjoin(staff, StaffSettlement.staff_id == staff.id)
+                .join(creator, StaffSettlement.created_by_admin_id == creator.id)
+                .outerjoin(claimer, StaffSettlement.claimed_by_admin_id == claimer.id)
+                .outerjoin(
+                    completer,
+                    StaffSettlement.completed_by_admin_id == completer.id,
+                )
+                .where(StaffSettlement.id == settlement_id)
+            )
+        ).one_or_none()
+        if row is None:
+            raise SettlementNotFoundError(f"Settlement {settlement_id} was not found")
+        transaction_ids = await self._settlement_transaction_ids([settlement_id])
+        return SettlementRecord(
+            settlement=row[0],
+            staff_username=row[1] or "Deleted Staff",
+            staff_color=row[2] or "#64748B",
+            created_by_admin_username=row[3],
+            claimed_by_admin_username=row[4],
+            completed_by_admin_username=row[5],
+            payment_ids=transaction_ids[settlement_id][0],
+            cashout_ids=transaction_ids[settlement_id][1],
+            adjustment_ids=transaction_ids[settlement_id][2],
+        )
+
+    async def _ledger_report(self, date_range: LedgerDateRange) -> LedgerReport:
+        staff_rows = (
+            await self._session.execute(
+                select(User.id, User.username, User.staff_color)
+                .where(User.role == UserRole.STAFF, User.is_active.is_(True))
+                .order_by(User.username.asc())
+            )
+        ).all()
+        payment_totals = await self._payment_totals(date_range)
+        adjustment_totals = await self._adjustment_totals(date_range)
+        cashout_totals = await self._cashout_totals(date_range)
+        settlement_counts = await self._settlement_counts(date_range)
+        items: list[LedgerItem] = []
+        for staff_id, username, color in staff_rows:
+            total_in, payments_count = payment_totals.get(staff_id, (ZERO, 0))
+            total_in += adjustment_totals.get(staff_id, ZERO)
+            total_out, cashouts_count = cashout_totals.get(staff_id, (ZERO, 0))
+            settlements_count = settlement_counts.get(staff_id, 0)
+            items.append(
+                LedgerItem(
+                    staff_id=staff_id,
+                    staff_username=username,
+                    staff_color=color,
+                    total_in=total_in,
+                    total_out=total_out,
+                    settled_amount=ZERO,
+                    net=total_in - total_out,
+                    payments_count=payments_count,
+                    cashouts_count=cashouts_count,
+                    settlements_count=settlements_count,
+                )
+            )
+        return LedgerReport(
+            items=items,
+            summary=LedgerSummary(
+                total_in=sum((item.total_in for item in items), ZERO),
+                total_out=sum((item.total_out for item in items), ZERO),
+                settled_amount=sum((item.settled_amount for item in items), ZERO),
+                net=sum((item.net for item in items), ZERO),
+            ),
+        )
+
+    async def _ledger_item_for_staff(
+        self,
+        staff: User,
+        date_range: LedgerDateRange,
+    ) -> LedgerItem:
+        payment_totals = await self._payment_totals(date_range, staff.id)
+        adjustment_totals = await self._adjustment_totals(date_range, staff.id)
+        cashout_totals = await self._cashout_totals(date_range, staff.id)
+        settlement_counts = await self._settlement_counts(date_range, staff.id)
+        total_in, payments_count = payment_totals.get(staff.id, (ZERO, 0))
+        total_in += adjustment_totals.get(staff.id, ZERO)
+        total_out, cashouts_count = cashout_totals.get(staff.id, (ZERO, 0))
+        settlements_count = settlement_counts.get(staff.id, 0)
+        return LedgerItem(
+            staff_id=staff.id,
+            staff_username=staff.username,
+            staff_color=staff.staff_color,
+            total_in=total_in,
+            total_out=total_out,
+            settled_amount=ZERO,
+            net=total_in - total_out,
+            payments_count=payments_count,
+            cashouts_count=cashouts_count,
+            settlements_count=settlements_count,
+        )
+
+    async def _payment_totals(
+        self,
+        date_range: LedgerDateRange,
+        staff_id: int | None = None,
+    ) -> dict[int, tuple[Decimal, int]]:
+        conditions = [
+            PaymentEvent.status == PaymentStatus.DONE,
+            PaymentEvent.completed_by_staff_id.is_not(None),
+            PaymentEvent.settlement_id.is_(None),
+        ]
+        if staff_id is not None:
+            conditions.append(PaymentEvent.completed_by_staff_id == staff_id)
+        self._apply_completed_at_filter(conditions, PaymentEvent.completed_at, date_range)
+        statement = (
+            select(
+                PaymentEvent.completed_by_staff_id,
+                func.coalesce(func.sum(PaymentEvent.amount), ZERO),
+                func.count(PaymentEvent.id),
+            )
+            .where(*conditions)
+            .group_by(PaymentEvent.completed_by_staff_id)
+        )
+        return {
+            int(row[0]): (self._money(row[1]), int(row[2]))
+            for row in (await self._session.execute(statement)).all()
+            if row[0] is not None
+        }
+
+    async def _cashout_totals(
+        self,
+        date_range: LedgerDateRange,
+        staff_id: int | None = None,
+    ) -> dict[int, tuple[Decimal, int]]:
+        conditions = [
+            CashoutRequest.status == CashoutStatus.COMPLETED,
+            CashoutRequest.settlement_id.is_(None),
+        ]
+        if staff_id is not None:
+            conditions.append(CashoutRequest.created_by_staff_id == staff_id)
+        self._apply_completed_at_filter(conditions, CashoutRequest.completed_at, date_range)
+        statement = (
+            select(
+                CashoutRequest.created_by_staff_id,
+                func.coalesce(func.sum(CashoutRequest.amount), ZERO),
+                func.count(CashoutRequest.id),
+            )
+            .where(*conditions)
+            .group_by(CashoutRequest.created_by_staff_id)
+        )
+        return {
+            int(row[0]): (self._money(row[1]), int(row[2]))
+            for row in (await self._session.execute(statement)).all()
+            if row[0] is not None
+        }
+
+    async def _adjustment_totals(
+        self,
+        date_range: LedgerDateRange,
+        staff_id: int | None = None,
+    ) -> dict[int, Decimal]:
+        conditions = [
+            LedgerAdjustment.type == LedgerAdjustmentType.TOTAL_IN_ADJUSTMENT,
+            LedgerAdjustment.staff_id.is_not(None),
+            LedgerAdjustment.settlement_id.is_(None),
+        ]
+        if staff_id is not None:
+            conditions.append(LedgerAdjustment.staff_id == staff_id)
+        self._apply_completed_at_filter(conditions, LedgerAdjustment.created_at, date_range)
+        statement = (
+            select(
+                LedgerAdjustment.staff_id,
+                func.coalesce(func.sum(LedgerAdjustment.amount_delta), ZERO),
+            )
+            .where(*conditions)
+            .group_by(LedgerAdjustment.staff_id)
+        )
+        return {
+            int(row[0]): self._money(row[1])
+            for row in (await self._session.execute(statement)).all()
+            if row[0] is not None
+        }
+
+    async def _settlement_counts(
+        self,
+        date_range: LedgerDateRange,
+        staff_id: int | None = None,
+    ) -> dict[int, int]:
+        conditions = [StaffSettlement.status == StaffSettlementStatus.DONE]
+        if staff_id is not None:
+            conditions.append(StaffSettlement.staff_id == staff_id)
+        self._apply_completed_at_filter(conditions, StaffSettlement.completed_at, date_range)
+        statement = (
+            select(
+                StaffSettlement.staff_id,
+                func.count(StaffSettlement.id),
+            )
+            .where(*conditions)
+            .group_by(StaffSettlement.staff_id)
+        )
+        return {
+            int(row[0]): int(row[1])
+            for row in (await self._session.execute(statement)).all()
+            if row[0] is not None
+        }
+
+    async def _unsettled_payment_ids_for_staff(
+        self,
+        staff_id: int,
+        date_range: LedgerDateRange,
+    ) -> list[int]:
+        conditions = [
+            PaymentEvent.status == PaymentStatus.DONE,
+            PaymentEvent.completed_by_staff_id == staff_id,
+            PaymentEvent.settlement_id.is_(None),
+        ]
+        self._apply_completed_at_filter(conditions, PaymentEvent.completed_at, date_range)
+        statement = (
+            select(PaymentEvent.id)
+            .where(*conditions)
+            .order_by(PaymentEvent.completed_at.asc(), PaymentEvent.id.asc())
+            .with_for_update()
+        )
+        return [int(row) for row in await self._session.scalars(statement)]
+
+    async def _unsettled_cashout_ids_for_staff(
+        self,
+        staff_id: int,
+        date_range: LedgerDateRange,
+    ) -> list[int]:
+        conditions = [
+            CashoutRequest.status == CashoutStatus.COMPLETED,
+            CashoutRequest.created_by_staff_id == staff_id,
+            CashoutRequest.settlement_id.is_(None),
+        ]
+        self._apply_completed_at_filter(conditions, CashoutRequest.completed_at, date_range)
+        statement = (
+            select(CashoutRequest.id)
+            .where(*conditions)
+            .order_by(CashoutRequest.completed_at.asc(), CashoutRequest.id.asc())
+            .with_for_update()
+        )
+        return [int(row) for row in await self._session.scalars(statement)]
+
+    async def _unsettled_adjustment_ids_for_staff(
+        self,
+        staff_id: int,
+        date_range: LedgerDateRange,
+    ) -> list[int]:
+        conditions = [
+            LedgerAdjustment.type == LedgerAdjustmentType.TOTAL_IN_ADJUSTMENT,
+            LedgerAdjustment.staff_id == staff_id,
+            LedgerAdjustment.settlement_id.is_(None),
+        ]
+        self._apply_completed_at_filter(conditions, LedgerAdjustment.created_at, date_range)
+        statement = (
+            select(LedgerAdjustment.id)
+            .where(*conditions)
+            .order_by(LedgerAdjustment.created_at.asc(), LedgerAdjustment.id.asc())
+            .with_for_update()
+        )
+        return [int(row) for row in await self._session.scalars(statement)]
+
+    async def _settlement_transaction_ids(
+        self,
+        settlement_ids: list[int],
+    ) -> dict[int, tuple[list[int], list[int], list[int]]]:
+        transaction_ids: dict[int, tuple[list[int], list[int], list[int]]] = {
+            settlement_id: ([], [], []) for settlement_id in settlement_ids
+        }
+        if not settlement_ids:
+            return transaction_ids
+        payment_rows = (
+            await self._session.execute(
+                select(PaymentEvent.settlement_id, PaymentEvent.id)
+                .where(PaymentEvent.settlement_id.in_(settlement_ids))
+                .order_by(PaymentEvent.id.asc())
+            )
+        ).all()
+        for settlement_id, payment_id in payment_rows:
+            if settlement_id is not None:
+                transaction_ids[int(settlement_id)][0].append(int(payment_id))
+        cashout_rows = (
+            await self._session.execute(
+                select(CashoutRequest.settlement_id, CashoutRequest.id)
+                .where(CashoutRequest.settlement_id.in_(settlement_ids))
+                .order_by(CashoutRequest.id.asc())
+            )
+        ).all()
+        for settlement_id, cashout_id in cashout_rows:
+            if settlement_id is not None:
+                transaction_ids[int(settlement_id)][1].append(int(cashout_id))
+        adjustment_rows = (
+            await self._session.execute(
+                select(LedgerAdjustment.settlement_id, LedgerAdjustment.id)
+                .where(LedgerAdjustment.settlement_id.in_(settlement_ids))
+                .order_by(LedgerAdjustment.id.asc())
+            )
+        ).all()
+        for settlement_id, adjustment_id in adjustment_rows:
+            if settlement_id is not None:
+                transaction_ids[int(settlement_id)][2].append(int(adjustment_id))
+        return transaction_ids
+
+    async def _get_staff_for_update(self, staff_id: int) -> User:
+        staff = (
+            await self._session.execute(
+                select(User)
+                .where(User.id == staff_id, User.role == UserRole.STAFF)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if staff is None:
+            raise StaffNotFoundError(f"Staff user {staff_id} was not found")
+        return staff
+
+    async def _get_settlement_for_update(self, settlement_id: int) -> StaffSettlement:
+        settlement = (
+            await self._session.execute(
+                select(StaffSettlement).where(StaffSettlement.id == settlement_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if settlement is None:
+            raise SettlementNotFoundError(f"Settlement {settlement_id} was not found")
+        return settlement
+
+    async def _add_audit(
+        self,
+        settlement: StaffSettlement,
+        *,
+        actor: User,
+        action: StaffSettlementAuditAction,
+        previous_status: StaffSettlementStatus | None,
+        metadata: dict[str, object] | None,
+    ) -> None:
+        self._session.add(
+            StaffSettlementAuditLog(
+                settlement_id=settlement.id,
+                actor_user_id=actor.id,
+                action=action,
+                previous_status=previous_status,
+                new_status=settlement.status,
+                metadata_json=metadata,
+            )
+        )
+        await self._session.flush()
+
+    @staticmethod
+    def _date_range(date_from: date | None, date_to: date | None) -> LedgerDateRange:
+        if date_from is not None and date_to is not None and date_from > date_to:
+            raise LedgerStateConflictError("date_from must not be after date_to")
+        start = datetime.combine(date_from, time.min, tzinfo=UTC) if date_from is not None else None
+        end_exclusive = (
+            datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=UTC)
+            if date_to is not None
+            else None
+        )
+        return LedgerDateRange(start=start, end_exclusive=end_exclusive)
+
+    @staticmethod
+    def _apply_completed_at_filter(
+        conditions: list[Any],
+        column: Any,
+        date_range: LedgerDateRange,
+    ) -> None:
+        if date_range.start is not None:
+            conditions.append(column >= date_range.start)
+        if date_range.end_exclusive is not None:
+            conditions.append(column < date_range.end_exclusive)
+
+    @staticmethod
+    def _money(value: object) -> Decimal:
+        if isinstance(value, Decimal):
+            return value.quantize(Decimal("0.01"))
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+
+    @staticmethod
+    def _require_admin(actor: User) -> None:
+        if actor.role != UserRole.ADMIN:
+            raise LedgerAuthorizationError("Administrator access is required.")
