@@ -4,13 +4,16 @@ import importlib.util
 import types
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
 import sqlalchemy as sa
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 
 from app.auth.security import hash_password, verify_password
+from app.db import coadmin_backfill as backfill_module
 from app.db.base import Base
 from app.models.user import UserRole
 
@@ -95,6 +98,7 @@ def test_migration_module_defines_default_coadmin_backfill() -> None:
     backfill_source = COADMIN_BACKFILL_PATH.read_text(encoding="utf-8")
     assert 'DEFAULT_COADMIN_USERNAME = "default_coadmin"' in backfill_source
     assert "ck_users_staff_requires_coadmin_id" in backfill_source
+    assert "ck_users_ck_users_staff_requires_coadmin_id" in backfill_source
     assert "role != 'staff' OR coadmin_id IS NOT NULL" in backfill_source
     assert "assign_orphan_staff" in backfill_source
     assert "run_coadmin_backfill" in migration_source
@@ -184,3 +188,60 @@ def test_migration_reuses_existing_coadmin_without_creating_default() -> None:
     assert coadmin_count == 1
     assert target_id == 10
     assert staff.coadmin_id == 10
+
+
+def test_run_coadmin_backfill_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _sync_engine()
+    with engine.begin() as connection:
+        Base.metadata.create_all(bind=connection)
+        _seed_legacy_staff(connection)
+
+    connection = engine.connect()
+    try:
+        monkeypatch.setattr(
+            backfill_module,
+            "add_staff_coadmin_required_constraint",
+            lambda: None,
+        )
+        with patch.object(backfill_module.op, "get_bind", return_value=connection):
+            backfill_module.run_coadmin_backfill()
+            backfill_module.run_coadmin_backfill()
+
+        staff = connection.execute(
+            sa.text("SELECT coadmin_id FROM users WHERE username = 'legacy_staff'")
+        ).one()
+        coadmin_count = connection.execute(
+            sa.text("SELECT COUNT(*) FROM users WHERE role = 'coadmin'")
+        ).scalar_one()
+        assert staff.coadmin_id is not None
+        assert coadmin_count == 1
+    finally:
+        connection.close()
+
+
+def test_migration_15_skips_constraint_when_legacy_name_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _sync_engine()
+    with engine.begin() as connection:
+        Base.metadata.create_all(bind=connection)
+        _seed_legacy_staff(connection)
+
+    connection = engine.connect()
+    legacy_name = backfill_module.LEGACY_STAFF_REQUIRES_COADMIN_CONSTRAINT
+
+    def fake_existing(_connection: sa.Connection) -> set[str]:
+        return {legacy_name}
+
+    monkeypatch.setattr(
+        backfill_module,
+        "existing_staff_coadmin_constraints",
+        fake_existing,
+    )
+
+    try:
+        with patch.object(backfill_module.op, "get_bind", return_value=connection):
+            backfill_module.add_staff_coadmin_required_constraint()
+            backfill_module.add_staff_coadmin_required_constraint()
+    finally:
+        connection.close()

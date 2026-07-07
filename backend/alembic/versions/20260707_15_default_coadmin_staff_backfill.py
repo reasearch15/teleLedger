@@ -12,10 +12,13 @@ from collections.abc import Sequence
 from app.db.coadmin_backfill import (  # noqa: F401
     DEFAULT_COADMIN_PASSWORD,
     DEFAULT_COADMIN_USERNAME,
+    LEGACY_STAFF_REQUIRES_COADMIN_CONSTRAINT,
     STAFF_REQUIRES_COADMIN_CONSTRAINT,
     add_staff_coadmin_required_constraint,
     assign_orphan_staff,
     ensure_coadmin_target,
+    run_coadmin_backfill,
+    staff_coadmin_required_constraint_present,
 )
 
 revision: str = "20260707_15"
