@@ -116,8 +116,8 @@ export function Panel({
   children: React.ReactNode;
 }) {
   return (
-    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-lg shadow-slate-200/60 ring-1 ring-white">
-      <div className="flex flex-col gap-3 border-b border-slate-200 bg-slate-100 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
+    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl shadow-slate-200/70 ring-1 ring-slate-100">
+      <div className="flex flex-col gap-3 border-b border-slate-200 bg-slate-50 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-base font-black text-slate-950">{title}</h2>
           <p className="mt-1 text-sm leading-6 text-slate-600">{description}</p>
