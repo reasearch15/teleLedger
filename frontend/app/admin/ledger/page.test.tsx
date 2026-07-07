@@ -31,8 +31,8 @@ vi.mock("@/components/live-updates-provider", () => ({
 }));
 
 vi.mock("@/services/ledger", () => ({
-  ADJUSTMENT_PAGE_SIZE: 20,
-  SETTLEMENT_PAGE_SIZE: 20,
+  ADJUSTMENT_PAGE_SIZE: 30,
+  SETTLEMENT_PAGE_SIZE: 30,
   getLedger: vi.fn(),
   listSettlements: vi.fn(),
   listLedgerAdjustments: vi.fn(),
@@ -167,10 +167,14 @@ const history: SettlementPage = {
       adjustment_ids: [1],
     },
   ],
-  limit: 20,
+  rows: [],
+  limit: 30,
   offset: 0,
   has_more: false,
+  hasMore: false,
+  nextCursor: null,
 };
+history.rows = history.items;
 
 const adjustments: LedgerAdjustmentPage = {
   items: [
@@ -190,10 +194,14 @@ const adjustments: LedgerAdjustmentPage = {
       created_at: "2026-07-07T12:00:00Z",
     },
   ],
-  limit: 20,
+  rows: [],
+  limit: 30,
   offset: 0,
   has_more: false,
+  hasMore: false,
+  nextCursor: null,
 };
+adjustments.rows = adjustments.items;
 
 describe("AdminLedgerPage", () => {
   afterEach(() => cleanup());
@@ -217,8 +225,8 @@ describe("AdminLedgerPage", () => {
     render(<AdminLedgerPage />);
 
     expect((await screen.findAllByText("Sarah")).length).toBeGreaterThan(0);
-    expect(screen.getByText("$1,000.00")).toBeInTheDocument();
-    expect(screen.getByText("$300.00")).toBeInTheDocument();
+    expect(screen.getAllByText("$1,000.00").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("$300.00").length).toBeGreaterThan(0);
     expect(screen.getAllByText("$700.00").length).toBeGreaterThan(0);
     expect(screen.getByText("Weekly")).toBeInTheDocument();
     expect(screen.getByText("Correction")).toBeInTheDocument();

@@ -52,6 +52,12 @@ class LedgerDateRange:
 
 
 @dataclass(frozen=True, slots=True)
+class LedgerHistoryCursor:
+    created_at: datetime
+    row_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class LedgerItem:
     staff_id: int
     staff_username: str
@@ -122,12 +128,14 @@ class LedgerAdjustmentRecord:
 class LedgerAdjustmentListPage:
     items: list[LedgerAdjustmentRecord]
     has_more: bool
+    next_cursor: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class SettlementListPage:
     items: list[SettlementRecord]
     has_more: bool
+    next_cursor: str | None
 
 
 class LedgerService(ApplicationService):
@@ -419,15 +427,18 @@ class LedgerService(ApplicationService):
         self,
         *,
         staff_id: int | None,
+        coadmin_id: int | None,
         date_from: date | None,
         date_to: date | None,
         include_deleted: bool,
         limit: int,
         offset: int,
+        cursor: str | None,
         actor: User,
     ) -> LedgerAdjustmentListPage:
         self._require_admin(actor)
         date_range = self._date_range(date_from, date_to)
+        history_cursor = self._parse_history_cursor(cursor)
         staff = aliased(User, name="adjustment_staff")
         creator = aliased(User, name="adjustment_creator")
         conditions = []
@@ -435,10 +446,22 @@ class LedgerService(ApplicationService):
             conditions.append(LedgerAdjustment.staff_id == staff_id)
         elif not include_deleted:
             conditions.append(LedgerAdjustment.staff_id.is_not(None))
+        if coadmin_id is not None:
+            conditions.append(staff.coadmin_id == coadmin_id)
         if date_range.start is not None:
             conditions.append(LedgerAdjustment.created_at >= date_range.start)
         if date_range.end_exclusive is not None:
             conditions.append(LedgerAdjustment.created_at < date_range.end_exclusive)
+        if history_cursor is not None:
+            conditions.append(
+                or_(
+                    LedgerAdjustment.created_at < history_cursor.created_at,
+                    (
+                        (LedgerAdjustment.created_at == history_cursor.created_at)
+                        & (LedgerAdjustment.id < history_cursor.row_id)
+                    ),
+                )
+            )
         statement = (
             select(
                 LedgerAdjustment,
@@ -451,20 +474,28 @@ class LedgerService(ApplicationService):
             .where(*conditions)
             .order_by(LedgerAdjustment.created_at.desc(), LedgerAdjustment.id.desc())
             .limit(limit + 1)
-            .offset(offset)
         )
+        if history_cursor is None and offset:
+            statement = statement.offset(offset)
         rows = (await self._session.execute(statement)).all()
+        items = [
+            LedgerAdjustmentRecord(
+                adjustment=row[0],
+                staff_username=row[1] or "Deleted Staff",
+                staff_color=row[2] or "#64748B",
+                created_by_admin_username=row[3],
+            )
+            for row in rows[:limit]
+        ]
         return LedgerAdjustmentListPage(
-            items=[
-                LedgerAdjustmentRecord(
-                    adjustment=row[0],
-                    staff_username=row[1] or "Deleted Staff",
-                    staff_color=row[2] or "#64748B",
-                    created_by_admin_username=row[3],
-                )
-                for row in rows[:limit]
-            ],
+            items=items,
             has_more=len(rows) > limit,
+            next_cursor=self._next_history_cursor(
+                items[-1].adjustment.created_at,
+                int(items[-1].adjustment.id),
+            )
+            if len(rows) > limit and items
+            else None,
         )
 
     async def claim_settlement(
@@ -558,16 +589,19 @@ class LedgerService(ApplicationService):
         self,
         *,
         staff_id: int | None,
+        coadmin_id: int | None,
         status: StaffSettlementStatus | None,
         date_from: date | None,
         date_to: date | None,
         include_deleted: bool,
         limit: int,
         offset: int,
+        cursor: str | None,
         actor: User,
     ) -> SettlementListPage:
         self._require_admin(actor)
         date_range = self._date_range(date_from, date_to)
+        history_cursor = self._parse_history_cursor(cursor)
         staff = aliased(User, name="settlement_staff")
         coadmin = aliased(User, name="settlement_coadmin")
         creator = aliased(User, name="settlement_creator")
@@ -585,10 +619,27 @@ class LedgerService(ApplicationService):
             )
         if status is not None:
             conditions.append(StaffSettlement.status == status)
+        if coadmin_id is not None:
+            conditions.append(
+                or_(
+                    StaffSettlement.coadmin_id == coadmin_id,
+                    staff.coadmin_id == coadmin_id,
+                )
+            )
         if date_range.start is not None:
             conditions.append(StaffSettlement.completed_at >= date_range.start)
         if date_range.end_exclusive is not None:
             conditions.append(StaffSettlement.completed_at < date_range.end_exclusive)
+        if history_cursor is not None:
+            conditions.append(
+                or_(
+                    StaffSettlement.created_at < history_cursor.created_at,
+                    (
+                        (StaffSettlement.created_at == history_cursor.created_at)
+                        & (StaffSettlement.id < history_cursor.row_id)
+                    ),
+                )
+            )
         statement = (
             select(
                 StaffSettlement,
@@ -607,29 +658,37 @@ class LedgerService(ApplicationService):
             .where(*conditions)
             .order_by(StaffSettlement.created_at.desc(), StaffSettlement.id.desc())
             .limit(limit + 1)
-            .offset(offset)
         )
+        if history_cursor is None and offset:
+            statement = statement.offset(offset)
         rows = (await self._session.execute(statement)).all()
         transaction_ids = await self._settlement_transaction_ids(
             [int(row[0].id) for row in rows[:limit]]
         )
+        items = [
+            SettlementRecord(
+                settlement=row[0],
+                staff_username=row[1] or "Deleted Staff",
+                staff_color=row[2] or "#64748B",
+                coadmin_username=row[3],
+                created_by_admin_username=row[4],
+                claimed_by_admin_username=row[5],
+                completed_by_admin_username=row[6],
+                payment_ids=transaction_ids[int(row[0].id)][0],
+                cashout_ids=transaction_ids[int(row[0].id)][1],
+                adjustment_ids=transaction_ids[int(row[0].id)][2],
+            )
+            for row in rows[:limit]
+        ]
         return SettlementListPage(
-            items=[
-                SettlementRecord(
-                    settlement=row[0],
-                    staff_username=row[1] or "Deleted Staff",
-                    staff_color=row[2] or "#64748B",
-                    coadmin_username=row[3],
-                    created_by_admin_username=row[4],
-                    claimed_by_admin_username=row[5],
-                    completed_by_admin_username=row[6],
-                    payment_ids=transaction_ids[int(row[0].id)][0],
-                    cashout_ids=transaction_ids[int(row[0].id)][1],
-                    adjustment_ids=transaction_ids[int(row[0].id)][2],
-                )
-                for row in rows[:limit]
-            ],
+            items=items,
             has_more=len(rows) > limit,
+            next_cursor=self._next_history_cursor(
+                items[-1].settlement.created_at,
+                int(items[-1].settlement.id),
+            )
+            if len(rows) > limit and items
+            else None,
         )
 
     async def get_settlement_record(
@@ -1119,6 +1178,25 @@ class LedgerService(ApplicationService):
             else None
         )
         return LedgerDateRange(start=start, end_exclusive=end_exclusive)
+
+    @staticmethod
+    def _parse_history_cursor(cursor: str | None) -> LedgerHistoryCursor | None:
+        if not cursor:
+            return None
+        try:
+            raw_created_at, raw_row_id = cursor.split("|", 1)
+            created_at = datetime.fromisoformat(raw_created_at)
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            return LedgerHistoryCursor(created_at=created_at, row_id=int(raw_row_id))
+        except (TypeError, ValueError) as error:
+            raise LedgerStateConflictError("Invalid cursor.") from error
+
+    @staticmethod
+    def _next_history_cursor(created_at: datetime, row_id: int) -> str:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        return f"{created_at.isoformat()}|{row_id}"
 
     @staticmethod
     def _apply_completed_at_filter(

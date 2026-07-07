@@ -8,8 +8,8 @@ import type {
   SettlementStatus,
 } from "@/types/api";
 
-export const SETTLEMENT_PAGE_SIZE = 20;
-export const ADJUSTMENT_PAGE_SIZE = 20;
+export const SETTLEMENT_PAGE_SIZE = 30;
+export const ADJUSTMENT_PAGE_SIZE = 30;
 
 type DateFilters = {
   dateFrom?: string;
@@ -18,22 +18,34 @@ type DateFilters = {
 
 type SettlementFilters = DateFilters & {
   staffId?: number;
+  coadminId?: number;
   status?: SettlementStatus | "";
   includeDeleted?: boolean;
   limit?: number;
   offset?: number;
+  cursor?: string | null;
 };
 
 type AdjustmentFilters = DateFilters & {
   staffId?: number;
+  coadminId?: number;
   includeDeleted?: boolean;
   limit?: number;
   offset?: number;
+  cursor?: string | null;
 };
 
 function appendDateFilters(query: URLSearchParams, filters: DateFilters): void {
   if (filters.dateFrom) query.set("date_from", filters.dateFrom);
   if (filters.dateTo) query.set("date_to", filters.dateTo);
+}
+
+function appendHistoryDateFilters(
+  query: URLSearchParams,
+  filters: DateFilters,
+): void {
+  if (filters.dateFrom) query.set("from", filters.dateFrom);
+  if (filters.dateTo) query.set("to", filters.dateTo);
 }
 
 export function getLedger(filters: DateFilters = {}): Promise<LedgerResponse> {
@@ -92,11 +104,13 @@ export function listLedgerAdjustments(
   filters: AdjustmentFilters = {},
 ): Promise<LedgerAdjustmentPage> {
   const query = new URLSearchParams();
-  appendDateFilters(query, filters);
+  appendHistoryDateFilters(query, filters);
   if (filters.staffId) query.set("staff_id", String(filters.staffId));
+  if (filters.coadminId) query.set("coadminId", String(filters.coadminId));
   if (filters.includeDeleted) query.set("include_deleted", "true");
   query.set("limit", String(filters.limit ?? ADJUSTMENT_PAGE_SIZE));
-  query.set("offset", String(filters.offset ?? 0));
+  if (filters.cursor) query.set("cursor", filters.cursor);
+  else query.set("offset", String(filters.offset ?? 0));
   return apiRequest<LedgerAdjustmentPage>(
     `/api/admin/ledger/adjustments?${query.toString()}`,
   );
@@ -106,12 +120,14 @@ export function listSettlements(
   filters: SettlementFilters = {},
 ): Promise<SettlementPage> {
   const query = new URLSearchParams();
-  appendDateFilters(query, filters);
+  appendHistoryDateFilters(query, filters);
   if (filters.staffId) query.set("staff_id", String(filters.staffId));
+  if (filters.coadminId) query.set("coadminId", String(filters.coadminId));
   if (filters.status) query.set("status", filters.status);
   if (filters.includeDeleted) query.set("include_deleted", "true");
   query.set("limit", String(filters.limit ?? SETTLEMENT_PAGE_SIZE));
-  query.set("offset", String(filters.offset ?? 0));
+  if (filters.cursor) query.set("cursor", filters.cursor);
+  else query.set("offset", String(filters.offset ?? 0));
   return apiRequest<SettlementPage>(`/api/admin/settlements?${query.toString()}`);
 }
 

@@ -215,9 +215,12 @@ export type LedgerAdjustment = {
 
 export type LedgerAdjustmentPage = {
   items: LedgerAdjustment[];
+  rows: LedgerAdjustment[];
   limit: number;
   offset: number;
   has_more: boolean;
+  hasMore: boolean;
+  nextCursor: string | null;
 };
 
 export type SettlementStatus = "pending" | "claimed" | "done" | "cancelled";
@@ -250,7 +253,10 @@ export type Settlement = {
 
 export type SettlementPage = {
   items: Settlement[];
+  rows: Settlement[];
   limit: number;
   offset: number;
   has_more: boolean;
+  hasMore: boolean;
+  nextCursor: string | null;
 };

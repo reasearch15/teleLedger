@@ -133,11 +133,13 @@ async def create_total_in_adjustment(
         )
         page = await service.list_adjustments(
             staff_id=staff_id,
+            coadmin_id=None,
             date_from=None,
             date_to=None,
             include_deleted=False,
             limit=1,
             offset=0,
+            cursor=None,
             actor=current_user,
         )
     except Exception as error:
@@ -156,21 +158,27 @@ async def list_ledger_adjustments(
     session: DatabaseSession,
     current_user: CurrentUser,
     staff_id: Annotated[int | None, Query(gt=0)] = None,
+    coadmin_id: Annotated[int | None, Query(gt=0, alias="coadminId")] = None,
+    from_date: Annotated[date | None, Query(alias="from")] = None,
+    to_date: Annotated[date | None, Query(alias="to")] = None,
     date_from: date | None = None,
     date_to: date | None = None,
     include_deleted: bool = False,
-    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    limit: Annotated[int, Query(ge=1, le=50)] = 30,
     offset: Annotated[int, Query(ge=0)] = 0,
+    cursor: str | None = None,
 ) -> LedgerAdjustmentListResponse:
     service = LedgerService(session)
     try:
         page = await service.list_adjustments(
             staff_id=staff_id,
-            date_from=date_from,
-            date_to=date_to,
+            coadmin_id=coadmin_id,
+            date_from=from_date or date_from,
+            date_to=to_date or date_to,
             include_deleted=include_deleted,
             limit=limit,
             offset=offset,
+            cursor=cursor,
             actor=current_user,
         )
     except Exception as error:
@@ -183,6 +191,9 @@ async def list_settlements(
     session: DatabaseSession,
     current_user: CurrentUser,
     staff_id: Annotated[int | None, Query(gt=0)] = None,
+    coadmin_id: Annotated[int | None, Query(gt=0, alias="coadminId")] = None,
+    from_date: Annotated[date | None, Query(alias="from")] = None,
+    to_date: Annotated[date | None, Query(alias="to")] = None,
     settlement_status: Annotated[
         StaffSettlementStatus | None,
         Query(alias="status"),
@@ -190,19 +201,22 @@ async def list_settlements(
     date_from: date | None = None,
     date_to: date | None = None,
     include_deleted: bool = False,
-    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    limit: Annotated[int, Query(ge=1, le=50)] = 30,
     offset: Annotated[int, Query(ge=0)] = 0,
+    cursor: str | None = None,
 ) -> SettlementListResponse:
     service = LedgerService(session)
     try:
         page = await service.list_settlements(
             staff_id=staff_id,
+            coadmin_id=coadmin_id,
             status=settlement_status,
-            date_from=date_from,
-            date_to=date_to,
+            date_from=from_date or date_from,
+            date_to=to_date or date_to,
             include_deleted=include_deleted,
             limit=limit,
             offset=offset,
+            cursor=cursor,
             actor=current_user,
         )
     except Exception as error:
@@ -304,11 +318,15 @@ def _serialize_settlement_page(
     limit: int,
     offset: int,
 ) -> SettlementListResponse:
+    items = [_serialize_settlement(item) for item in page.items]
     return SettlementListResponse(
-        items=[_serialize_settlement(item) for item in page.items],
+        items=items,
+        rows=items,
         limit=limit,
         offset=offset,
         has_more=page.has_more,
+        hasMore=page.has_more,
+        nextCursor=page.next_cursor,
     )
 
 
@@ -347,11 +365,15 @@ def _serialize_adjustment_page(
     limit: int,
     offset: int,
 ) -> LedgerAdjustmentListResponse:
+    items = [_serialize_adjustment(item) for item in page.items]
     return LedgerAdjustmentListResponse(
-        items=[_serialize_adjustment(item) for item in page.items],
+        items=items,
+        rows=items,
         limit=limit,
         offset=offset,
         has_more=page.has_more,
+        hasMore=page.has_more,
+        nextCursor=page.next_cursor,
     )
 
 

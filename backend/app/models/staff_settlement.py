@@ -48,6 +48,7 @@ class StaffSettlement(Base):
     __table_args__ = (
         Index("ix_staff_settlements_staff_completed", "staff_id", "completed_at"),
         Index("ix_staff_settlements_status_created", "status", "created_at"),
+        Index("ix_staff_settlements_created_id", "created_at", "id"),
     )
 
     id: Mapped[int] = mapped_column(

@@ -93,9 +93,12 @@ class LedgerAdjustmentResponse(BaseModel):
 
 class LedgerAdjustmentListResponse(BaseModel):
     items: list[LedgerAdjustmentResponse]
+    rows: list[LedgerAdjustmentResponse] = Field(default_factory=list)
     limit: int
     offset: int
     has_more: bool
+    hasMore: bool = False
+    nextCursor: str | None = None
 
 
 class SettlementResponse(BaseModel):
@@ -128,9 +131,12 @@ class SettlementResponse(BaseModel):
 
 class SettlementListResponse(BaseModel):
     items: list[SettlementResponse]
+    rows: list[SettlementResponse] = Field(default_factory=list)
     limit: int
     offset: int
     has_more: bool
+    hasMore: bool = False
+    nextCursor: str | None = None
 
 
 class SettlementAuditResponse(BaseModel):

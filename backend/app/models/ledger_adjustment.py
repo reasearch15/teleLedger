@@ -24,6 +24,7 @@ class LedgerAdjustment(Base):
         Index("ix_ledger_adjustments_staff_id", "staff_id"),
         Index("ix_ledger_adjustments_settlement_id", "settlement_id"),
         Index("ix_ledger_adjustments_created_at", "created_at"),
+        Index("ix_ledger_adjustments_created_id", "created_at", "id"),
     )
 
     id: Mapped[int] = mapped_column(
