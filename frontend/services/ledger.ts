@@ -58,6 +58,22 @@ export function createSettlement(
   );
 }
 
+export function createCoadminSettlement(
+  coadminId: number,
+  filters: DateFilters = {},
+  notes?: string,
+): Promise<Settlement> {
+  const query = new URLSearchParams();
+  appendDateFilters(query, filters);
+  return apiRequest<Settlement>(
+    `/api/admin/ledger/coadmins/${coadminId}/settlements?${query.toString()}`,
+    {
+      method: "POST",
+      body: JSON.stringify({ notes: notes || null }),
+    },
+  );
+}
+
 export function createTotalInAdjustment(
   staffId: number,
   newTotalIn: string,

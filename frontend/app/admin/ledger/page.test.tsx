@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import AdminLedgerPage from "@/app/admin/ledger/page";
 import {
+  createCoadminSettlement,
   createSettlement,
   createTotalInAdjustment,
   getLedger,
@@ -35,6 +36,7 @@ vi.mock("@/services/ledger", () => ({
   getLedger: vi.fn(),
   listSettlements: vi.fn(),
   listLedgerAdjustments: vi.fn(),
+  createCoadminSettlement: vi.fn(),
   createSettlement: vi.fn(),
   createTotalInAdjustment: vi.fn(),
   claimSettlement: vi.fn(),
@@ -48,6 +50,8 @@ const ledgerBefore: LedgerResponse = {
       staff_id: 42,
       staff_username: "Sarah",
       staff_color: "#2563EB",
+      coadmin_id: 10,
+      coadmin_username: "default_coadmin",
       total_in: "1000.00",
       total_out: "300.00",
       settled_amount: "0.00",
@@ -60,10 +64,38 @@ const ledgerBefore: LedgerResponse = {
       staff_id: 84,
       staff_username: "Alex",
       staff_color: "#16A34A",
+      coadmin_id: 11,
+      coadmin_username: "coadmin_two",
       total_in: "100.00",
       total_out: "100.00",
       settled_amount: "0.00",
       net: "0.00",
+      payments_count: 1,
+      cashouts_count: 1,
+      settlements_count: 0,
+    },
+  ],
+  coadmin_summaries: [
+    {
+      coadmin_id: 10,
+      coadmin_username: "default_coadmin",
+      total_in: "1000.00",
+      total_out: "300.00",
+      settled_amount: "0.00",
+      net: "700.00",
+      staff_count: 1,
+      payments_count: 12,
+      cashouts_count: 4,
+      settlements_count: 0,
+    },
+    {
+      coadmin_id: 11,
+      coadmin_username: "coadmin_two",
+      total_in: "100.00",
+      total_out: "100.00",
+      settled_amount: "0.00",
+      net: "0.00",
+      staff_count: 1,
       payments_count: 1,
       cashouts_count: 1,
       settlements_count: 0,
@@ -95,6 +127,16 @@ const ledgerAfter: LedgerResponse = {
     settled_amount: "0.00",
     net: "0.00",
   },
+  coadmin_summaries: [
+    {
+      ...ledgerBefore.coadmin_summaries[0],
+      total_in: "0.00",
+      total_out: "0.00",
+      net: "0.00",
+      settlements_count: 1,
+    },
+    ledgerBefore.coadmin_summaries[1],
+  ],
 };
 
 const history: SettlementPage = {
@@ -104,6 +146,9 @@ const history: SettlementPage = {
       staff_id: 42,
       staff_username: "Sarah",
       staff_color: "#2563EB",
+      coadmin_id: 10,
+      coadmin_username: "default_coadmin",
+      scope: "staff",
       amount: "700.00",
       status: "done",
       claimed_by_admin_id: null,
@@ -157,11 +202,13 @@ describe("AdminLedgerPage", () => {
     vi.mocked(getLedger).mockReset();
     vi.mocked(listSettlements).mockReset();
     vi.mocked(listLedgerAdjustments).mockReset();
+    vi.mocked(createCoadminSettlement).mockReset();
     vi.mocked(createSettlement).mockReset();
     vi.mocked(createTotalInAdjustment).mockReset();
     vi.mocked(getLedger).mockResolvedValue(ledgerBefore);
     vi.mocked(listSettlements).mockResolvedValue(history);
     vi.mocked(listLedgerAdjustments).mockResolvedValue(adjustments);
+    vi.mocked(createCoadminSettlement).mockResolvedValue(history.items[0]);
     vi.mocked(createSettlement).mockResolvedValue(history.items[0]);
     vi.mocked(createTotalInAdjustment).mockResolvedValue(adjustments.items[0]);
   });
@@ -183,7 +230,7 @@ describe("AdminLedgerPage", () => {
     await screen.findByText("Alex");
     const buttons = screen.getAllByRole("button", { name: "Settle / Withdraw" });
 
-    expect(buttons[1]).toBeDisabled();
+    expect(buttons[3]).toBeDisabled();
   });
 
   it("confirms settlement and refreshes ledger to zero", async () => {
@@ -193,13 +240,26 @@ describe("AdminLedgerPage", () => {
     render(<AdminLedgerPage />);
 
     await screen.findAllByText("Sarah");
-    fireEvent.click(screen.getAllByRole("button", { name: "Settle / Withdraw" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Settle / Withdraw" })[2]);
     expect(screen.getByText("Confirm settlement")).toBeInTheDocument();
     expect(screen.getAllByText("$700.00").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
 
     await waitFor(() => expect(createSettlement).toHaveBeenCalledWith(42, {}));
     await waitFor(() => expect(screen.getAllByText("$0.00").length).toBeGreaterThan(0));
+  });
+
+  it("confirms coadmin settlement from the summary", async () => {
+    render(<AdminLedgerPage />);
+
+    await screen.findAllByText("default_coadmin");
+    fireEvent.click(screen.getAllByRole("button", { name: "Settle / Withdraw" })[0]);
+    expect(screen.getByText("Confirm settlement")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() =>
+      expect(createCoadminSettlement).toHaveBeenCalledWith(10, {}),
+    );
   });
 
   it("opens total in adjustment modal and saves reason", async () => {

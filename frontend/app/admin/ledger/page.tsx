@@ -10,6 +10,7 @@ import {
   cancelSettlement,
   claimSettlement,
   completeSettlement,
+  createCoadminSettlement,
   createSettlement,
   createTotalInAdjustment,
   ADJUSTMENT_PAGE_SIZE,
@@ -19,6 +20,7 @@ import {
   SETTLEMENT_PAGE_SIZE,
 } from "@/services/ledger";
 import type {
+  CoadminLedgerSummary,
   LedgerAdjustment,
   LedgerItem,
   LedgerResponse,
@@ -26,8 +28,9 @@ import type {
 } from "@/types/api";
 
 type PendingSettlement = {
-  staffId: number;
-  staffUsername: string;
+  scope: "staff" | "coadmin";
+  targetId: number;
+  targetName: string;
   amount: string;
 };
 
@@ -78,6 +81,7 @@ export default function AdminLedgerPage() {
   const [hasMoreAdjustments, setHasMoreAdjustments] = useState(false);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [coadminFilter, setCoadminFilter] = useState("all");
   const [loading, setLoading] = useState(true);
   const [actionId, setActionId] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -135,10 +139,14 @@ export default function AdminLedgerPage() {
 
   const confirmSettlement = async () => {
     if (!pendingSettlement) return;
-    setActionId(pendingSettlement.staffId);
+    setActionId(pendingSettlement.targetId);
     setError("");
     try {
-      await createSettlement(pendingSettlement.staffId, dateFilters());
+      if (pendingSettlement.scope === "coadmin") {
+        await createCoadminSettlement(pendingSettlement.targetId, dateFilters());
+      } else {
+        await createSettlement(pendingSettlement.targetId, dateFilters());
+      }
       setPendingSettlement(null);
       await loadLedger();
     } catch (settleError) {
@@ -228,6 +236,13 @@ export default function AdminLedgerPage() {
   };
 
   const summary = ledger?.summary;
+  const coadminSummaries = ledger?.coadmin_summaries ?? [];
+  const filteredItems =
+    coadminFilter === "all"
+      ? ledger?.items ?? []
+      : (ledger?.items ?? []).filter(
+          (item) => String(item.coadmin_id ?? "default") === coadminFilter,
+        );
 
   return (
     <AppShell
@@ -256,6 +271,24 @@ export default function AdminLedgerPage() {
             onChange={(event) => setDateTo(event.target.value)}
             className="rounded-lg border border-slate-300 px-3 py-2"
           />
+        </label>
+        <label className="grid gap-1 text-sm font-semibold text-slate-700 sm:col-span-2">
+          Coadmin
+          <select
+            value={coadminFilter}
+            onChange={(event) => setCoadminFilter(event.target.value)}
+            className="rounded-lg border border-slate-300 px-3 py-2"
+          >
+            <option value="all">All coadmins</option>
+            {coadminSummaries.map((coadmin) => (
+              <option
+                key={coadmin.coadmin_id ?? "default"}
+                value={String(coadmin.coadmin_id ?? "default")}
+              >
+                {coadmin.coadmin_username}
+              </option>
+            ))}
+          </select>
         </label>
         <button
           type="submit"
@@ -299,13 +332,70 @@ export default function AdminLedgerPage() {
 
       <section className="mb-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 px-5 py-4">
+          <h2 className="font-black text-slate-950">Coadmin Summary</h2>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1080px] text-left text-sm">
+            <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+              <tr>
+                <th className="px-5 py-3">Coadmin</th>
+                <th className="px-5 py-3">Total In</th>
+                <th className="px-5 py-3">Total Out</th>
+                <th className="px-5 py-3">Settled</th>
+                <th className="px-5 py-3">Net</th>
+                <th className="px-5 py-3">Staff</th>
+                <th className="px-5 py-3">Payments</th>
+                <th className="px-5 py-3">Cashouts</th>
+                <th className="px-5 py-3">Settlements</th>
+                <th className="px-5 py-3">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {loading ? (
+                <tr>
+                  <td colSpan={10} className="px-5 py-8 text-center text-slate-500">
+                    Loading ledger...
+                  </td>
+                </tr>
+              ) : null}
+              {!loading && coadminSummaries.length === 0 ? (
+                <tr>
+                  <td colSpan={10} className="px-5 py-8 text-center text-slate-500">
+                    No coadmin balances found.
+                  </td>
+                </tr>
+              ) : null}
+              {coadminSummaries.map((coadmin) => (
+                <CoadminLedgerRow
+                  key={coadmin.coadmin_id ?? "default"}
+                  item={coadmin}
+                  busy={actionId === coadmin.coadmin_id}
+                  onSettle={() => {
+                    if (coadmin.coadmin_id == null) return;
+                    setPendingSettlement({
+                      scope: "coadmin",
+                      targetId: coadmin.coadmin_id,
+                      targetName: coadmin.coadmin_username,
+                      amount: coadmin.net,
+                    });
+                  }}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="mb-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-200 px-5 py-4">
           <h2 className="font-black text-slate-950">Staff Balances</h2>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[960px] text-left text-sm">
+          <table className="w-full min-w-[1040px] text-left text-sm">
             <thead className="bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
                 <th className="px-5 py-3">Staff</th>
+                <th className="px-5 py-3">Coadmin</th>
                 <th className="px-5 py-3">Total In</th>
                 <th className="px-5 py-3">Total Out</th>
                 <th className="px-5 py-3">Settled</th>
@@ -319,20 +409,28 @@ export default function AdminLedgerPage() {
             <tbody className="divide-y divide-slate-100">
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="px-5 py-8 text-center text-slate-500">
+                  <td colSpan={10} className="px-5 py-8 text-center text-slate-500">
                     Loading ledger...
                   </td>
                 </tr>
               ) : null}
-              {ledger?.items.map((item) => (
+              {!loading && filteredItems.length === 0 ? (
+                <tr>
+                  <td colSpan={10} className="px-5 py-8 text-center text-slate-500">
+                    No staff balances match this coadmin.
+                  </td>
+                </tr>
+              ) : null}
+              {filteredItems.map((item) => (
                 <StaffLedgerRow
                   key={item.staff_id}
                   item={item}
                   busy={actionId === item.staff_id}
                   onSettle={() =>
                     setPendingSettlement({
-                      staffId: item.staff_id,
-                      staffUsername: item.staff_username,
+                      scope: "staff",
+                      targetId: item.staff_id,
+                      targetName: item.staff_username,
                       amount: item.net,
                     })
                   }
@@ -413,10 +511,12 @@ export default function AdminLedgerPage() {
           </h2>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1240px] text-left text-sm">
+          <table className="w-full min-w-[1400px] text-left text-sm">
             <thead className="bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
                 <th className="px-5 py-3">Staff</th>
+                <th className="px-5 py-3">Scope</th>
+                <th className="px-5 py-3">Coadmin</th>
                 <th className="px-5 py-3">Amount</th>
                 <th className="px-5 py-3">Status</th>
                 <th className="px-5 py-3">Created by</th>
@@ -441,6 +541,10 @@ export default function AdminLedgerPage() {
                         style={{ backgroundColor: settlement.staff_color || "#64748B" }}
                       />
                       {settlement.staff_username || "Deleted Staff"}
+                    </td>
+                    <td className="px-5 py-3 capitalize">{settlement.scope}</td>
+                    <td className="px-5 py-3">
+                      {settlement.coadmin_username ?? "-"}
                     </td>
                     <td className="px-5 py-3 font-bold">
                       {formatMoney(settlement.amount)}
@@ -549,7 +653,7 @@ export default function AdminLedgerPage() {
               Confirm settlement
             </h2>
             <p className="mt-3 text-sm leading-6 text-slate-600">
-              Settle {pendingSettlement.staffUsername}&apos;s net balance of{" "}
+              Settle {pendingSettlement.targetName}&apos;s net balance of{" "}
               <strong>{formatMoney(pendingSettlement.amount)}</strong>?
             </p>
             <div className="mt-6 flex justify-end gap-2">
@@ -655,6 +759,7 @@ function StaffLedgerRow({
         />
         {item.staff_username}
       </td>
+      <td className="px-5 py-3">{item.coadmin_username}</td>
       <td className="px-5 py-3">
         <div className="flex items-center gap-2">
           <span>{formatMoney(item.total_in)}</span>
@@ -673,6 +778,45 @@ function StaffLedgerRow({
       <td className={`px-5 py-3 font-black ${netClass(item.net)}`}>
         {formatMoney(item.net)}
       </td>
+      <td className="px-5 py-3">{item.payments_count}</td>
+      <td className="px-5 py-3">{item.cashouts_count}</td>
+      <td className="px-5 py-3">{item.settlements_count}</td>
+      <td className="px-5 py-3">
+        <button
+          type="button"
+          disabled={disabled || busy}
+          onClick={onSettle}
+          className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+        >
+          Settle / Withdraw
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function CoadminLedgerRow({
+  item,
+  busy,
+  onSettle,
+}: {
+  item: CoadminLedgerSummary;
+  busy: boolean;
+  onSettle: () => void;
+}) {
+  const disabled = Number(item.net) <= 0 || item.coadmin_id == null;
+  return (
+    <tr>
+      <td className="px-5 py-3 font-semibold text-slate-950">
+        {item.coadmin_username}
+      </td>
+      <td className="px-5 py-3">{formatMoney(item.total_in)}</td>
+      <td className="px-5 py-3">{formatMoney(item.total_out)}</td>
+      <td className="px-5 py-3">{formatMoney(item.settled_amount)}</td>
+      <td className={`px-5 py-3 font-black ${netClass(item.net)}`}>
+        {formatMoney(item.net)}
+      </td>
+      <td className="px-5 py-3">{item.staff_count}</td>
       <td className="px-5 py-3">{item.payments_count}</td>
       <td className="px-5 py-3">{item.cashouts_count}</td>
       <td className="px-5 py-3">{item.settlements_count}</td>

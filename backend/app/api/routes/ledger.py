@@ -8,6 +8,7 @@ from app.models.staff_settlement import StaffSettlementStatus
 from app.schemas.ledger import (
     CreateLedgerAdjustmentRequest,
     CreateSettlementRequest,
+    CoadminLedgerSummaryResponse,
     LedgerAdjustmentListResponse,
     LedgerAdjustmentResponse,
     LedgerItemResponse,
@@ -26,12 +27,14 @@ from app.services.ledger import (
     SettlementListPage,
     SettlementNotFoundError,
     SettlementRecord,
+    CoadminNotFoundError,
     StaffNotFoundError,
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin ledger"])
 SettlementId = Annotated[int, Path(gt=0)]
 StaffId = Annotated[int, Path(gt=0)]
+CoadminId = Annotated[int, Path(gt=0)]
 
 
 @router.get("/ledger", response_model=LedgerResponse)
@@ -70,6 +73,34 @@ async def create_staff_settlement(
     try:
         settlement = await service.settle_staff(
             staff_id=staff_id,
+            date_from=date_from,
+            date_to=date_to,
+            notes=request.notes,
+            actor=current_user,
+        )
+        record = await service.get_settlement_record(settlement.id, current_user)
+    except Exception as error:
+        _raise_ledger_error(error)
+    return _serialize_settlement(record)
+
+
+@router.post(
+    "/ledger/coadmins/{coadmin_id}/settlements",
+    response_model=SettlementResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_coadmin_settlement(
+    coadmin_id: CoadminId,
+    request: CreateSettlementRequest,
+    session: DatabaseSession,
+    current_user: CurrentUser,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> SettlementResponse:
+    service = LedgerService(session)
+    try:
+        settlement = await service.settle_coadmin(
+            coadmin_id=coadmin_id,
             date_from=date_from,
             date_to=date_to,
             notes=request.notes,
@@ -231,6 +262,8 @@ def _serialize_ledger(report: LedgerReport) -> LedgerResponse:
                 staff_id=item.staff_id,
                 staff_username=item.staff_username,
                 staff_color=item.staff_color,
+                coadmin_id=item.coadmin_id,
+                coadmin_username=item.coadmin_username,
                 total_in=item.total_in,
                 total_out=item.total_out,
                 settled_amount=item.settled_amount,
@@ -240,6 +273,21 @@ def _serialize_ledger(report: LedgerReport) -> LedgerResponse:
                 settlements_count=item.settlements_count,
             )
             for item in report.items
+        ],
+        coadmin_summaries=[
+            CoadminLedgerSummaryResponse(
+                coadmin_id=item.coadmin_id,
+                coadmin_username=item.coadmin_username,
+                total_in=item.total_in,
+                total_out=item.total_out,
+                settled_amount=item.settled_amount,
+                net=item.net,
+                staff_count=item.staff_count,
+                payments_count=item.payments_count,
+                cashouts_count=item.cashouts_count,
+                settlements_count=item.settlements_count,
+            )
+            for item in report.coadmin_summaries
         ],
         summary=LedgerSummaryResponse(
             total_in=report.summary.total_in,
@@ -271,6 +319,9 @@ def _serialize_settlement(record: SettlementRecord) -> SettlementResponse:
         staff_id=settlement.staff_id,
         staff_username=record.staff_username,
         staff_color=record.staff_color,
+        coadmin_id=settlement.coadmin_id,
+        coadmin_username=record.coadmin_username,
+        scope=settlement.scope,
         amount=settlement.amount,
         status=settlement.status,
         claimed_by_admin_id=settlement.claimed_by_admin_id,
@@ -329,7 +380,7 @@ def _raise_ledger_error(error: Exception) -> NoReturn:
             status_code=status.HTTP_403_FORBIDDEN,
             detail=str(error),
         ) from error
-    if isinstance(error, StaffNotFoundError | SettlementNotFoundError):
+    if isinstance(error, StaffNotFoundError | SettlementNotFoundError | CoadminNotFoundError):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),

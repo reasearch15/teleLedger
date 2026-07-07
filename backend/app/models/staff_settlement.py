@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    String,
     Text,
     func,
 )
@@ -57,6 +58,17 @@ class StaffSettlement(Base):
         BigInteger,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
+    )
+    coadmin_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    scope: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="staff",
+        server_default="staff",
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     status: Mapped[StaffSettlementStatus] = mapped_column(

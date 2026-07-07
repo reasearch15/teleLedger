@@ -14,6 +14,8 @@ class LedgerItemResponse(BaseModel):
     staff_id: int
     staff_username: str
     staff_color: str
+    coadmin_id: int | None
+    coadmin_username: str
     total_in: Decimal
     total_out: Decimal
     settled_amount: Decimal
@@ -30,8 +32,22 @@ class LedgerSummaryResponse(BaseModel):
     net: Decimal
 
 
+class CoadminLedgerSummaryResponse(BaseModel):
+    coadmin_id: int | None
+    coadmin_username: str
+    total_in: Decimal
+    total_out: Decimal
+    settled_amount: Decimal
+    net: Decimal
+    staff_count: int
+    payments_count: int
+    cashouts_count: int
+    settlements_count: int
+
+
 class LedgerResponse(BaseModel):
     items: list[LedgerItemResponse]
+    coadmin_summaries: list[CoadminLedgerSummaryResponse] = Field(default_factory=list)
     summary: LedgerSummaryResponse
 
 
@@ -89,6 +105,9 @@ class SettlementResponse(BaseModel):
     staff_id: int | None
     staff_username: str
     staff_color: str
+    coadmin_id: int | None
+    coadmin_username: str | None
+    scope: str
     amount: Decimal
     status: StaffSettlementStatus
     claimed_by_admin_id: int | None

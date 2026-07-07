@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -41,6 +41,10 @@ class StaffNotFoundError(Exception):
     """Raised when a staff user does not exist."""
 
 
+class CoadminNotFoundError(Exception):
+    """Raised when a coadmin user does not exist."""
+
+
 @dataclass(frozen=True, slots=True)
 class LedgerDateRange:
     start: datetime | None
@@ -52,6 +56,8 @@ class LedgerItem:
     staff_id: int
     staff_username: str
     staff_color: str
+    coadmin_id: int | None
+    coadmin_username: str
     total_in: Decimal
     total_out: Decimal
     settled_amount: Decimal
@@ -70,8 +76,23 @@ class LedgerSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class CoadminLedgerSummary:
+    coadmin_id: int | None
+    coadmin_username: str
+    total_in: Decimal
+    total_out: Decimal
+    settled_amount: Decimal
+    net: Decimal
+    staff_count: int
+    payments_count: int
+    cashouts_count: int
+    settlements_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class LedgerReport:
     items: list[LedgerItem]
+    coadmin_summaries: list[CoadminLedgerSummary]
     summary: LedgerSummary
 
 
@@ -80,6 +101,7 @@ class SettlementRecord:
     settlement: StaffSettlement
     staff_username: str
     staff_color: str
+    coadmin_username: str | None
     created_by_admin_username: str
     claimed_by_admin_username: str | None
     completed_by_admin_username: str | None
@@ -215,6 +237,136 @@ class LedgerService(ApplicationService):
                 action=StaffSettlementAuditAction.DONE,
                 previous_status=StaffSettlementStatus.PENDING,
                 metadata={"immediate": True},
+            )
+            await self._session.refresh(settlement)
+        await event_broker.publish(
+            LiveEventType.SETTLEMENT_CREATED,
+            settlement_id=settlement.id,
+        )
+        await event_broker.publish(
+            LiveEventType.SETTLEMENT_DONE,
+            settlement_id=settlement.id,
+        )
+        await event_broker.publish(LiveEventType.LEDGER_CHANGED)
+        return settlement
+
+    async def settle_coadmin(
+        self,
+        *,
+        coadmin_id: int,
+        date_from: date | None,
+        date_to: date | None,
+        notes: str | None,
+        actor: User,
+    ) -> StaffSettlement:
+        self._require_admin(actor)
+        date_range = self._date_range(date_from, date_to)
+        async with self._session.begin():
+            coadmin = await self._get_coadmin_for_update(coadmin_id)
+            staff_rows = (
+                await self._session.execute(
+                    select(User)
+                    .where(
+                        User.role == UserRole.STAFF,
+                        User.is_active.is_(True),
+                        User.coadmin_id == coadmin.id,
+                    )
+                    .order_by(User.username.asc())
+                    .with_for_update()
+                )
+            ).scalars().all()
+            staff_ids = [staff.id for staff in staff_rows]
+            if not staff_ids:
+                raise LedgerStateConflictError("Nothing to settle.")
+
+            items = [
+                await self._ledger_item_for_staff(staff, date_range, coadmin.username)
+                for staff in staff_rows
+            ]
+            amount = self._money(sum((item.net for item in items), ZERO))
+            if amount <= ZERO:
+                raise LedgerStateConflictError("Nothing to settle.")
+
+            payment_ids = await self._unsettled_payment_ids_for_staff_ids(
+                staff_ids,
+                date_range,
+            )
+            cashout_ids = await self._unsettled_cashout_ids_for_staff_ids(
+                staff_ids,
+                date_range,
+            )
+            adjustment_ids = await self._unsettled_adjustment_ids_for_staff_ids(
+                staff_ids,
+                date_range,
+            )
+
+            now = datetime.now(UTC)
+            settlement = StaffSettlement(
+                staff_id=None,
+                coadmin_id=coadmin.id,
+                scope="coadmin",
+                amount=amount,
+                status=StaffSettlementStatus.DONE,
+                completed_by_admin_id=actor.id,
+                completed_at=now,
+                created_by_admin_id=actor.id,
+                notes=notes,
+            )
+            self._session.add(settlement)
+            await self._session.flush()
+            if payment_ids:
+                await self._session.execute(
+                    update(PaymentEvent)
+                    .where(
+                        PaymentEvent.id.in_(payment_ids),
+                        PaymentEvent.settlement_id.is_(None),
+                    )
+                    .values(settlement_id=settlement.id)
+                )
+            if cashout_ids:
+                await self._session.execute(
+                    update(CashoutRequest)
+                    .where(
+                        CashoutRequest.id.in_(cashout_ids),
+                        CashoutRequest.settlement_id.is_(None),
+                    )
+                    .values(settlement_id=settlement.id)
+                )
+            if adjustment_ids:
+                await self._session.execute(
+                    update(LedgerAdjustment)
+                    .where(
+                        LedgerAdjustment.id.in_(adjustment_ids),
+                        LedgerAdjustment.settlement_id.is_(None),
+                    )
+                    .values(settlement_id=settlement.id)
+                )
+            await self._add_audit(
+                settlement,
+                actor=actor,
+                action=StaffSettlementAuditAction.CREATED,
+                previous_status=None,
+                metadata={
+                    "scope": "coadmin",
+                    "coadmin_id": coadmin.id,
+                    "coadmin_username": coadmin.username,
+                    "staff_ids": staff_ids,
+                    "date_from": date_from.isoformat() if date_from else None,
+                    "date_to": date_to.isoformat() if date_to else None,
+                    "total_in": str(sum((item.total_in for item in items), ZERO)),
+                    "total_out": str(sum((item.total_out for item in items), ZERO)),
+                    "net_settled": str(amount),
+                    "payment_ids": payment_ids,
+                    "cashout_ids": cashout_ids,
+                    "adjustment_ids": adjustment_ids,
+                },
+            )
+            await self._add_audit(
+                settlement,
+                actor=actor,
+                action=StaffSettlementAuditAction.DONE,
+                previous_status=StaffSettlementStatus.PENDING,
+                metadata={"immediate": True, "scope": "coadmin"},
             )
             await self._session.refresh(settlement)
         await event_broker.publish(
@@ -417,6 +569,7 @@ class LedgerService(ApplicationService):
         self._require_admin(actor)
         date_range = self._date_range(date_from, date_to)
         staff = aliased(User, name="settlement_staff")
+        coadmin = aliased(User, name="settlement_coadmin")
         creator = aliased(User, name="settlement_creator")
         claimer = aliased(User, name="settlement_claimer")
         completer = aliased(User, name="settlement_completer")
@@ -424,7 +577,12 @@ class LedgerService(ApplicationService):
         if staff_id is not None:
             conditions.append(StaffSettlement.staff_id == staff_id)
         elif not include_deleted:
-            conditions.append(StaffSettlement.staff_id.is_not(None))
+            conditions.append(
+                or_(
+                    StaffSettlement.staff_id.is_not(None),
+                    StaffSettlement.scope == "coadmin",
+                )
+            )
         if status is not None:
             conditions.append(StaffSettlement.status == status)
         if date_range.start is not None:
@@ -436,11 +594,13 @@ class LedgerService(ApplicationService):
                 StaffSettlement,
                 staff.username,
                 staff.staff_color,
+                coadmin.username,
                 creator.username,
                 claimer.username,
                 completer.username,
             )
             .outerjoin(staff, StaffSettlement.staff_id == staff.id)
+            .outerjoin(coadmin, StaffSettlement.coadmin_id == coadmin.id)
             .join(creator, StaffSettlement.created_by_admin_id == creator.id)
             .outerjoin(claimer, StaffSettlement.claimed_by_admin_id == claimer.id)
             .outerjoin(completer, StaffSettlement.completed_by_admin_id == completer.id)
@@ -459,9 +619,10 @@ class LedgerService(ApplicationService):
                     settlement=row[0],
                     staff_username=row[1] or "Deleted Staff",
                     staff_color=row[2] or "#64748B",
-                    created_by_admin_username=row[3],
-                    claimed_by_admin_username=row[4],
-                    completed_by_admin_username=row[5],
+                    coadmin_username=row[3],
+                    created_by_admin_username=row[4],
+                    claimed_by_admin_username=row[5],
+                    completed_by_admin_username=row[6],
                     payment_ids=transaction_ids[int(row[0].id)][0],
                     cashout_ids=transaction_ids[int(row[0].id)][1],
                     adjustment_ids=transaction_ids[int(row[0].id)][2],
@@ -478,6 +639,7 @@ class LedgerService(ApplicationService):
     ) -> SettlementRecord:
         self._require_admin(actor)
         staff = aliased(User, name="settlement_staff")
+        coadmin = aliased(User, name="settlement_coadmin")
         creator = aliased(User, name="settlement_creator")
         claimer = aliased(User, name="settlement_claimer")
         completer = aliased(User, name="settlement_completer")
@@ -487,11 +649,13 @@ class LedgerService(ApplicationService):
                     StaffSettlement,
                     staff.username,
                     staff.staff_color,
+                    coadmin.username,
                     creator.username,
                     claimer.username,
                     completer.username,
                 )
                 .outerjoin(staff, StaffSettlement.staff_id == staff.id)
+                .outerjoin(coadmin, StaffSettlement.coadmin_id == coadmin.id)
                 .join(creator, StaffSettlement.created_by_admin_id == creator.id)
                 .outerjoin(claimer, StaffSettlement.claimed_by_admin_id == claimer.id)
                 .outerjoin(
@@ -508,20 +672,23 @@ class LedgerService(ApplicationService):
             settlement=row[0],
             staff_username=row[1] or "Deleted Staff",
             staff_color=row[2] or "#64748B",
-            created_by_admin_username=row[3],
-            claimed_by_admin_username=row[4],
-            completed_by_admin_username=row[5],
+            coadmin_username=row[3],
+            created_by_admin_username=row[4],
+            claimed_by_admin_username=row[5],
+            completed_by_admin_username=row[6],
             payment_ids=transaction_ids[settlement_id][0],
             cashout_ids=transaction_ids[settlement_id][1],
             adjustment_ids=transaction_ids[settlement_id][2],
         )
 
     async def _ledger_report(self, date_range: LedgerDateRange) -> LedgerReport:
+        coadmin = aliased(User, name="ledger_coadmin")
         staff_rows = (
             await self._session.execute(
-                select(User.id, User.username, User.staff_color)
+                select(User.id, User.username, User.staff_color, User.coadmin_id, coadmin.username)
+                .outerjoin(coadmin, User.coadmin_id == coadmin.id)
                 .where(User.role == UserRole.STAFF, User.is_active.is_(True))
-                .order_by(User.username.asc())
+                .order_by(coadmin.username.asc().nulls_last(), User.username.asc())
             )
         ).all()
         payment_totals = await self._payment_totals(date_range)
@@ -529,7 +696,7 @@ class LedgerService(ApplicationService):
         cashout_totals = await self._cashout_totals(date_range)
         settlement_counts = await self._settlement_counts(date_range)
         items: list[LedgerItem] = []
-        for staff_id, username, color in staff_rows:
+        for staff_id, username, color, coadmin_id, coadmin_username in staff_rows:
             total_in, payments_count = payment_totals.get(staff_id, (ZERO, 0))
             total_in += adjustment_totals.get(staff_id, ZERO)
             total_out, cashouts_count = cashout_totals.get(staff_id, (ZERO, 0))
@@ -539,6 +706,8 @@ class LedgerService(ApplicationService):
                     staff_id=staff_id,
                     staff_username=username,
                     staff_color=color,
+                    coadmin_id=coadmin_id,
+                    coadmin_username=coadmin_username or "default_coadmin",
                     total_in=total_in,
                     total_out=total_out,
                     settled_amount=ZERO,
@@ -548,8 +717,10 @@ class LedgerService(ApplicationService):
                     settlements_count=settlements_count,
                 )
             )
+        coadmin_summaries = self._coadmin_summaries(items)
         return LedgerReport(
             items=items,
+            coadmin_summaries=coadmin_summaries,
             summary=LedgerSummary(
                 total_in=sum((item.total_in for item in items), ZERO),
                 total_out=sum((item.total_out for item in items), ZERO),
@@ -562,6 +733,7 @@ class LedgerService(ApplicationService):
         self,
         staff: User,
         date_range: LedgerDateRange,
+        coadmin_username: str | None = None,
     ) -> LedgerItem:
         payment_totals = await self._payment_totals(date_range, staff.id)
         adjustment_totals = await self._adjustment_totals(date_range, staff.id)
@@ -575,6 +747,8 @@ class LedgerService(ApplicationService):
             staff_id=staff.id,
             staff_username=staff.username,
             staff_color=staff.staff_color,
+            coadmin_id=staff.coadmin_id,
+            coadmin_username=coadmin_username or "default_coadmin",
             total_in=total_in,
             total_out=total_out,
             settled_amount=ZERO,
@@ -583,6 +757,35 @@ class LedgerService(ApplicationService):
             cashouts_count=cashouts_count,
             settlements_count=settlements_count,
         )
+
+    @staticmethod
+    def _coadmin_summaries(items: list[LedgerItem]) -> list[CoadminLedgerSummary]:
+        grouped: dict[tuple[int | None, str], list[LedgerItem]] = {}
+        for item in items:
+            grouped.setdefault((item.coadmin_id, item.coadmin_username), []).append(item)
+        return [
+            CoadminLedgerSummary(
+                coadmin_id=coadmin_id,
+                coadmin_username=coadmin_username,
+                total_in=sum((item.total_in for item in coadmin_items), ZERO),
+                total_out=sum((item.total_out for item in coadmin_items), ZERO),
+                settled_amount=sum(
+                    (item.settled_amount for item in coadmin_items),
+                    ZERO,
+                ),
+                net=sum((item.net for item in coadmin_items), ZERO),
+                staff_count=len(coadmin_items),
+                payments_count=sum(item.payments_count for item in coadmin_items),
+                cashouts_count=sum(item.cashouts_count for item in coadmin_items),
+                settlements_count=sum(
+                    item.settlements_count for item in coadmin_items
+                ),
+            )
+            for (coadmin_id, coadmin_username), coadmin_items in sorted(
+                grouped.items(),
+                key=lambda row: row[0][1].lower(),
+            )
+        ]
 
     async def _payment_totals(
         self,
@@ -708,6 +911,27 @@ class LedgerService(ApplicationService):
         )
         return [int(row) for row in await self._session.scalars(statement)]
 
+    async def _unsettled_payment_ids_for_staff_ids(
+        self,
+        staff_ids: list[int],
+        date_range: LedgerDateRange,
+    ) -> list[int]:
+        if not staff_ids:
+            return []
+        conditions = [
+            PaymentEvent.status == PaymentStatus.DONE,
+            PaymentEvent.completed_by_staff_id.in_(staff_ids),
+            PaymentEvent.settlement_id.is_(None),
+        ]
+        self._apply_completed_at_filter(conditions, PaymentEvent.completed_at, date_range)
+        statement = (
+            select(PaymentEvent.id)
+            .where(*conditions)
+            .order_by(PaymentEvent.completed_at.asc(), PaymentEvent.id.asc())
+            .with_for_update()
+        )
+        return [int(row) for row in await self._session.scalars(statement)]
+
     async def _unsettled_cashout_ids_for_staff(
         self,
         staff_id: int,
@@ -727,6 +951,27 @@ class LedgerService(ApplicationService):
         )
         return [int(row) for row in await self._session.scalars(statement)]
 
+    async def _unsettled_cashout_ids_for_staff_ids(
+        self,
+        staff_ids: list[int],
+        date_range: LedgerDateRange,
+    ) -> list[int]:
+        if not staff_ids:
+            return []
+        conditions = [
+            CashoutRequest.status == CashoutStatus.COMPLETED,
+            CashoutRequest.created_by_staff_id.in_(staff_ids),
+            CashoutRequest.settlement_id.is_(None),
+        ]
+        self._apply_completed_at_filter(conditions, CashoutRequest.completed_at, date_range)
+        statement = (
+            select(CashoutRequest.id)
+            .where(*conditions)
+            .order_by(CashoutRequest.completed_at.asc(), CashoutRequest.id.asc())
+            .with_for_update()
+        )
+        return [int(row) for row in await self._session.scalars(statement)]
+
     async def _unsettled_adjustment_ids_for_staff(
         self,
         staff_id: int,
@@ -735,6 +980,27 @@ class LedgerService(ApplicationService):
         conditions = [
             LedgerAdjustment.type == LedgerAdjustmentType.TOTAL_IN_ADJUSTMENT,
             LedgerAdjustment.staff_id == staff_id,
+            LedgerAdjustment.settlement_id.is_(None),
+        ]
+        self._apply_completed_at_filter(conditions, LedgerAdjustment.created_at, date_range)
+        statement = (
+            select(LedgerAdjustment.id)
+            .where(*conditions)
+            .order_by(LedgerAdjustment.created_at.asc(), LedgerAdjustment.id.asc())
+            .with_for_update()
+        )
+        return [int(row) for row in await self._session.scalars(statement)]
+
+    async def _unsettled_adjustment_ids_for_staff_ids(
+        self,
+        staff_ids: list[int],
+        date_range: LedgerDateRange,
+    ) -> list[int]:
+        if not staff_ids:
+            return []
+        conditions = [
+            LedgerAdjustment.type == LedgerAdjustmentType.TOTAL_IN_ADJUSTMENT,
+            LedgerAdjustment.staff_id.in_(staff_ids),
             LedgerAdjustment.settlement_id.is_(None),
         ]
         self._apply_completed_at_filter(conditions, LedgerAdjustment.created_at, date_range)
@@ -798,6 +1064,18 @@ class LedgerService(ApplicationService):
         if staff is None:
             raise StaffNotFoundError(f"Staff user {staff_id} was not found")
         return staff
+
+    async def _get_coadmin_for_update(self, coadmin_id: int) -> User:
+        coadmin = (
+            await self._session.execute(
+                select(User)
+                .where(User.id == coadmin_id, User.role == UserRole.COADMIN)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if coadmin is None:
+            raise CoadminNotFoundError(f"Coadmin user {coadmin_id} was not found")
+        return coadmin
 
     async def _get_settlement_for_update(self, settlement_id: int) -> StaffSettlement:
         settlement = (

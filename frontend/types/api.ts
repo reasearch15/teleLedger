@@ -160,10 +160,25 @@ export type LedgerItem = {
   staff_id: number;
   staff_username: string;
   staff_color: string;
+  coadmin_id: number | null;
+  coadmin_username: string;
   total_in: string;
   total_out: string;
   settled_amount: string;
   net: string;
+  payments_count: number;
+  cashouts_count: number;
+  settlements_count: number;
+};
+
+export type CoadminLedgerSummary = {
+  coadmin_id: number | null;
+  coadmin_username: string;
+  total_in: string;
+  total_out: string;
+  settled_amount: string;
+  net: string;
+  staff_count: number;
   payments_count: number;
   cashouts_count: number;
   settlements_count: number;
@@ -178,6 +193,7 @@ export type LedgerSummary = {
 
 export type LedgerResponse = {
   items: LedgerItem[];
+  coadmin_summaries: CoadminLedgerSummary[];
   summary: LedgerSummary;
 };
 
@@ -211,6 +227,9 @@ export type Settlement = {
   staff_id: number | null;
   staff_username: string;
   staff_color: string;
+  coadmin_id: number | null;
+  coadmin_username: string | null;
+  scope: "staff" | "coadmin";
   amount: string;
   status: SettlementStatus;
   claimed_by_admin_id: number | null;

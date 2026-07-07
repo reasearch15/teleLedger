@@ -211,15 +211,18 @@ def existing_staff_coadmin_constraints(connection: sa.Connection) -> set[str]:
                 """
                 SELECT con.conname
                 FROM pg_constraint con
-                INNER JOIN pg_class rel ON rel.oid = con.conrelid
-                INNER JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
-                WHERE rel.relname = 'users'
-                  AND nsp.nspname = current_schema()
+                WHERE con.conrelid = 'users'::regclass
                   AND con.contype = 'c'
-                  AND con.conname IN :names
+                  AND con.conname IN (
+                      :staff_constraint,
+                      :legacy_staff_constraint
+                  )
                 """
-            ).bindparams(sa.bindparam("names", expanding=True)),
-            {"names": list(KNOWN_STAFF_COADMIN_CONSTRAINTS)},
+            ),
+            {
+                "staff_constraint": STAFF_REQUIRES_COADMIN_CONSTRAINT,
+                "legacy_staff_constraint": LEGACY_STAFF_REQUIRES_COADMIN_CONSTRAINT,
+            },
         )
         return {str(row[0]) for row in rows}
 

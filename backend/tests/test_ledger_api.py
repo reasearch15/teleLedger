@@ -59,6 +59,7 @@ def make_user(user_id: int, username: str, role: UserRole) -> User:
 
 ADMIN = make_user(1, "admin", UserRole.ADMIN)
 STAFF = make_user(42, "Sarah", UserRole.STAFF)
+DEFAULT_COADMIN = make_user(10, "default_coadmin", UserRole.COADMIN)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -69,9 +70,13 @@ async def reset_database() -> AsyncIterator[None]:
         session.add_all(
             [
                 make_user(1, "admin", UserRole.ADMIN),
+                make_user(10, "default_coadmin", UserRole.COADMIN),
                 make_user(42, "Sarah", UserRole.STAFF),
             ]
         )
+        staff = await session.get(User, 42)
+        assert staff is not None
+        staff.coadmin_id = 10
         await session.commit()
     yield
     async with test_engine.begin() as connection:
@@ -177,6 +182,9 @@ async def test_admin_can_view_ledger_and_staff_cannot() -> None:
 
     assert ledger.status_code == 200
     item = ledger.json()["items"][0]
+    assert item["staff_id"] == 42
+    assert item["coadmin_id"] == 10
+    assert item["coadmin_username"] == "default_coadmin"
     assert item["total_in"] == "1000.00"
     assert item["total_out"] == "300.00"
     assert item["settled_amount"] == "0.00"
@@ -184,6 +192,96 @@ async def test_admin_can_view_ledger_and_staff_cannot() -> None:
     assert item["payments_count"] == 1
     assert item["cashouts_count"] == 1
     assert forbidden.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_coadmin_totals_equal_sum_of_staff_totals_and_global_totals() -> None:
+    async with TestSessionFactory() as session:
+        session.add(make_user(11, "coadmin_two", UserRole.COADMIN))
+        session.add(make_user(84, "Alex", UserRole.STAFF))
+        session.add(make_user(85, "Blair", UserRole.STAFF))
+        await session.flush()
+        alex = await session.get(User, 84)
+        blair = await session.get(User, 85)
+        assert alex is not None
+        assert blair is not None
+        alex.coadmin_id = 10
+        blair.coadmin_id = 11
+        await session.commit()
+
+    await seed_done_payment(1, staff_id=42, amount="100.00")
+    await seed_done_payment(2, staff_id=84, amount="25.00")
+    await seed_cashout(1, staff_id=42, amount="30.00")
+    await seed_done_payment(3, staff_id=85, amount="40.00")
+    await seed_cashout(2, staff_id=85, amount="10.00")
+
+    async with api_client_for(ADMIN) as client:
+        ledger = await client.get("/api/admin/ledger")
+
+    body = ledger.json()
+    default = next(
+        item for item in body["coadmin_summaries"] if item["coadmin_id"] == 10
+    )
+    second = next(item for item in body["coadmin_summaries"] if item["coadmin_id"] == 11)
+    default_staff = [
+        item for item in body["items"] if item["coadmin_id"] == default["coadmin_id"]
+    ]
+
+    assert default["coadmin_username"] == "default_coadmin"
+    assert default["total_in"] == "125.00"
+    assert default["total_out"] == "30.00"
+    assert default["net"] == "95.00"
+    assert default["staff_count"] == 2
+    assert default["payments_count"] == 2
+    assert default["cashouts_count"] == 1
+    assert sum(Decimal(item["total_in"]) for item in default_staff) == Decimal(
+        default["total_in"]
+    )
+    assert second["total_in"] == "40.00"
+    assert sum(
+        Decimal(item["total_in"]) for item in body["coadmin_summaries"]
+    ) == Decimal(body["summary"]["total_in"])
+    assert sum(
+        Decimal(item["total_out"]) for item in body["coadmin_summaries"]
+    ) == Decimal(body["summary"]["total_out"])
+    assert sum(Decimal(item["net"]) for item in body["coadmin_summaries"]) == Decimal(
+        body["summary"]["net"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_admin_can_settle_coadmin_balance_and_history_shows_scope() -> None:
+    async with TestSessionFactory() as session:
+        session.add(make_user(84, "Alex", UserRole.STAFF))
+        await session.flush()
+        alex = await session.get(User, 84)
+        assert alex is not None
+        alex.coadmin_id = 10
+        await session.commit()
+
+    await seed_done_payment(1, staff_id=42, amount="100.00")
+    await seed_cashout(1, staff_id=42, amount="30.00")
+    await seed_done_payment(2, staff_id=84, amount="50.00")
+
+    async with api_client_for(ADMIN) as client:
+        created = await client.post("/api/admin/ledger/coadmins/10/settlements", json={})
+        repeated = await client.post("/api/admin/ledger/coadmins/10/settlements", json={})
+        ledger = await client.get("/api/admin/ledger")
+        history = await client.get("/api/admin/settlements")
+
+    assert created.status_code == 201
+    assert created.json()["scope"] == "coadmin"
+    assert created.json()["staff_id"] is None
+    assert created.json()["coadmin_id"] == 10
+    assert created.json()["coadmin_username"] == "default_coadmin"
+    assert created.json()["amount"] == "120.00"
+    assert created.json()["payment_ids"] == [1, 2]
+    assert created.json()["cashout_ids"] == [1]
+    assert repeated.status_code == 409
+    assert all(item["net"] == "0.00" for item in ledger.json()["items"])
+    assert ledger.json()["coadmin_summaries"][0]["net"] == "0.00"
+    assert history.json()["items"][0]["scope"] == "coadmin"
+    assert history.json()["items"][0]["coadmin_username"] == "default_coadmin"
 
 
 @pytest.mark.asyncio
@@ -467,6 +565,8 @@ async def test_recreated_username_starts_fresh_after_deleted_staff_rows_detached
             "staff_id": 43,
             "staff_username": "Sarah",
             "staff_color": "#2563EB",
+            "coadmin_id": None,
+            "coadmin_username": "default_coadmin",
             "total_in": "75.00",
             "total_out": "0.00",
             "settled_amount": "0.00",
