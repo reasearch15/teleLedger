@@ -33,6 +33,7 @@ export function AppShell({
   const pathname = usePathname();
   const router = useRouter();
   const [logoutError, setLogoutError] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
     if (!loading && !user) {
@@ -71,6 +72,19 @@ export function AppShell({
         ]
       : [...navigation, { href: "/settings", label: "Settings" }];
 
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [menuOpen]);
+
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
@@ -89,6 +103,15 @@ export function AppShell({
             </span>
           </Link>
           <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setMenuOpen(true)}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 lg:hidden"
+              aria-controls="mobile-admin-navigation"
+              aria-expanded={menuOpen}
+            >
+              <span aria-hidden="true">☰</span> Menu
+            </button>
             <div className="hidden text-right sm:block">
               <p className="text-sm font-semibold text-slate-800">{user.username}</p>
               <p className="text-xs capitalize text-slate-500">{user.role}</p>
@@ -102,7 +125,7 @@ export function AppShell({
             </button>
           </div>
         </div>
-        <nav className="mx-auto flex max-w-7xl gap-1 overflow-x-auto px-3 sm:px-5">
+        <nav className="mx-auto hidden max-w-7xl gap-1 overflow-x-auto px-3 sm:px-5 lg:flex">
           {links.map((link) => {
             const active = pathname === link.href;
             return (
@@ -121,6 +144,56 @@ export function AppShell({
           })}
         </nav>
       </header>
+
+      {menuOpen ? (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <button
+            type="button"
+            aria-label="Close navigation menu"
+            className="absolute inset-0 bg-slate-950/40"
+            onClick={() => setMenuOpen(false)}
+          />
+          <aside
+            id="mobile-admin-navigation"
+            aria-label="Admin navigation"
+            className="relative h-full w-[min(20rem,calc(100vw-3rem))] translate-x-0 bg-white shadow-2xl transition-transform duration-200 ease-out"
+          >
+            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-4">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.18em] text-indigo-600">
+                  Navigation
+                </p>
+                <p className="mt-1 font-black text-slate-950">Admin Menu</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMenuOpen(false)}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700"
+              >
+                Close
+              </button>
+            </div>
+            <nav className="grid gap-1 p-3">
+              {links.map((link) => {
+                const active = pathname === link.href;
+                return (
+                  <Link
+                    key={link.href}
+                    href={link.href}
+                    className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
+                      active
+                        ? "bg-indigo-50 text-indigo-700"
+                        : "text-slate-700 hover:bg-slate-50 hover:text-slate-950"
+                    }`}
+                  >
+                    {link.label}
+                  </Link>
+                );
+              })}
+            </nav>
+          </aside>
+        </div>
+      ) : null}
 
       <main className="mx-auto max-w-7xl px-4 py-7 sm:px-6 sm:py-10">
         <div className="mb-7">
