@@ -1,19 +1,19 @@
 "use client";
 
 import { AppShell } from "@/components/app-shell";
+import { AdjustmentHistoryPanel } from "@/components/ledger/AdjustmentHistoryPanel";
 import { LedgerFilterPanel } from "@/components/ledger/LedgerFilterPanel";
-import { LedgerSummaryPanel } from "@/components/ledger/LedgerSummaryPanel";
 
-export default function AdminLedgerPage() {
+export default function AdminAdjustmentHistoryPage() {
   return (
     <AppShell
-      title="Ledger"
-      description="Cashout belongs to the staff who created/requested it."
+      title="Adjustment History"
+      description="Manual total-in adjustment history with cursor pagination."
       requiredRole="admin"
     >
       <div className="space-y-10">
         <LedgerFilterPanel />
-        <LedgerSummaryPanel />
+        <AdjustmentHistoryPanel />
       </div>
     </AppShell>
   );

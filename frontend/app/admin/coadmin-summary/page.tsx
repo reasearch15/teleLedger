@@ -1,19 +1,19 @@
 "use client";
 
 import { AppShell } from "@/components/app-shell";
+import { CoadminSummaryPanel } from "@/components/ledger/CoadminSummaryPanel";
 import { LedgerFilterPanel } from "@/components/ledger/LedgerFilterPanel";
-import { LedgerSummaryPanel } from "@/components/ledger/LedgerSummaryPanel";
 
-export default function AdminLedgerPage() {
+export default function AdminCoadminSummaryPage() {
   return (
     <AppShell
-      title="Ledger"
-      description="Cashout belongs to the staff who created/requested it."
+      title="Coadmin Summary"
+      description="Open ledger balances grouped by coadmin team."
       requiredRole="admin"
     >
       <div className="space-y-10">
         <LedgerFilterPanel />
-        <LedgerSummaryPanel />
+        <CoadminSummaryPanel />
       </div>
     </AppShell>
   );

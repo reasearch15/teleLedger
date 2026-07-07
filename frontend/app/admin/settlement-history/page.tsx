@@ -2,18 +2,18 @@
 
 import { AppShell } from "@/components/app-shell";
 import { LedgerFilterPanel } from "@/components/ledger/LedgerFilterPanel";
-import { LedgerSummaryPanel } from "@/components/ledger/LedgerSummaryPanel";
+import { SettlementHistoryPanel } from "@/components/ledger/SettlementHistoryPanel";
 
-export default function AdminLedgerPage() {
+export default function AdminSettlementHistoryPage() {
   return (
     <AppShell
-      title="Ledger"
-      description="Cashout belongs to the staff who created/requested it."
+      title="Settlement History"
+      description="Withdrawal and settlement history with cursor pagination."
       requiredRole="admin"
     >
       <div className="space-y-10">
         <LedgerFilterPanel />
-        <LedgerSummaryPanel />
+        <SettlementHistoryPanel />
       </div>
     </AppShell>
   );
