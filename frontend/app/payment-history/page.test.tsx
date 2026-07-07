@@ -59,6 +59,7 @@ const donePayment: Payment = {
     username: "sarah",
     color: "#EA580C",
   },
+  coadmin_dismissals: [],
   parser_confidence: 100,
   created_at: "2026-07-06T20:00:00Z",
   updated_at: "2026-07-06T20:02:00Z",

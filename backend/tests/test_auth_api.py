@@ -72,6 +72,7 @@ async def seed_user(
     password_hash: str,
     role: UserRole,
     is_active: bool = True,
+    coadmin_id: int | None = None,
 ) -> None:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     async with TestSessionFactory() as session:
@@ -83,6 +84,7 @@ async def seed_user(
                 role=role,
                 is_active=is_active,
                 staff_color="#2563EB",
+                coadmin_id=coadmin_id,
                 created_at=timestamp,
                 updated_at=timestamp,
             )
@@ -122,9 +124,7 @@ async def test_create_admin_cli_persists_admin(
 
     assert username == "primary_admin"
     async with TestSessionFactory() as session:
-        admin = await session.scalar(
-            select(User).where(User.username == "primary_admin")
-        )
+        admin = await session.scalar(select(User).where(User.username == "primary_admin"))
         assert admin is not None
         assert admin.role == UserRole.ADMIN
         assert admin.password_hash != ADMIN_PASSWORD
@@ -268,17 +268,91 @@ async def test_admin_can_create_staff(client: AsyncClient) -> None:
         role=UserRole.ADMIN,
     )
     await login(client, "admin", ADMIN_PASSWORD)
+    coadmin_response = await client.post(
+        "/api/admin/coadmins",
+        json={"username": "Coadmin.One", "password": "Another-secure-password"},
+    )
 
     response = await client.post(
         "/api/admin/staff",
-        json={"username": "New.Staff", "password": "Another-secure-password"},
+        json={
+            "username": "New.Staff",
+            "password": "Another-secure-password",
+            "coadmin_id": coadmin_response.json()["id"],
+        },
     )
 
+    assert coadmin_response.status_code == 201
     assert response.status_code == 201
     assert response.json()["username"] == "new.staff"
     assert response.json()["role"] == "staff"
+    assert response.json()["coadmin_id"] == coadmin_response.json()["id"]
     staff_response = await client.get("/api/admin/staff")
     assert [staff["username"] for staff in staff_response.json()] == ["new.staff"]
+
+
+@pytest.mark.asyncio
+async def test_admin_can_create_coadmin(client: AsyncClient) -> None:
+    await seed_user(
+        1,
+        username="admin",
+        password_hash=ADMIN_PASSWORD_HASH,
+        role=UserRole.ADMIN,
+    )
+    await login(client, "admin", ADMIN_PASSWORD)
+
+    response = await client.post(
+        "/api/admin/coadmins",
+        json={"username": "Ops.Owner", "password": "Another-secure-password"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["username"] == "ops.owner"
+    assert response.json()["role"] == "coadmin"
+
+
+@pytest.mark.asyncio
+async def test_staff_creation_requires_coadmin(client: AsyncClient) -> None:
+    await seed_user(
+        1,
+        username="admin",
+        password_hash=ADMIN_PASSWORD_HASH,
+        role=UserRole.ADMIN,
+    )
+    await login(client, "admin", ADMIN_PASSWORD)
+
+    response = await client.post(
+        "/api/admin/staff",
+        json={"username": "new_staff", "password": "Another-secure-password"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_staff_login_works_after_coadmin_assignment(client: AsyncClient) -> None:
+    await seed_user(
+        10,
+        username="default_coadmin",
+        password_hash=hash_password("Another-secure-password"),
+        role=UserRole.COADMIN,
+    )
+    await seed_user(
+        2,
+        username="legacy_staff",
+        password_hash=STAFF_PASSWORD_HASH,
+        role=UserRole.STAFF,
+        coadmin_id=10,
+    )
+
+    response = await client.post(
+        "/api/auth/login",
+        json={"username": "legacy_staff", "password": STAFF_PASSWORD},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["username"] == "legacy_staff"
+    assert response.json()["role"] == "staff"
 
 
 @pytest.mark.asyncio
@@ -290,10 +364,17 @@ async def test_admin_can_disable_and_reset_staff(client: AsyncClient) -> None:
         role=UserRole.ADMIN,
     )
     await seed_user(
+        10,
+        username="default_coadmin",
+        password_hash=hash_password("Another-secure-password"),
+        role=UserRole.COADMIN,
+    )
+    await seed_user(
         2,
         username="staff_user",
         password_hash=STAFF_PASSWORD_HASH,
         role=UserRole.STAFF,
+        coadmin_id=10,
     )
     await login(client, "admin", ADMIN_PASSWORD)
 
@@ -314,6 +395,51 @@ async def test_admin_can_disable_and_reset_staff(client: AsyncClient) -> None:
             staff.password_hash,
         )
         assert valid
+
+
+@pytest.mark.asyncio
+async def test_admin_can_reassign_staff_coadmin(client: AsyncClient) -> None:
+    await seed_user(
+        1,
+        username="admin",
+        password_hash=ADMIN_PASSWORD_HASH,
+        role=UserRole.ADMIN,
+    )
+    await seed_user(
+        2,
+        username="default_coadmin",
+        password_hash=hash_password("Another-secure-password"),
+        role=UserRole.COADMIN,
+    )
+    await seed_user(
+        3,
+        username="other_coadmin",
+        password_hash=hash_password("Third-secure-password"),
+        role=UserRole.COADMIN,
+    )
+    async with TestSessionFactory() as session:
+        staff = User(
+            id=4,
+            username="legacy_staff",
+            password_hash=STAFF_PASSWORD_HASH,
+            role=UserRole.STAFF,
+            is_active=True,
+            staff_color="#2563EB",
+            coadmin_id=2,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        session.add(staff)
+        await session.commit()
+
+    await login(client, "admin", ADMIN_PASSWORD)
+    response = await client.patch(
+        "/api/admin/staff/4/coadmin",
+        json={"coadmin_id": 3},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["coadmin_id"] == 3
 
 
 @pytest.mark.asyncio

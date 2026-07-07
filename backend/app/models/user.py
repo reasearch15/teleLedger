@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -13,6 +13,7 @@ class UserRole(StrEnum):
     """Authorization roles supported by Telegram Ledger."""
 
     ADMIN = "admin"
+    COADMIN = "coadmin"
     STAFF = "staff"
 
 
@@ -46,6 +47,11 @@ class User(Base):
         nullable=False,
         default="#2563EB",
         server_default="#2563EB",
+    )
+    coadmin_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

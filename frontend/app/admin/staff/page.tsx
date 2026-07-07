@@ -8,9 +8,12 @@ import { useLiveUpdates } from "@/components/live-updates-provider";
 import { friendlyError } from "@/lib/api-client";
 import { STAFF_PAGE_EVENTS } from "@/lib/live-events";
 import {
+  assignStaffCoadmin,
+  createCoadmin,
   createStaff,
   deleteStaff,
   disableStaff,
+  listCoadmins,
   listStaff,
   resetStaffPassword,
 } from "@/services/staff";
@@ -34,13 +37,19 @@ function validatePassword(password: string): string | null {
 export default function StaffPage() {
   const { user } = useAuth();
   const [staff, setStaff] = useState<User[]>([]);
+  const [coadmins, setCoadmins] = useState<User[]>([]);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [coadminId, setCoadminId] = useState("");
+  const [coadminUsername, setCoadminUsername] = useState("");
+  const [coadminPassword, setCoadminPassword] = useState("");
+  const [coadminActive, setCoadminActive] = useState(true);
   const [resetId, setResetId] = useState<number | null>(null);
   const [resetPassword, setResetPassword] = useState("");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
+  const [creatingCoadmin, setCreatingCoadmin] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<User | null>(null);
@@ -50,7 +59,12 @@ export default function StaffPage() {
     setLoading(true);
     setError("");
     try {
-      setStaff(await listStaff());
+      const [staffResult, coadminResult] = await Promise.all([
+        listStaff(),
+        listCoadmins(),
+      ]);
+      setStaff(staffResult);
+      setCoadmins(coadminResult);
     } catch (loadError) {
       setError(friendlyError(loadError));
     } finally {
@@ -61,9 +75,12 @@ export default function StaffPage() {
   useEffect(() => {
     if (user?.role !== "admin") return;
     let active = true;
-    listStaff()
-      .then((result) => {
-        if (active) setStaff(result);
+    Promise.all([listStaff(), listCoadmins()])
+      .then(([staffResult, coadminResult]) => {
+        if (active) {
+          setStaff(staffResult);
+          setCoadmins(coadminResult);
+        }
       })
       .catch((loadError: unknown) => {
         if (active) setError(friendlyError(loadError));
@@ -94,18 +111,75 @@ export default function StaffPage() {
       setError(passwordError);
       return;
     }
+    if (!coadminId) {
+      setError("Choose a coadmin for this staff account.");
+      return;
+    }
 
     setCreating(true);
     try {
-      const created = await createStaff(username, password);
+      const created = await createStaff(username, password, Number(coadminId));
       setUsername("");
       setPassword("");
+      setCoadminId("");
       setMessage(`Staff account “${created.username}” was created.`);
       await loadStaff();
     } catch (createError) {
       setError(friendlyError(createError));
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleCreateCoadmin = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError("");
+    setMessage("");
+
+    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(coadminUsername.trim())) {
+      setError(
+        "Username must be 3-64 characters using letters, numbers, dots, underscores, or hyphens.",
+      );
+      return;
+    }
+    const passwordError = validatePassword(coadminPassword);
+    if (passwordError) {
+      setError(passwordError);
+      return;
+    }
+
+    setCreatingCoadmin(true);
+    try {
+      const created = await createCoadmin(
+        coadminUsername,
+        coadminPassword,
+        coadminActive,
+      );
+      setCoadminUsername("");
+      setCoadminPassword("");
+      setCoadminActive(true);
+      setMessage(`Coadmin account "${created.username}" was created.`);
+      await loadStaff();
+    } catch (createError) {
+      setError(friendlyError(createError));
+    } finally {
+      setCreatingCoadmin(false);
+    }
+  };
+
+  const handleAssignCoadmin = async (staffUser: User, nextCoadminId: string) => {
+    if (!nextCoadminId) return;
+    setBusyId(staffUser.id);
+    setError("");
+    setMessage("");
+    try {
+      await assignStaffCoadmin(staffUser.id, Number(nextCoadminId));
+      setMessage(`Coadmin updated for "${staffUser.username}".`);
+      await loadStaff();
+    } catch (assignError) {
+      setError(friendlyError(assignError));
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -178,7 +252,57 @@ export default function StaffPage() {
       requiredRole="admin"
     >
       <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
-        <section className="h-fit rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <div className="grid h-fit gap-4">
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+          <h2 className="text-lg font-bold text-slate-950">Create coadmin</h2>
+          <form onSubmit={handleCreateCoadmin} className="mt-5 space-y-4" noValidate>
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-semibold text-slate-700">
+                Username
+              </span>
+              <input
+                value={coadminUsername}
+                onChange={(event) => setCoadminUsername(event.target.value)}
+                autoComplete="off"
+                placeholder="coadmin.username"
+                disabled={creatingCoadmin}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:border-indigo-500"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-semibold text-slate-700">
+                Temporary password
+              </span>
+              <input
+                type="password"
+                value={coadminPassword}
+                onChange={(event) => setCoadminPassword(event.target.value)}
+                autoComplete="new-password"
+                placeholder="At least 12 characters"
+                disabled={creatingCoadmin}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:border-indigo-500"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+              <input
+                type="checkbox"
+                checked={coadminActive}
+                onChange={(event) => setCoadminActive(event.target.checked)}
+                disabled={creatingCoadmin}
+              />
+              Active
+            </label>
+            <button
+              type="submit"
+              disabled={creatingCoadmin}
+              className="w-full rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-bold text-white hover:bg-slate-700 disabled:opacity-50"
+            >
+              {creatingCoadmin ? "Creating..." : "Create coadmin"}
+            </button>
+          </form>
+        </section>
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
           <h2 className="text-lg font-bold text-slate-950">Create staff account</h2>
           <p className="mt-2 text-sm leading-6 text-slate-500">
             Staff can access and process payments but cannot manage other accounts.
@@ -211,6 +335,26 @@ export default function StaffPage() {
                 className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:border-indigo-500"
               />
             </label>
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-semibold text-slate-700">
+                Coadmin
+              </span>
+              <select
+                value={coadminId}
+                onChange={(event) => setCoadminId(event.target.value)}
+                disabled={creating}
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm focus:border-indigo-500"
+              >
+                <option value="">Choose coadmin</option>
+                {coadmins
+                  .filter((coadmin) => coadmin.is_active)
+                  .map((coadmin) => (
+                    <option key={coadmin.id} value={coadmin.id}>
+                      {coadmin.username}
+                    </option>
+                  ))}
+              </select>
+            </label>
             <button
               type="submit"
               disabled={creating}
@@ -220,6 +364,7 @@ export default function StaffPage() {
             </button>
           </form>
         </section>
+        </div>
 
         <section>
           {error ? (
@@ -290,6 +435,31 @@ export default function StaffPage() {
                       <p className="mt-1 text-xs text-slate-500">
                         Last login: {formatDate(staffUser.last_login_at)}
                       </p>
+                      <label className="mt-3 block max-w-xs">
+                        <span className="mb-1 block text-xs font-bold text-slate-500">
+                          Coadmin
+                        </span>
+                        <select
+                          value={staffUser.coadmin_id ?? ""}
+                          onChange={(event) =>
+                            void handleAssignCoadmin(staffUser, event.target.value)
+                          }
+                          disabled={busyId === staffUser.id || coadmins.length === 0}
+                          className="w-full rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm font-semibold text-slate-800"
+                        >
+                          {coadmins
+                            .filter(
+                              (coadmin) =>
+                                coadmin.is_active ||
+                                coadmin.id === staffUser.coadmin_id,
+                            )
+                            .map((coadmin) => (
+                              <option key={coadmin.id} value={coadmin.id}>
+                                {coadmin.username}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <button

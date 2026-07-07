@@ -64,6 +64,18 @@ class StaffIdentityResponse(BaseModel):
     color: str
 
 
+class PaymentDismissalResponse(BaseModel):
+    """Coadmin-scoped Not Ours dismissal shown to administrators."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    coadmin_id: int
+    coadmin_username: str | None
+    dismissed_by_staff_id: int | None
+    dismissed_by_staff_username: str | None
+    created_at: datetime
+
+
 class PaymentListItemResponse(BaseModel):
     """Lightweight payment representation used by collection endpoints."""
 
@@ -84,6 +96,7 @@ class PaymentListItemResponse(BaseModel):
     completed_at: datetime | None
     claimed_by_staff: StaffIdentityResponse | None = None
     completed_by_staff: StaffIdentityResponse | None = None
+    coadmin_dismissals: list[PaymentDismissalResponse] = Field(default_factory=list)
     parser_confidence: int
     created_at: datetime
     updated_at: datetime

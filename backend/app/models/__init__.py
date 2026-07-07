@@ -9,6 +9,7 @@ from app.models.cashout import (
 )
 from app.models.ledger_adjustment import LedgerAdjustment, LedgerAdjustmentType
 from app.models.payment_audit import PaymentAuditAction, PaymentAuditLog
+from app.models.payment_dismissal import PaymentEventCoadminDismissal
 from app.models.payment_event import PaymentEvent, PaymentStatus
 from app.models.staff_settlement import (
     StaffSettlement,
@@ -30,6 +31,7 @@ __all__ = [
     "LedgerAdjustmentType",
     "PaymentAuditAction",
     "PaymentAuditLog",
+    "PaymentEventCoadminDismissal",
     "PaymentEvent",
     "PaymentStatus",
     "StaffSettlement",

@@ -4,6 +4,7 @@ export const LIVE_EVENTS = {
   PAYMENT_UNCLAIMED: "payment_unclaimed",
   PAYMENT_DONE: "payment_done",
   PAYMENT_REOPENED: "payment_reopened",
+  PAYMENT_DISMISSED: "payment_dismissed",
   CASHOUT_CREATED: "cashout_created",
   CASHOUT_SENT: "cashout_sent",
   CASHOUT_COMPLETED: "cashout_completed",
@@ -23,6 +24,7 @@ export type LiveEvent = {
   cashout_id?: number;
   settlement_id?: number;
   user_id?: number;
+  coadmin_id?: number;
 };
 
 export const PAYMENT_PAGE_EVENTS: LiveEventType[] = [
@@ -31,6 +33,7 @@ export const PAYMENT_PAGE_EVENTS: LiveEventType[] = [
   LIVE_EVENTS.PAYMENT_UNCLAIMED,
   LIVE_EVENTS.PAYMENT_DONE,
   LIVE_EVENTS.PAYMENT_REOPENED,
+  LIVE_EVENTS.PAYMENT_DISMISSED,
 ];
 
 export const PAYMENT_HISTORY_EVENTS: LiveEventType[] = [

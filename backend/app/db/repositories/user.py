@@ -38,6 +38,15 @@ class UserRepository(BaseRepository[User]):
         )
         return list(result)
 
+    async def list_coadmins(self) -> list[User]:
+        """List coadmin accounts in stable username order."""
+        result = await self._session.scalars(
+            select(User)
+            .where(User.role == UserRole.COADMIN)
+            .order_by(User.username.asc())
+        )
+        return list(result)
+
     async def get_staff_for_update(self, user_id: int) -> User | None:
         """Lock one staff account for an administrative mutation."""
         result = await self._session.execute(
@@ -53,6 +62,17 @@ class UserRepository(BaseRepository[User]):
             select(User).where(
                 User.id == user_id,
                 User.role == UserRole.STAFF,
+                User.is_active.is_(True),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_active_coadmin(self, user_id: int) -> User | None:
+        """Return an active coadmin suitable for staff ownership."""
+        result = await self._session.execute(
+            select(User).where(
+                User.id == user_id,
+                User.role == UserRole.COADMIN,
                 User.is_active.is_(True),
             )
         )

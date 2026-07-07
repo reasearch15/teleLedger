@@ -17,6 +17,7 @@ from app.auth.security import (
 from app.db.repositories.user import UserRepository
 from app.models.cashout import CashoutRequest, CashoutRequestAudit
 from app.models.payment_audit import PaymentAuditLog
+from app.models.payment_dismissal import PaymentEventCoadminDismissal
 from app.models.payment_event import PaymentEvent
 from app.models.staff_settlement import StaffSettlement, StaffSettlementAuditLog
 from app.models.user import User, UserRole
@@ -34,6 +35,10 @@ class UsernameAlreadyExistsError(Exception):
 
 class StaffNotFoundError(Exception):
     """Raised when an administrative staff target does not exist."""
+
+
+class CoadminNotFoundError(Exception):
+    """Raised when an administrative coadmin target does not exist."""
 
 
 class StaffSelfDeleteForbiddenError(Exception):
@@ -118,7 +123,50 @@ class StaffManagementService(ApplicationService):
         """Return all staff accounts."""
         return await self._repository.list_staff()
 
-    async def create_staff(self, username: str, password: str) -> User:
+    async def list_coadmins(self) -> list[User]:
+        """Return all coadmin accounts."""
+        return await self._repository.list_coadmins()
+
+    async def create_coadmin(
+        self,
+        username: str,
+        password: str,
+        *,
+        is_active: bool = True,
+    ) -> User:
+        """Create a coadmin account that can own multiple staff users."""
+        normalized_username = normalize_username(username)
+        password_hash = await asyncio.to_thread(hash_password, password)
+        coadmin: User
+        try:
+            async with self._session.begin():
+                existing = await self._repository.get_by_username(normalized_username)
+                if existing is not None:
+                    raise UsernameAlreadyExistsError("Username is already registered")
+                coadmin = await self._repository.add(
+                    User(
+                        username=normalized_username,
+                        password_hash=password_hash,
+                        role=UserRole.COADMIN,
+                        is_active=is_active,
+                        staff_color=staff_color_for_username(normalized_username),
+                    )
+                )
+        except IntegrityError as error:
+            raise UsernameAlreadyExistsError("Username is already registered") from error
+        await event_broker.publish(
+            LiveEventType.STAFF_CHANGED,
+            user_id=coadmin.id,
+        )
+        return coadmin
+
+    async def create_staff(
+        self,
+        username: str,
+        password: str,
+        *,
+        coadmin_id: int,
+    ) -> User:
         """Create an active staff account."""
         normalized_username = normalize_username(username)
         password_hash = await asyncio.to_thread(hash_password, password)
@@ -128,6 +176,11 @@ class StaffManagementService(ApplicationService):
                 existing = await self._repository.get_by_username(normalized_username)
                 if existing is not None:
                     raise UsernameAlreadyExistsError("Username is already registered")
+                coadmin = await self._repository.get_active_coadmin(coadmin_id)
+                if coadmin is None:
+                    raise CoadminNotFoundError(
+                        f"Active coadmin user {coadmin_id} was not found"
+                    )
                 staff = await self._repository.add(
                     User(
                         username=normalized_username,
@@ -135,10 +188,30 @@ class StaffManagementService(ApplicationService):
                         role=UserRole.STAFF,
                         is_active=True,
                         staff_color=staff_color_for_username(normalized_username),
+                        coadmin_id=coadmin.id,
                     )
                 )
         except IntegrityError as error:
             raise UsernameAlreadyExistsError("Username is already registered") from error
+        await event_broker.publish(
+            LiveEventType.STAFF_CHANGED,
+            user_id=staff.id,
+        )
+        return staff
+
+    async def assign_staff_coadmin(self, user_id: int, coadmin_id: int) -> User:
+        """Assign an existing staff account to an active coadmin."""
+        async with self._session.begin():
+            staff = await self._repository.get_staff_for_update(user_id)
+            if staff is None:
+                raise StaffNotFoundError(f"Staff user {user_id} was not found")
+            coadmin = await self._repository.get_active_coadmin(coadmin_id)
+            if coadmin is None:
+                raise CoadminNotFoundError(
+                    f"Active coadmin user {coadmin_id} was not found"
+                )
+            staff.coadmin_id = coadmin.id
+            await self._repository.flush(staff)
         await event_broker.publish(
             LiveEventType.STAFF_CHANGED,
             user_id=staff.id,
@@ -212,6 +285,11 @@ class StaffManagementService(ApplicationService):
             update(PaymentAuditLog)
             .where(PaymentAuditLog.subject_staff_id == user_id)
             .values(subject_staff_id=None)
+        )
+        await self._session.execute(
+            update(PaymentEventCoadminDismissal)
+            .where(PaymentEventCoadminDismissal.dismissed_by_staff_id == user_id)
+            .values(dismissed_by_staff_id=None)
         )
         await self._session.execute(
             update(CashoutRequest)

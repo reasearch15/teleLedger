@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.repositories.payment_audit import (
@@ -11,6 +12,7 @@ from app.db.repositories.payment_audit import (
 from app.db.repositories.payment_event import PaymentEventRepository, PaymentListPage
 from app.db.repositories.user import UserRepository
 from app.models.payment_audit import PaymentAuditAction, PaymentAuditLog
+from app.models.payment_dismissal import PaymentEventCoadminDismissal
 from app.models.payment_event import PaymentEvent, PaymentStatus
 from app.models.user import User, UserRole
 from app.services.base import ApplicationService
@@ -35,6 +37,10 @@ class PaymentAuthorizationError(Exception):
 
 class AssignmentStaffNotFoundError(Exception):
     """Raised when an administrator selects an unavailable staff account."""
+
+
+class StaffCoadminRequiredError(Exception):
+    """Raised when a staff-only operation requires coadmin assignment."""
 
 
 class PaymentService(ApplicationService):
@@ -78,6 +84,45 @@ class PaymentService(ApplicationService):
                 if current_user.role == UserRole.STAFF
                 else None
             ),
+            visible_to_coadmin_id=(
+                current_user.coadmin_id
+                if current_user.role == UserRole.STAFF
+                else None
+            ),
+            include_dismissals=current_user.role == UserRole.ADMIN,
+        )
+
+    async def dismiss_not_ours(self, payment_event_id: int, actor: User) -> None:
+        """Dismiss a pending payment for the acting staff member's coadmin team."""
+        self._require_staff(actor)
+        if actor.coadmin_id is None:
+            raise StaffCoadminRequiredError(
+                "Staff must be assigned to a coadmin before dismissing payments."
+            )
+        async with self._session.begin():
+            payment = await self._get_locked(payment_event_id)
+            if payment.status != PaymentStatus.PENDING:
+                raise PaymentStateConflictError(
+                    "Only pending payments can be marked Not Ours."
+                )
+            existing = await self._session.scalar(
+                select(PaymentEventCoadminDismissal).where(
+                    PaymentEventCoadminDismissal.payment_event_id == payment.id,
+                    PaymentEventCoadminDismissal.coadmin_id == actor.coadmin_id,
+                )
+            )
+            if existing is None:
+                self._session.add(
+                    PaymentEventCoadminDismissal(
+                        payment_event_id=payment.id,
+                        coadmin_id=actor.coadmin_id,
+                        dismissed_by_staff_id=actor.id,
+                    )
+                )
+        await event_broker.publish(
+            LiveEventType.PAYMENT_DISMISSED,
+            payment_id=payment_event_id,
+            coadmin_id=actor.coadmin_id,
         )
 
     async def list_history(
@@ -95,6 +140,7 @@ class PaymentService(ApplicationService):
             offset=offset,
             include_total=include_total,
             history_only=True,
+            include_dismissals=True,
         )
 
     async def list_my_history(

@@ -3,14 +3,23 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Path, status
 
 from app.api.dependencies import AdminUser, StaffManagementServiceDependency
-from app.schemas.auth import CreateStaffRequest, ResetPasswordRequest, UserResponse
+from app.models.user import User
+from app.schemas.auth import (
+    AssignStaffCoadminRequest,
+    CreateCoadminRequest,
+    CreateStaffRequest,
+    ResetPasswordRequest,
+    UserResponse,
+)
 from app.services.user import (
+    CoadminNotFoundError,
     StaffNotFoundError,
     StaffSelfDeleteForbiddenError,
     UsernameAlreadyExistsError,
 )
 
 router = APIRouter(prefix="/api/admin/staff", tags=["staff management"])
+coadmin_router = APIRouter(prefix="/api/admin/coadmins", tags=["coadmin management"])
 StaffId = Annotated[int, Path(gt=0)]
 
 
@@ -21,7 +30,8 @@ async def list_staff(
 ) -> list[UserResponse]:
     """List all staff accounts."""
     users = await service.list_staff()
-    return [UserResponse.model_validate(user) for user in users]
+    coadmins = {coadmin.id: coadmin.username for coadmin in await service.list_coadmins()}
+    return [_serialize_user(user, coadmins=coadmins) for user in users]
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -35,13 +45,44 @@ async def create_staff(
         user = await service.create_staff(
             request.username,
             request.password.get_secret_value(),
+            coadmin_id=request.coadmin_id,
         )
     except UsernameAlreadyExistsError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(error),
         ) from error
-    return UserResponse.model_validate(user)
+    except CoadminNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    coadmins = {coadmin.id: coadmin.username for coadmin in await service.list_coadmins()}
+    return _serialize_user(user, coadmins=coadmins)
+
+
+@router.patch("/{staff_id}/coadmin", response_model=UserResponse)
+async def assign_staff_coadmin(
+    staff_id: StaffId,
+    request: AssignStaffCoadminRequest,
+    _: AdminUser,
+    service: StaffManagementServiceDependency,
+) -> UserResponse:
+    """Assign an existing staff account to an active coadmin."""
+    try:
+        user = await service.assign_staff_coadmin(staff_id, request.coadmin_id)
+    except StaffNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except CoadminNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    coadmins = {coadmin.id: coadmin.username for coadmin in await service.list_coadmins()}
+    return _serialize_user(user, coadmins=coadmins)
 
 
 @router.patch("/{staff_id}/disable", response_model=UserResponse)
@@ -58,7 +99,8 @@ async def disable_staff(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    return UserResponse.model_validate(user)
+    coadmins = {coadmin.id: coadmin.username for coadmin in await service.list_coadmins()}
+    return _serialize_user(user, coadmins=coadmins)
 
 
 @router.patch("/{staff_id}/reset-password", response_model=UserResponse)
@@ -79,7 +121,8 @@ async def reset_staff_password(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
-    return UserResponse.model_validate(user)
+    coadmins = {coadmin.id: coadmin.username for coadmin in await service.list_coadmins()}
+    return _serialize_user(user, coadmins=coadmins)
 
 
 @router.delete("/{staff_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -102,3 +145,46 @@ async def delete_staff(
             detail=str(error),
         ) from error
 
+
+@coadmin_router.get("", response_model=list[UserResponse])
+async def list_coadmins(
+    _: AdminUser,
+    service: StaffManagementServiceDependency,
+) -> list[UserResponse]:
+    """List all coadmin accounts."""
+    users = await service.list_coadmins()
+    return [UserResponse.model_validate(user) for user in users]
+
+
+@coadmin_router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def create_coadmin(
+    request: CreateCoadminRequest,
+    _: AdminUser,
+    service: StaffManagementServiceDependency,
+) -> UserResponse:
+    """Create a coadmin account."""
+    try:
+        user = await service.create_coadmin(
+            request.username,
+            request.password.get_secret_value(),
+            is_active=request.is_active,
+        )
+    except UsernameAlreadyExistsError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    return UserResponse.model_validate(user)
+
+
+def _serialize_user(
+    user: User,
+    *,
+    coadmins: dict[int, str],
+) -> UserResponse:
+    coadmin_username = (
+        coadmins.get(user.coadmin_id) if user.coadmin_id is not None else None
+    )
+    return UserResponse.model_validate(user).model_copy(
+        update={"coadmin_username": coadmin_username}
+    )

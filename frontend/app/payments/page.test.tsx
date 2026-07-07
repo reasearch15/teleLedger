@@ -1,8 +1,18 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import PaymentsPage from "@/app/payments/page";
-import { listPayments } from "@/services/payments";
+import {
+  claimPayment,
+  dismissPaymentNotOurs,
+  listPayments,
+} from "@/services/payments";
 import type { Payment, PaymentPage } from "@/types/api";
 
 vi.mock("@/components/app-shell", () => ({
@@ -17,6 +27,8 @@ vi.mock("@/components/auth-provider", () => ({
       role: "staff",
       is_active: true,
       staff_color: "#2563EB",
+      coadmin_id: 10,
+      coadmin_username: "owner",
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
       last_login_at: null,
@@ -32,6 +44,7 @@ vi.mock("@/services/payments", () => ({
   PAYMENT_PAGE_SIZE: 7,
   listPayments: vi.fn(),
   claimPayment: vi.fn(),
+  dismissPaymentNotOurs: vi.fn(),
   unclaimPayment: vi.fn(),
   markPaymentDone: vi.fn(),
   forceUnclaimPayment: vi.fn(),
@@ -57,6 +70,7 @@ function payment(id: number): Payment {
     completed_at: null,
     claimed_by_staff: null,
     completed_by_staff: null,
+    coadmin_dismissals: [],
     parser_confidence: 100,
     created_at: "2026-06-29T15:08:00Z",
     updated_at: "2026-06-29T15:08:00Z",
@@ -83,6 +97,15 @@ function page(
 describe("PaymentsPage pagination", () => {
   beforeEach(() => {
     vi.mocked(listPayments).mockReset();
+    vi.mocked(claimPayment).mockReset();
+    vi.mocked(dismissPaymentNotOurs).mockReset();
+    window.localStorage.clear();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
   });
 
   it("fetches once initially, loads the next page, and resets filters to offset zero", async () => {
@@ -148,5 +171,39 @@ describe("PaymentsPage pagination", () => {
       { search: "Krista", activeOnly: true },
       { limit: 7, offset: 0 },
     );
+  });
+
+  it("dismisses Not Ours through the backend and refreshes the active list", async () => {
+    vi.mocked(listPayments)
+      .mockResolvedValueOnce(
+        page([payment(42)], {
+          total: 1,
+          offset: 0,
+          hasMore: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        page([], {
+          total: 0,
+          offset: 0,
+          hasMore: false,
+        }),
+      );
+    vi.mocked(dismissPaymentNotOurs).mockResolvedValueOnce(undefined);
+
+    render(<PaymentsPage />);
+
+    expect(await screen.findByText("Krista R")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Not Ours" }));
+
+    await waitFor(() => expect(dismissPaymentNotOurs).toHaveBeenCalledWith(42));
+    await waitFor(() => {
+      expect(screen.queryByText("Krista R")).not.toBeInTheDocument();
+    });
+    expect(window.confirm).toHaveBeenCalledWith(
+      "Mark this payment as Not Ours for your coadmin team?",
+    );
+    expect(claimPayment).not.toHaveBeenCalled();
   });
 });

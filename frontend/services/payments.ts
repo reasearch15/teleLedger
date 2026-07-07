@@ -74,6 +74,12 @@ export function claimPayment(paymentId: number): Promise<Payment> {
   });
 }
 
+export function dismissPaymentNotOurs(paymentId: number): Promise<void> {
+  return apiRequest<void>(`/api/payments/${paymentId}/not-ours`, {
+    method: "POST",
+  });
+}
+
 export function unclaimPayment(paymentId: number): Promise<Payment> {
   return apiRequest<Payment>(`/api/payments/${paymentId}/unclaim`, {
     method: "POST",

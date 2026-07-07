@@ -16,6 +16,7 @@ class LiveEventType(StrEnum):
     PAYMENT_UNCLAIMED = "payment_unclaimed"
     PAYMENT_DONE = "payment_done"
     PAYMENT_REOPENED = "payment_reopened"
+    PAYMENT_DISMISSED = "payment_dismissed"
     CASHOUT_CREATED = "cashout_created"
     CASHOUT_SENT = "cashout_sent"
     CASHOUT_COMPLETED = "cashout_completed"

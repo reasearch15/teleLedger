@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -175,6 +176,7 @@ async def seed_account(
     username: str,
     role: UserRole,
     color: str,
+    coadmin_id: int | None = None,
 ) -> None:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     async with TestSessionFactory() as session:
@@ -186,11 +188,30 @@ async def seed_account(
                 role=role,
                 is_active=True,
                 staff_color=color,
+                coadmin_id=coadmin_id,
                 created_at=timestamp,
                 updated_at=timestamp,
             )
         )
         await session.commit()
+
+
+@asynccontextmanager
+async def payment_client_for(user: User) -> AsyncIterator[AsyncClient]:
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with TestSessionFactory() as session:
+            yield session
+
+    async def override_current_user() -> User:
+        return user
+
+    app.dependency_overrides[get_session] = override_session
+    app.dependency_overrides[get_auth_session] = override_session
+    app.dependency_overrides[get_current_user] = override_current_user
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as api_client:
+        yield api_client
+    app.dependency_overrides.clear()
 
 
 @pytest.mark.asyncio
@@ -589,6 +610,139 @@ async def test_staff_only_sees_pending_and_own_claims(client: AsyncClient) -> No
 
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["items"]] == [2, 1]
+
+
+@pytest.mark.asyncio
+async def test_not_ours_hides_payment_for_same_coadmin_only() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(11, username="coadmin_two", role=UserRole.COADMIN, color="#222222")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_account(
+        43,
+        username="staff_two",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_account(
+        84,
+        username="other_staff",
+        role=UserRole.STAFF,
+        color="#16A34A",
+        coadmin_id=11,
+    )
+    await seed_payment(1)
+
+    staff_one = User(
+        id=42,
+        username="staff_one",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    staff_two = User(
+        id=43,
+        username="staff_two",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    other_staff = User(
+        id=84,
+        username="other_staff",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#16A34A",
+        coadmin_id=11,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_one) as api:
+        dismiss_response = await api.post("/api/payments/1/not-ours")
+        after_dismiss = await api.get("/api/payments")
+    async with payment_client_for(staff_two) as api:
+        same_team_response = await api.get("/api/payments")
+    async with payment_client_for(other_staff) as api:
+        other_team_response = await api.get("/api/payments")
+
+    assert dismiss_response.status_code == 204
+    assert [item["id"] for item in after_dismiss.json()["items"]] == []
+    assert [item["id"] for item in same_team_response.json()["items"]] == []
+    assert [item["id"] for item in other_team_response.json()["items"]] == [1]
+
+
+@pytest.mark.asyncio
+async def test_claim_still_works_globally_after_other_coadmin_dismisses() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(11, username="coadmin_two", role=UserRole.COADMIN, color="#222222")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_account(
+        84,
+        username="other_staff",
+        role=UserRole.STAFF,
+        color="#16A34A",
+        coadmin_id=11,
+    )
+    await seed_payment(1)
+
+    staff_one = User(
+        id=42,
+        username="staff_one",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    other_staff = User(
+        id=84,
+        username="other_staff",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#16A34A",
+        coadmin_id=11,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_one) as api:
+        assert (await api.post("/api/payments/1/not-ours")).status_code == 204
+    async with payment_client_for(other_staff) as api:
+        claim_response = await api.post("/api/payments/1/claim")
+    async with payment_client_for(staff_one) as api:
+        same_team_after_claim = await api.get("/api/payments")
+
+    assert claim_response.status_code == 200
+    assert claim_response.json()["status"] == "in_progress"
+    assert claim_response.json()["claimed_by_staff_id"] == 84
+    assert [item["id"] for item in same_team_after_claim.json()["items"]] == []
 
 
 @pytest.mark.asyncio

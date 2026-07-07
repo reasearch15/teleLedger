@@ -1,4 +1,4 @@
-export type UserRole = "admin" | "staff";
+export type UserRole = "admin" | "coadmin" | "staff";
 
 export type User = {
   id: number;
@@ -6,6 +6,8 @@ export type User = {
   role: UserRole;
   is_active: boolean;
   staff_color: string;
+  coadmin_id: number | null;
+  coadmin_username: string | null;
   created_at: string;
   updated_at: string;
   last_login_at: string | null;
@@ -35,6 +37,13 @@ export type Payment = {
   completed_at: string | null;
   claimed_by_staff: StaffIdentity | null;
   completed_by_staff: StaffIdentity | null;
+  coadmin_dismissals: Array<{
+    coadmin_id: number;
+    coadmin_username: string | null;
+    dismissed_by_staff_id: number | null;
+    dismissed_by_staff_username: string | null;
+    created_at: string;
+  }>;
   parser_confidence: number;
   created_at: string;
   updated_at: string;

@@ -301,12 +301,21 @@ async def test_same_username_can_be_created_again_with_new_id(
     )
     await login(client, "admin", ADMIN_PASSWORD)
     await client.delete("/api/admin/staff/2")
+    coadmin_response = await client.post(
+        "/api/admin/coadmins",
+        json={"username": "coadmin01", "password": "Another-secure-password"},
+    )
 
     create_response = await client.post(
         "/api/admin/staff",
-        json={"username": "staff01", "password": "Another-secure-password"},
+        json={
+            "username": "staff01",
+            "password": "Another-secure-password",
+            "coadmin_id": coadmin_response.json()["id"],
+        },
     )
 
+    assert coadmin_response.status_code == 201
     assert create_response.status_code == 201
     assert create_response.json()["username"] == "staff01"
     async with TestSessionFactory() as session:
@@ -336,6 +345,10 @@ async def test_old_payment_and_cashout_rows_do_not_attach_to_recreated_staff(
     await seed_cashout_for_staff(2)
     await login(client, "admin", ADMIN_PASSWORD)
     await client.delete("/api/admin/staff/2")
+    coadmin_response = await client.post(
+        "/api/admin/coadmins",
+        json={"username": "coadmin01", "password": "Another-secure-password"},
+    )
 
     async with TestSessionFactory() as session:
         payment = await session.get(PaymentEvent, 1)
@@ -349,8 +362,14 @@ async def test_old_payment_and_cashout_rows_do_not_attach_to_recreated_staff(
 
     create_response = await client.post(
         "/api/admin/staff",
-        json={"username": "staff01", "password": "Another-secure-password"},
+        json={
+            "username": "staff01",
+            "password": "Another-secure-password",
+            "coadmin_id": coadmin_response.json()["id"],
+        },
     )
+    assert coadmin_response.status_code == 201
+    assert create_response.status_code == 201
     new_staff_id = create_response.json()["id"]
 
     async with TestSessionFactory() as session:

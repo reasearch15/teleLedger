@@ -1,6 +1,13 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
@@ -15,6 +22,7 @@ import { usePaymentNotificationSound } from "@/lib/payment-notifications";
 import {
   assignPayment,
   claimPayment,
+  dismissPaymentNotOurs,
   forceUnclaimPayment,
   listPaymentAudit,
   listPayments,
@@ -88,6 +96,7 @@ export default function PaymentsPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionId, setActionId] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
   const [assignmentByPayment, setAssignmentByPayment] = useState<
     Record<number, number>
   >({});
@@ -101,8 +110,25 @@ export default function PaymentsPage() {
   const {
     acknowledgePayment,
     notifyNewPayment,
+    notifyPaymentClaimed,
+    notifyPaymentCompleted,
+    notifyPaymentError,
     setVisiblePendingPayments,
   } = usePaymentNotificationSound();
+
+  const visiblePayments = useMemo(() => {
+    if (user?.role !== "staff") return payments;
+
+    return payments.filter((payment) => {
+      if (payment.status === "pending") {
+        return true;
+      }
+      if (payment.status === "in_progress") {
+        return payment.claimed_by_staff_id === userId;
+      }
+      return false;
+    });
+  }, [payments, user?.role, userId]);
 
   const applyPage = useCallback(
     (
@@ -197,11 +223,11 @@ export default function PaymentsPage() {
 
   useEffect(() => {
     setVisiblePendingPayments(
-      payments
+      visiblePayments
         .filter((payment) => payment.status === "pending")
         .map((payment) => payment.id),
     );
-  }, [payments, setVisiblePendingPayments]);
+  }, [setVisiblePendingPayments, visiblePayments]);
 
   useLiveUpdates(
     PAYMENT_PAGE_EVENTS,
@@ -267,10 +293,12 @@ export default function PaymentsPage() {
   const runAction = async (
     paymentId: number,
     action: (id: number) => Promise<Payment>,
+    notification?: "claimed" | "completed",
   ) => {
     acknowledgePayment(paymentId);
     setActionId(paymentId);
     setError("");
+    setMessage("");
     try {
       const updated = await action(paymentId);
       setPayments((current) => {
@@ -295,9 +323,15 @@ export default function PaymentsPage() {
             : payment,
         );
       });
+      if (notification === "claimed") {
+        notifyPaymentClaimed();
+      } else if (notification === "completed") {
+        notifyPaymentCompleted();
+      }
       void loadFirstPage();
     } catch (actionError) {
       setError(friendlyError(actionError));
+      notifyPaymentError();
     } finally {
       setActionId(null);
     }
@@ -309,13 +343,37 @@ export default function PaymentsPage() {
     }
   };
 
+  const ignorePaymentForCurrentStaff = async (paymentId: number) => {
+    if (user?.role !== "staff" || !userId) return;
+    if (
+      !window.confirm("Mark this payment as Not Ours for your coadmin team?")
+    ) {
+      return;
+    }
+
+    acknowledgePayment(paymentId);
+    setActionId(paymentId);
+    setError("");
+    setMessage("");
+    try {
+      await dismissPaymentNotOurs(paymentId);
+      setMessage("Payment dismissed for your coadmin team.");
+      await loadFirstPage();
+    } catch (dismissError) {
+      setError(friendlyError(dismissError));
+      notifyPaymentError();
+    } finally {
+      setActionId(null);
+    }
+  };
+
   const handleAssign = async (paymentId: number) => {
     const staffId = assignmentByPayment[paymentId];
     if (!staffId) {
       setError("Choose a staff member before assigning this payment.");
       return;
     }
-    await runAction(paymentId, (id) => assignPayment(id, staffId));
+    await runAction(paymentId, (id) => assignPayment(id, staffId), "claimed");
   };
 
   const toggleAudit = async (paymentId: number) => {
@@ -432,6 +490,14 @@ export default function PaymentsPage() {
           {error}
         </div>
       ) : null}
+      {message ? (
+        <div
+          role="status"
+          className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700"
+        >
+          {message}
+        </div>
+      ) : null}
 
       <div className="mb-4 flex items-center justify-between">
         <div>
@@ -442,8 +508,8 @@ export default function PaymentsPage() {
           {loading
             ? "Loading payments…"
             : total === null
-              ? `${payments.length}${hasMore ? "+" : ""} payments`
-              : `${payments.length} of ${total} payments`}
+              ? `${visiblePayments.length}${hasMore ? "+" : ""} payments`
+              : `${visiblePayments.length} of ${total} payments`}
         </p>
         </div>
         <button
@@ -456,13 +522,13 @@ export default function PaymentsPage() {
         </button>
       </div>
 
-      {!loading && payments.length === 0 ? (
+      {!loading && visiblePayments.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-16 text-center">
           <p className="font-bold text-slate-800">No payments found</p>
         </div>
       ) : (
         <section className="grid gap-4">
-          {payments.map((payment) => {
+          {visiblePayments.map((payment) => {
             const busy = actionId === payment.id;
             const claimedByMe =
               payment.status === "in_progress" &&
@@ -522,6 +588,23 @@ export default function PaymentsPage() {
                       <span>Claimed: {formatDate(payment.claimed_at)}</span>
                       <span>Completed: {formatDate(payment.completed_at)}</span>
                     </div>
+                    {user?.role === "admin" &&
+                    payment.coadmin_dismissals.length > 0 ? (
+                      <div className="flex flex-wrap gap-2 text-xs text-amber-800">
+                        {payment.coadmin_dismissals.map((dismissal) => (
+                          <span
+                            key={`${dismissal.coadmin_id}-${dismissal.created_at}`}
+                            className="rounded-full bg-amber-50 px-2 py-1 font-semibold"
+                          >
+                            Not Ours:{" "}
+                            {dismissal.coadmin_username ?? "Deleted Coadmin"}
+                            {dismissal.dismissed_by_staff_username
+                              ? ` by ${dismissal.dismissed_by_staff_username}`
+                              : ""}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
@@ -529,17 +612,40 @@ export default function PaymentsPage() {
                       <button
                         type="button"
                         disabled={busy}
-                        onClick={() => void runAction(payment.id, claimPayment)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void runAction(payment.id, claimPayment, "claimed");
+                        }}
                         className="rounded-lg bg-indigo-600 px-3.5 py-2 text-sm font-bold text-white disabled:opacity-50"
                       >
                         Claim
+                      </button>
+                    ) : null}
+                    {user?.role === "staff" && payment.status === "pending" ? (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void ignorePaymentForCurrentStaff(payment.id);
+                        }}
+                        className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-bold text-slate-700 disabled:opacity-50"
+                      >
+                        Not Ours
                       </button>
                     ) : null}
                     {user?.role === "staff" && claimedByMe ? (
                       <button
                         type="button"
                         disabled={busy}
-                        onClick={() => void runAction(payment.id, markPaymentDone)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void runAction(
+                            payment.id,
+                            markPaymentDone,
+                            "completed",
+                          );
+                        }}
                         className="rounded-lg bg-emerald-600 px-3.5 py-2 text-sm font-bold text-white disabled:opacity-50"
                       >
                         Done

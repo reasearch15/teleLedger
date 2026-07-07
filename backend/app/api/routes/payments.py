@@ -26,6 +26,7 @@ from app.services.payment import (
     PaymentNotFoundError,
     PaymentService,
     PaymentStateConflictError,
+    StaffCoadminRequiredError,
 )
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
@@ -198,6 +199,32 @@ async def unclaim_payment(
     return PaymentEventResponse.model_validate(payment)
 
 
+@router.post("/{payment_id}/not-ours", status_code=status.HTTP_204_NO_CONTENT)
+async def dismiss_payment_not_ours(
+    payment_id: PaymentId,
+    service: PaymentServiceDependency,
+    current_user: CurrentUser,
+) -> None:
+    """Dismiss a pending payment for the current staff member's coadmin team."""
+    try:
+        await service.dismiss_not_ours(payment_id, current_user)
+    except PaymentNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except PaymentStateConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except (PaymentAuthorizationError, StaffCoadminRequiredError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(error),
+        ) from error
+
+
 @router.post(
     "/admin/{payment_id}/force-unclaim",
     response_model=PaymentEventResponse,
@@ -345,6 +372,7 @@ def _serialize_payment_page(
                         if item.completed_by_staff is not None
                         else None
                     ),
+                    "coadmin_dismissals": item.coadmin_dismissals,
                 }
             )
             for item in page.items

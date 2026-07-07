@@ -14,8 +14,12 @@ function formatDate(value: string | null | undefined): string {
 
 export default function SettingsPage() {
   const { user } = useAuth();
-  const { enabled: paymentSoundEnabled, setEnabled: setPaymentSoundEnabled } =
-    usePaymentNotificationPreference();
+  const {
+    enabled: paymentSoundEnabled,
+    setEnabled: setPaymentSoundEnabled,
+    setVolume: setPaymentSoundVolume,
+    volume: paymentSoundVolume,
+  } = usePaymentNotificationPreference();
 
   return (
     <AppShell title="Settings" description="Your local account and session details.">
@@ -49,6 +53,28 @@ export default function SettingsPage() {
                 }`}
               />
             </button>
+          </div>
+          <div className="border-t border-slate-100 px-5 py-4 sm:px-6">
+            <label
+              htmlFor="payment-notification-volume"
+              className="text-sm font-bold text-slate-950"
+            >
+              Notification Volume
+            </label>
+            <select
+              id="payment-notification-volume"
+              value={paymentSoundVolume}
+              onChange={(event) =>
+                setPaymentSoundVolume(
+                  event.target.value as "low" | "medium" | "high",
+                )
+              }
+              className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 sm:max-w-48"
+            >
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
           </div>
         </section>
 

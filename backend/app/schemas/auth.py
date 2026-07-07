@@ -25,6 +25,7 @@ class CreateStaffRequest(BaseModel):
 
     username: str
     password: SecretStr = Field(min_length=12, max_length=128)
+    coadmin_id: int = Field(gt=0)
 
     @field_validator("username")
     @classmethod
@@ -38,6 +39,25 @@ class ResetPasswordRequest(BaseModel):
     password: SecretStr = Field(min_length=12, max_length=128)
 
 
+class CreateCoadminRequest(BaseModel):
+    """Admin-only request for a new coadmin account."""
+
+    username: str
+    password: SecretStr = Field(min_length=12, max_length=128)
+    is_active: bool = True
+
+    @field_validator("username")
+    @classmethod
+    def normalize_coadmin_username(cls, value: str) -> str:
+        return normalize_username(value)
+
+
+class AssignStaffCoadminRequest(BaseModel):
+    """Admin-only request to assign staff to a coadmin."""
+
+    coadmin_id: int = Field(gt=0)
+
+
 class UserResponse(BaseModel):
     """Safe account representation that never exposes password hashes."""
 
@@ -48,6 +68,8 @@ class UserResponse(BaseModel):
     role: UserRole
     is_active: bool
     staff_color: str
+    coadmin_id: int | None = None
+    coadmin_username: str | None = None
     created_at: datetime
     updated_at: datetime
     last_login_at: datetime | None

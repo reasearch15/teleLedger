@@ -5,10 +5,43 @@ export function listStaff(): Promise<User[]> {
   return apiRequest<User[]>("/api/admin/staff");
 }
 
-export function createStaff(username: string, password: string): Promise<User> {
+export function listCoadmins(): Promise<User[]> {
+  return apiRequest<User[]>("/api/admin/coadmins");
+}
+
+export function createCoadmin(
+  username: string,
+  password: string,
+  isActive: boolean,
+): Promise<User> {
+  return apiRequest<User>("/api/admin/coadmins", {
+    method: "POST",
+    body: JSON.stringify({
+      username,
+      password,
+      is_active: isActive,
+    }),
+  });
+}
+
+export function createStaff(
+  username: string,
+  password: string,
+  coadminId: number,
+): Promise<User> {
   return apiRequest<User>("/api/admin/staff", {
     method: "POST",
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, coadmin_id: coadminId }),
+  });
+}
+
+export function assignStaffCoadmin(
+  staffId: number,
+  coadminId: number,
+): Promise<User> {
+  return apiRequest<User>(`/api/admin/staff/${staffId}/coadmin`, {
+    method: "PATCH",
+    body: JSON.stringify({ coadmin_id: coadminId }),
   });
 }
 
@@ -33,4 +66,3 @@ export function deleteStaff(staffId: number): Promise<void> {
     method: "DELETE",
   });
 }
-

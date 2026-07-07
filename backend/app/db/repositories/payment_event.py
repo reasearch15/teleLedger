@@ -3,12 +3,13 @@ from datetime import date, datetime, time
 from time import perf_counter
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, load_only
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.repositories.base import BaseRepository
+from app.models.payment_dismissal import PaymentEventCoadminDismissal
 from app.models.payment_event import PaymentEvent, PaymentStatus
 from app.models.telegram_message import TelegramMessage
 from app.models.user import User
@@ -30,6 +31,18 @@ class PaymentListItem:
     payment: PaymentEvent
     claimed_by_staff: StaffIdentity | None
     completed_by_staff: StaffIdentity | None
+    coadmin_dismissals: list["PaymentDismissalIdentity"]
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentDismissalIdentity:
+    """Coadmin dismissal identity embedded in payment list rows."""
+
+    coadmin_id: int
+    coadmin_username: str | None
+    dismissed_by_staff_id: int | None
+    dismissed_by_staff_username: str | None
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,9 +97,11 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         offset: int = 0,
         include_total: bool = False,
         visible_to_staff_id: int | None = None,
+        visible_to_coadmin_id: int | None = None,
         history_staff_id: int | None = None,
         active_only: bool = False,
         history_only: bool = False,
+        include_dismissals: bool = False,
     ) -> PaymentListPage:
         """Return one lightweight page without counting unless requested."""
         conditions = self._list_conditions(
@@ -95,6 +110,7 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
             date_from=date_from,
             date_to=date_to,
             visible_to_staff_id=visible_to_staff_id,
+            visible_to_coadmin_id=visible_to_coadmin_id,
             history_staff_id=history_staff_id,
             active_only=active_only,
             history_only=history_only,
@@ -162,6 +178,12 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
 
         has_more_started_at = perf_counter()
         has_more = len(rows) > limit
+        payment_ids = [row[0].id for row in rows[:limit]]
+        dismissals_by_payment = (
+            await self._dismissals_by_payment(payment_ids)
+            if include_dismissals
+            else {}
+        )
         items = [
             PaymentListItem(
                 payment=row[0],
@@ -175,6 +197,7 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
                     if row[4] is not None
                     else None
                 ),
+                coadmin_dismissals=dismissals_by_payment.get(row[0].id, []),
             )
             for row in rows[:limit]
         ]
@@ -202,6 +225,45 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
             has_more_ms=has_more_ms,
         )
 
+    async def _dismissals_by_payment(
+        self,
+        payment_ids: list[int],
+    ) -> dict[int, list[PaymentDismissalIdentity]]:
+        if not payment_ids:
+            return {}
+        coadmin = aliased(User, name="dismissal_coadmin")
+        staff = aliased(User, name="dismissal_staff")
+        statement = (
+            select(
+                PaymentEventCoadminDismissal.payment_event_id,
+                PaymentEventCoadminDismissal.coadmin_id,
+                coadmin.username,
+                PaymentEventCoadminDismissal.dismissed_by_staff_id,
+                staff.username,
+                PaymentEventCoadminDismissal.created_at,
+            )
+            .outerjoin(coadmin, PaymentEventCoadminDismissal.coadmin_id == coadmin.id)
+            .outerjoin(
+                staff,
+                PaymentEventCoadminDismissal.dismissed_by_staff_id == staff.id,
+            )
+            .where(PaymentEventCoadminDismissal.payment_event_id.in_(payment_ids))
+            .order_by(PaymentEventCoadminDismissal.created_at.asc())
+        )
+        rows = (await self._session.execute(statement)).all()
+        dismissals: dict[int, list[PaymentDismissalIdentity]] = {}
+        for row in rows:
+            dismissals.setdefault(row[0], []).append(
+                PaymentDismissalIdentity(
+                    coadmin_id=row[1],
+                    coadmin_username=row[2],
+                    dismissed_by_staff_id=row[3],
+                    dismissed_by_staff_username=row[4],
+                    created_at=row[5],
+                )
+            )
+        return dismissals
+
     @staticmethod
     def _list_conditions(
         *,
@@ -210,6 +272,7 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         date_from: date | None,
         date_to: date | None,
         visible_to_staff_id: int | None,
+        visible_to_coadmin_id: int | None,
         history_staff_id: int | None,
         active_only: bool,
         history_only: bool,
@@ -221,9 +284,25 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
             conditions.append(PaymentEvent.status == status)
 
         if visible_to_staff_id is not None:
+            visible_pending_condition: ColumnElement[bool] = (
+                PaymentEvent.status == PaymentStatus.PENDING
+            )
+            if visible_to_coadmin_id is not None:
+                visible_pending_condition = (
+                    visible_pending_condition
+                    & ~exists()
+                    .where(
+                        PaymentEventCoadminDismissal.payment_event_id
+                        == PaymentEvent.id
+                    )
+                    .where(
+                        PaymentEventCoadminDismissal.coadmin_id
+                        == visible_to_coadmin_id
+                    )
+                )
             conditions.append(
                 or_(
-                    PaymentEvent.status == PaymentStatus.PENDING,
+                    visible_pending_condition,
                     (
                         (PaymentEvent.status == PaymentStatus.IN_PROGRESS)
                         & (
