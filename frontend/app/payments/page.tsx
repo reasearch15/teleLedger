@@ -98,7 +98,11 @@ export default function PaymentsPage() {
   const requestVersion = useRef(0);
   const knownPaymentIds = useRef<Set<number>>(new Set());
   const initialSyncComplete = useRef(false);
-  const { notifyNewPayment } = usePaymentNotificationSound();
+  const {
+    acknowledgePayment,
+    notifyNewPayment,
+    setVisiblePendingPayments,
+  } = usePaymentNotificationSound();
 
   const applyPage = useCallback(
     (
@@ -191,6 +195,14 @@ export default function PaymentsPage() {
       .catch((loadError: unknown) => setError(friendlyError(loadError)));
   }, [user?.role]);
 
+  useEffect(() => {
+    setVisiblePendingPayments(
+      payments
+        .filter((payment) => payment.status === "pending")
+        .map((payment) => payment.id),
+    );
+  }, [payments, setVisiblePendingPayments]);
+
   useLiveUpdates(
     PAYMENT_PAGE_EVENTS,
     (events) => {
@@ -256,6 +268,7 @@ export default function PaymentsPage() {
     paymentId: number,
     action: (id: number) => Promise<Payment>,
   ) => {
+    acknowledgePayment(paymentId);
     setActionId(paymentId);
     setError("");
     try {
@@ -287,6 +300,12 @@ export default function PaymentsPage() {
       setError(friendlyError(actionError));
     } finally {
       setActionId(null);
+    }
+  };
+
+  const acknowledgeVisiblePayment = (payment: Payment) => {
+    if (payment.status === "pending") {
+      acknowledgePayment(payment.id);
     }
   };
 
@@ -458,6 +477,7 @@ export default function PaymentsPage() {
             return (
               <article
                 key={payment.id}
+                onClick={() => acknowledgeVisiblePayment(payment)}
                 className={`overflow-hidden rounded-xl border px-3 py-3 shadow-sm sm:px-4 ${cardColor} ${
                   user?.role === "staff" && claimedByMe
                     ? "ring-2 ring-emerald-400"

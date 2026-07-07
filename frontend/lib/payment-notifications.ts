@@ -5,18 +5,22 @@ import { useCallback, useEffect, useSyncExternalStore } from "react";
 export const PAYMENT_NOTIFICATION_SOUND_KEY = "paymentNotificationSound";
 
 const PLAY_THROTTLE_MS = 500;
+const PENDING_ALARM_INTERVAL_MS = 3000;
 const DEFAULT_ENABLED = true;
 
 type AudioContextConstructor = typeof AudioContext;
 type BrowserWindow = Window &
   typeof globalThis & {
+    __ledgerPaymentAudioContext?: AudioContext;
+    __ledgerPendingPaymentAlarmTimer?: ReturnType<typeof setInterval> | null;
     webkitAudioContext?: AudioContextConstructor;
   };
 
-let audioContext: AudioContext | null = null;
 let hasUserInteraction = false;
 let interactionListenersAttached = false;
 let lastPlayedAt = 0;
+let visiblePendingPaymentIds = new Set<number>();
+let acknowledgedPendingPaymentIds = new Set<number>();
 const preferenceListeners = new Set<() => void>();
 
 function getWindow(): BrowserWindow | null {
@@ -40,13 +44,15 @@ function createAudioContext(): AudioContext | null {
     browserWindow.webkitAudioContext) as AudioContextConstructor | undefined;
   if (!AudioContextClass) return null;
 
-  audioContext = audioContext ?? new AudioContextClass();
-  return audioContext;
+  browserWindow.__ledgerPaymentAudioContext =
+    browserWindow.__ledgerPaymentAudioContext ?? new AudioContextClass();
+  return browserWindow.__ledgerPaymentAudioContext;
 }
 
 function markUserInteraction(): void {
   hasUserInteraction = true;
   void createAudioContext()?.resume();
+  reconcilePendingPaymentAlarm();
 }
 
 function attachInteractionListeners(): void {
@@ -58,6 +64,95 @@ function attachInteractionListeners(): void {
   browserWindow.addEventListener("pointerdown", markUserInteraction, options);
   browserWindow.addEventListener("keydown", markUserInteraction);
   browserWindow.addEventListener("touchstart", markUserInteraction, options);
+}
+
+function hasUnacknowledgedPendingPayments(): boolean {
+  for (const paymentId of visiblePendingPaymentIds) {
+    if (!acknowledgedPendingPaymentIds.has(paymentId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function stopPendingPaymentAlarm(): void {
+  const browserWindow = getWindow();
+  const pendingAlarmTimer = browserWindow?.__ledgerPendingPaymentAlarmTimer;
+  if (!pendingAlarmTimer) return;
+  clearInterval(pendingAlarmTimer);
+  if (browserWindow) {
+    browserWindow.__ledgerPendingPaymentAlarmTimer = null;
+  }
+}
+
+function shouldPauseForHiddenTab(): boolean {
+  const browserWindow = getWindow();
+  return browserWindow?.document.visibilityState === "hidden";
+}
+
+function playPendingPaymentAlarmTick(): void {
+  if (shouldPauseForHiddenTab()) return;
+  if (!hasUnacknowledgedPendingPayments()) {
+    stopPendingPaymentAlarm();
+    return;
+  }
+  playNewPaymentNotification();
+}
+
+function ensurePendingPaymentAlarm(): void {
+  attachInteractionListeners();
+  if (!getStoredPreference() || shouldPauseForHiddenTab()) return;
+  if (!hasUnacknowledgedPendingPayments()) {
+    stopPendingPaymentAlarm();
+    return;
+  }
+
+  playPendingPaymentAlarmTick();
+  const browserWindow = getWindow();
+  if (!browserWindow || browserWindow.__ledgerPendingPaymentAlarmTimer) return;
+  browserWindow.__ledgerPendingPaymentAlarmTimer = setInterval(
+    playPendingPaymentAlarmTick,
+    PENDING_ALARM_INTERVAL_MS,
+  );
+}
+
+function reconcilePendingPaymentAlarm(): void {
+  if (hasUnacknowledgedPendingPayments()) {
+    ensurePendingPaymentAlarm();
+  } else {
+    stopPendingPaymentAlarm();
+  }
+}
+
+function clearPendingPaymentAlarmState(): void {
+  visiblePendingPaymentIds = new Set();
+  acknowledgedPendingPaymentIds = new Set();
+  stopPendingPaymentAlarm();
+}
+
+function handleVisibilityChange(): void {
+  if (shouldPauseForHiddenTab()) {
+    stopPendingPaymentAlarm();
+    return;
+  }
+  reconcilePendingPaymentAlarm();
+}
+
+function attachVisibilityListener(): () => void {
+  const browserWindow = getWindow();
+  if (!browserWindow) return () => undefined;
+
+  browserWindow.document.addEventListener(
+    "visibilitychange",
+    handleVisibilityChange,
+  );
+
+  return () => {
+    browserWindow.document.removeEventListener(
+      "visibilitychange",
+      handleVisibilityChange,
+    );
+  };
 }
 
 function emitPreferenceChange(): void {
@@ -97,8 +192,12 @@ export function setPaymentNotificationSoundEnabled(enabled: boolean): void {
     attachInteractionListeners();
   } else {
     browserWindow.localStorage.setItem(PAYMENT_NOTIFICATION_SOUND_KEY, "off");
+    stopPendingPaymentAlarm();
   }
   emitPreferenceChange();
+  if (enabled) {
+    reconcilePendingPaymentAlarm();
+  }
 }
 
 export function playNewPaymentNotification(): void {
@@ -163,12 +262,40 @@ export function usePaymentNotificationPreference(): {
 
 export function usePaymentNotificationSound(): {
   notifyNewPayment: () => void;
+  acknowledgePayment: (paymentId: number) => void;
+  setVisiblePendingPayments: (paymentIds: number[]) => void;
 } {
   useEffect(() => {
     attachInteractionListeners();
+    const detachVisibilityListener = attachVisibilityListener();
+    return () => {
+      detachVisibilityListener();
+      clearPendingPaymentAlarmState();
+    };
   }, []);
 
   return {
     notifyNewPayment: playNewPaymentNotification,
+    acknowledgePayment: acknowledgePendingPayment,
+    setVisiblePendingPayments,
   };
+}
+
+export function setVisiblePendingPayments(paymentIds: number[]): void {
+  const nextVisiblePaymentIds = new Set(paymentIds);
+
+  for (const paymentId of acknowledgedPendingPaymentIds) {
+    if (!nextVisiblePaymentIds.has(paymentId)) {
+      acknowledgedPendingPaymentIds.delete(paymentId);
+    }
+  }
+
+  visiblePendingPaymentIds = nextVisiblePaymentIds;
+  reconcilePendingPaymentAlarm();
+}
+
+export function acknowledgePendingPayment(paymentId: number): void {
+  if (!visiblePendingPaymentIds.has(paymentId)) return;
+  acknowledgedPendingPaymentIds.add(paymentId);
+  reconcilePendingPaymentAlarm();
 }
