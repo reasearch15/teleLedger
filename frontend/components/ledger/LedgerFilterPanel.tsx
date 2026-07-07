@@ -3,8 +3,8 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
 import { friendlyError } from "@/lib/api-client";
-import { getLedger } from "@/services/ledger";
-import type { CoadminLedgerSummary } from "@/types/api";
+import { listCoadmins } from "@/services/staff";
+import type { User } from "@/types/api";
 
 import {
   Panel,
@@ -20,7 +20,7 @@ export function LedgerFilterPanel() {
   const [coadminId, setCoadminId] = useState(
     initialFilters.coadminId ? String(initialFilters.coadminId) : "all",
   );
-  const [coadmins, setCoadmins] = useState<CoadminLedgerSummary[]>([]);
+  const [coadmins, setCoadmins] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -28,8 +28,7 @@ export function LedgerFilterPanel() {
     setLoading(true);
     setError("");
     try {
-      const ledger = await getLedger();
-      setCoadmins(ledger.coadmin_summaries);
+      setCoadmins(await listCoadmins());
     } catch (loadError) {
       setError(friendlyError(loadError));
     } finally {
@@ -89,11 +88,10 @@ export function LedgerFilterPanel() {
             <option value="all">All coadmins</option>
             {coadmins.map((coadmin) => (
               <option
-                key={coadmin.coadmin_id ?? "default"}
-                value={String(coadmin.coadmin_id ?? "default")}
-                disabled={coadmin.coadmin_id == null}
+                key={coadmin.id}
+                value={String(coadmin.id)}
               >
-                {coadmin.coadmin_username}
+                {coadmin.username}
               </option>
             ))}
           </select>

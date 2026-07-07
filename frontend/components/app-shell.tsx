@@ -61,6 +61,7 @@ export function AppShell({
     user.role === "admin"
       ? [
           ...navigation,
+          { href: "/admin/ledger", label: "Ledger" },
           { href: "/admin/coadmin-summary", label: "Coadmin Summary" },
           { href: "/admin/staff-balances", label: "Staff Balances" },
           { href: "/admin/adjustment-history", label: "Adjustment History" },
