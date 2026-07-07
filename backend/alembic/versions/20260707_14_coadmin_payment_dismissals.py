@@ -17,9 +17,20 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _add_coadmin_role_enum_value() -> None:
+    """Commit enum addition before any statement uses role='coadmin'."""
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+
+    # PostgreSQL rejects use of a new enum value until the ADD VALUE txn commits.
+    with op.get_context().autocommit_block():
+        op.execute(sa.text("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'coadmin'"))
+
+
 def upgrade() -> None:
-    """Add coadmin role, staff ownership, and scoped dismissals."""
-    op.execute("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'coadmin'")
+    """Add coadmin role, staff ownership, scoped dismissals, and legacy backfill."""
+    _add_coadmin_role_enum_value()
     op.add_column("users", sa.Column("coadmin_id", sa.BigInteger(), nullable=True))
     op.create_foreign_key(
         "fk_users_coadmin_id_users",
@@ -88,9 +99,16 @@ def upgrade() -> None:
         ["coadmin_id"],
     )
 
+    from app.db.coadmin_backfill import run_coadmin_backfill
+
+    run_coadmin_backfill()
+
 
 def downgrade() -> None:
     """Remove scoped dismissals and staff coadmin ownership."""
+    from app.db.coadmin_backfill import drop_staff_coadmin_required_constraint
+
+    drop_staff_coadmin_required_constraint()
     op.drop_index(
         "ix_payment_event_coadmin_dismissals_coadmin_id",
         table_name="payment_event_coadmin_dismissals",

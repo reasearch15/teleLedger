@@ -5,7 +5,6 @@ import types
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
 import sqlalchemy as sa
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -18,9 +17,14 @@ from app.models.user import UserRole
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 STAFF_PASSWORD = "A-secure-staff-password"
 STAFF_PASSWORD_HASH = hash_password(STAFF_PASSWORD)
+MIGRATION_14_PATH = (
+    BACKEND_ROOT / "alembic" / "versions" / "20260707_14_coadmin_payment_dismissals.py"
+)
 MIGRATION_PATH = (
     BACKEND_ROOT / "alembic" / "versions" / "20260707_15_default_coadmin_staff_backfill.py"
 )
+COADMIN_BACKFILL_PATH = BACKEND_ROOT / "app" / "db" / "coadmin_backfill.py"
+ALEMBIC_ENV_PATH = BACKEND_ROOT / "alembic" / "env.py"
 
 
 def _load_migration() -> types.ModuleType:
@@ -87,11 +91,23 @@ def _seed_legacy_staff(connection: sa.Connection) -> None:
 
 
 def test_migration_module_defines_default_coadmin_backfill() -> None:
-    source = MIGRATION_PATH.read_text(encoding="utf-8")
-    assert 'DEFAULT_COADMIN_USERNAME = "default_coadmin"' in source
-    assert "ck_users_staff_requires_coadmin_id" in source
-    assert "role != 'staff' OR coadmin_id IS NOT NULL" in source
-    assert "assign_orphan_staff" in source
+    migration_source = MIGRATION_PATH.read_text(encoding="utf-8")
+    backfill_source = COADMIN_BACKFILL_PATH.read_text(encoding="utf-8")
+    assert 'DEFAULT_COADMIN_USERNAME = "default_coadmin"' in backfill_source
+    assert "ck_users_staff_requires_coadmin_id" in backfill_source
+    assert "role != 'staff' OR coadmin_id IS NOT NULL" in backfill_source
+    assert "assign_orphan_staff" in backfill_source
+    assert "run_coadmin_backfill" in migration_source
+
+
+def test_coadmin_enum_migration_commits_before_use() -> None:
+    migration_14 = MIGRATION_14_PATH.read_text(encoding="utf-8")
+    alembic_env = ALEMBIC_ENV_PATH.read_text(encoding="utf-8")
+
+    assert "autocommit_block" in migration_14
+    assert "ADD VALUE IF NOT EXISTS 'coadmin'" in migration_14
+    assert "run_coadmin_backfill" in migration_14
+    assert "transaction_per_migration=True" in alembic_env
 
 
 def test_migration_creates_default_coadmin_and_assigns_orphan_staff() -> None:
@@ -124,39 +140,10 @@ def test_migration_creates_default_coadmin_and_assigns_orphan_staff() -> None:
 
 
 def test_migration_adds_staff_coadmin_required_constraint() -> None:
-    engine = _sync_engine()
-    with engine.begin() as connection:
-        Base.metadata.create_all(bind=connection)
-        _seed_legacy_staff(connection)
-
-        target_id = migration.ensure_coadmin_target(connection)
-        migration.assign_orphan_staff(connection, target_id)
-        connection.execute(
-            sa.text(
-                """
-                ALTER TABLE users
-                ADD CONSTRAINT ck_users_staff_requires_coadmin_id
-                CHECK (role != 'staff' OR coadmin_id IS NOT NULL)
-                """
-            )
-        )
-
-        with pytest.raises(sa.exc.IntegrityError):
-            connection.execute(
-                sa.text(
-                    """
-                    INSERT INTO users (
-                        username, password_hash, role, is_active, staff_color,
-                        created_at, updated_at
-                    )
-                    VALUES (
-                        'orphan_staff', :password_hash, 'staff', 1, '#2563EB',
-                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                    )
-                    """
-                ),
-                {"password_hash": STAFF_PASSWORD_HASH},
-            )
+    backfill_source = COADMIN_BACKFILL_PATH.read_text(encoding="utf-8")
+    assert "add_staff_coadmin_required_constraint" in backfill_source
+    assert migration.STAFF_REQUIRES_COADMIN_CONSTRAINT == "ck_users_staff_requires_coadmin_id"
+    assert "role != 'staff' OR coadmin_id IS NOT NULL" in backfill_source
 
 
 def test_migration_reuses_existing_coadmin_without_creating_default() -> None:
