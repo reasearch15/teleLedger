@@ -25,3 +25,7 @@ frontend/out/
 .vscode/
 .DS_Store
 Thumbs.db
+
+backend/.tmp_pytest/
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo
