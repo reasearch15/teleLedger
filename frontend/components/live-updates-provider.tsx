@@ -15,6 +15,7 @@ import { environment } from "@/lib/env";
 import {
   matchesLiveEvent,
   parseLiveEvent,
+  type LiveEvent,
   type LiveEventType,
 } from "@/lib/live-events";
 
@@ -27,15 +28,15 @@ export type LiveConnectionStatus =
 type Subscription = {
   id: number;
   events: readonly LiveEventType[];
-  callback: () => void;
-  debouncedCallback: () => void;
+  callback: (events: LiveEvent[]) => void;
+  debouncedCallback: (event: LiveEvent) => void;
 };
 
 type LiveUpdatesContextValue = {
   connectionStatus: LiveConnectionStatus;
   subscribe: (
     events: readonly LiveEventType[],
-    callback: () => void,
+    callback: (events: LiveEvent[]) => void,
   ) => () => void;
 };
 
@@ -44,15 +45,19 @@ const LiveUpdatesContext = createContext<LiveUpdatesContextValue | null>(null);
 const REFETCH_DEBOUNCE_MS = 300;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 
-function createDebouncedCallback(callback: () => void): () => void {
+function createDebouncedCallback(
+  callback: (events: LiveEvent[]) => void,
+): (event: LiveEvent) => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  return () => {
+  const pendingEvents: LiveEvent[] = [];
+  return (event) => {
+    pendingEvents.push(event);
     if (timer) {
       clearTimeout(timer);
     }
     timer = setTimeout(() => {
       timer = null;
-      callback();
+      callback(pendingEvents.splice(0));
     }, REFETCH_DEBOUNCE_MS);
   };
 }
@@ -70,7 +75,10 @@ export function LiveUpdatesProvider({
   const enabled = Boolean(user) && typeof EventSource !== "undefined";
 
   const subscribe = useCallback(
-    (events: readonly LiveEventType[], callback: () => void) => {
+    (
+      events: readonly LiveEventType[],
+      callback: (events: LiveEvent[]) => void,
+    ) => {
       const id = nextSubscriptionId.current++;
       const subscription: Subscription = {
         id,
@@ -86,10 +94,10 @@ export function LiveUpdatesProvider({
     [],
   );
 
-  const dispatchEvent = useCallback((eventName: LiveEventType) => {
+  const dispatchEvent = useCallback((event: LiveEvent) => {
     for (const subscription of subscriptionsRef.current.values()) {
-      if (subscription.events.includes(eventName)) {
-        subscription.debouncedCallback();
+      if (subscription.events.includes(event.event)) {
+        subscription.debouncedCallback(event);
       }
     }
   }, []);
@@ -119,7 +127,7 @@ export function LiveUpdatesProvider({
       source.onmessage = (message) => {
         const event = parseLiveEvent(message.data);
         if (event) {
-          dispatchEvent(event.event);
+          dispatchEvent(event);
         }
       };
 
@@ -171,7 +179,7 @@ export function useLiveUpdatesContext(): LiveUpdatesContextValue {
 
 export function useLiveUpdates(
   events: readonly LiveEventType[],
-  onUpdate: () => void,
+  onUpdate: (events: LiveEvent[]) => void,
   enabled = true,
 ): void {
   const { subscribe } = useLiveUpdatesContext();
@@ -184,8 +192,8 @@ export function useLiveUpdates(
 
   useEffect(() => {
     if (!enabled) return;
-    return subscribe(events, () => {
-      onUpdateRef.current();
+    return subscribe(events, (receivedEvents) => {
+      onUpdateRef.current(receivedEvents);
     });
   }, [enabled, eventsKey, subscribe, events]);
 }

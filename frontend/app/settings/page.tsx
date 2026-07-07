@@ -2,6 +2,7 @@
 
 import { AppShell } from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
+import { usePaymentNotificationPreference } from "@/lib/payment-notifications";
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return "Not yet";
@@ -13,11 +14,46 @@ function formatDate(value: string | null | undefined): string {
 
 export default function SettingsPage() {
   const { user } = useAuth();
+  const { enabled: paymentSoundEnabled, setEnabled: setPaymentSoundEnabled } =
+    usePaymentNotificationPreference();
 
   return (
     <AppShell title="Settings" description="Your local account and session details.">
-      {user ? (
-        <section className="max-w-2xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="grid max-w-2xl gap-4">
+        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-200 px-5 py-4 sm:px-6">
+            <h2 className="font-bold text-slate-950">Notifications</h2>
+          </div>
+          <div className="flex items-center justify-between gap-4 px-5 py-4 sm:px-6">
+            <div>
+              <h3 className="text-sm font-bold text-slate-950">
+                Payment notification sound
+              </h3>
+              <p className="mt-1 text-sm text-slate-600">
+                Play a short sound when a new active payment arrives.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={paymentSoundEnabled}
+              aria-label="Payment notification sound"
+              onClick={() => setPaymentSoundEnabled(!paymentSoundEnabled)}
+              className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition ${
+                paymentSoundEnabled ? "bg-indigo-600" : "bg-slate-300"
+              }`}
+            >
+              <span
+                className={`size-5 rounded-full bg-white shadow-sm transition ${
+                  paymentSoundEnabled ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
+          </div>
+        </section>
+
+        {user ? (
+          <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-200 px-5 py-4 sm:px-6">
             <h2 className="font-bold text-slate-950">Account profile</h2>
           </div>
@@ -40,9 +76,9 @@ export default function SettingsPage() {
               </div>
             ))}
           </dl>
-        </section>
-      ) : null}
+          </section>
+        ) : null}
+      </div>
     </AppShell>
   );
 }
-

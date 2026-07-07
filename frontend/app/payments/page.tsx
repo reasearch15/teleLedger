@@ -5,8 +5,13 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
 import { useLiveUpdates } from "@/components/live-updates-provider";
-import { PAYMENT_PAGE_EVENTS, STAFF_PAGE_EVENTS } from "@/lib/live-events";
 import { friendlyError } from "@/lib/api-client";
+import {
+  LIVE_EVENTS,
+  PAYMENT_PAGE_EVENTS,
+  STAFF_PAGE_EVENTS,
+} from "@/lib/live-events";
+import { usePaymentNotificationSound } from "@/lib/payment-notifications";
 import {
   assignPayment,
   claimPayment,
@@ -91,42 +96,73 @@ export default function PaymentsPage() {
   >({});
   const [auditLoadingId, setAuditLoadingId] = useState<number | null>(null);
   const requestVersion = useRef(0);
+  const knownPaymentIds = useRef<Set<number>>(new Set());
+  const initialSyncComplete = useRef(false);
+  const { notifyNewPayment } = usePaymentNotificationSound();
 
   const applyPage = useCallback(
-    (page: Awaited<ReturnType<typeof listPayments>>) => {
+    (
+      page: Awaited<ReturnType<typeof listPayments>>,
+      options: { notifyForNewPayments?: boolean } = {},
+    ) => {
+      const incomingIds = page.items.map((payment) => payment.id);
+      const hasNewPayment =
+        initialSyncComplete.current &&
+        options.notifyForNewPayments === true &&
+        incomingIds.some((paymentId) => !knownPaymentIds.current.has(paymentId));
+
+      for (const paymentId of incomingIds) {
+        knownPaymentIds.current.add(paymentId);
+      }
+
       setPayments(page.items);
       setTotal(page.total);
       setHasMore(page.has_more);
+
+      if (!initialSyncComplete.current) {
+        initialSyncComplete.current = true;
+        return;
+      }
+
+      if (hasNewPayment) {
+        notifyNewPayment();
+      }
     },
-    [],
+    [notifyNewPayment],
   );
 
-  const loadFirstPage = useCallback(async () => {
-    if (!userId) return;
-    const requestId = ++requestVersion.current;
-    setLoading(true);
-    setError("");
-    try {
-      const page = await listPayments(
-        { ...filters, activeOnly: true },
-        {
-          limit: PAYMENT_PAGE_SIZE,
-          offset: 0,
-        },
-      );
-      if (requestId === requestVersion.current) applyPage(page);
-    } catch (loadError) {
-      if (requestId === requestVersion.current) {
-        setError(friendlyError(loadError));
+  const loadFirstPage = useCallback(
+    async (options: { notifyForNewPayments?: boolean } = {}) => {
+      if (!userId) return;
+      const requestId = ++requestVersion.current;
+      setLoading(true);
+      setError("");
+      try {
+        const page = await listPayments(
+          { ...filters, activeOnly: true },
+          {
+            limit: PAYMENT_PAGE_SIZE,
+            offset: 0,
+          },
+        );
+        if (requestId === requestVersion.current) applyPage(page, options);
+      } catch (loadError) {
+        if (requestId === requestVersion.current) {
+          setError(friendlyError(loadError));
+        }
+      } finally {
+        if (requestId === requestVersion.current) setLoading(false);
       }
-    } finally {
-      if (requestId === requestVersion.current) setLoading(false);
-    }
-  }, [applyPage, filters, userId]);
+    },
+    [applyPage, filters, userId],
+  );
 
-  const refreshPayments = useCallback(() => {
-    void loadFirstPage();
-  }, [loadFirstPage]);
+  const refreshPayments = useCallback(
+    (options: { notifyForNewPayments?: boolean } = {}) => {
+      void loadFirstPage(options);
+    },
+    [loadFirstPage],
+  );
 
   useEffect(() => {
     if (!userId) return;
@@ -155,7 +191,17 @@ export default function PaymentsPage() {
       .catch((loadError: unknown) => setError(friendlyError(loadError)));
   }, [user?.role]);
 
-  useLiveUpdates(PAYMENT_PAGE_EVENTS, refreshPayments, Boolean(userId));
+  useLiveUpdates(
+    PAYMENT_PAGE_EVENTS,
+    (events) => {
+      refreshPayments({
+        notifyForNewPayments: events.some(
+          (event) => event.event === LIVE_EVENTS.PAYMENT_CREATED,
+        ),
+      });
+    },
+    Boolean(userId),
+  );
   useLiveUpdates(
     STAFF_PAGE_EVENTS,
     () => {
