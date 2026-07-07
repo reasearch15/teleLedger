@@ -1,0 +1,25 @@
+{
+  "name": "Ledger",
+  "short_name": "Ledger",
+  "icons": [
+    {
+      "src": "/favicon-16x16.png?v=20260707",
+      "sizes": "16x16",
+      "type": "image/png"
+    },
+    {
+      "src": "/favicon-32x32.png?v=20260707",
+      "sizes": "32x32",
+      "type": "image/png"
+    },
+    {
+      "src": "/apple-touch-icon.png?v=20260707",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "theme_color": "#1e3a8a",
+  "background_color": "#1e3a8a",
+  "display": "standalone"
+}
