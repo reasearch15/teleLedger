@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { LoadingScreen } from "@/components/loading-screen";
@@ -23,6 +23,19 @@ const navigation = [
   { href: "/cashout", label: "Cashout" },
 ];
 
+const adminNavigation = [
+  ...navigation,
+  { href: "/admin/ledger", label: "Ledger" },
+  { href: "/admin/coadmin-summary", label: "Coadmin Summary" },
+  { href: "/admin/staff-balances", label: "Staff Balances" },
+  { href: "/admin/adjustment-history", label: "Adjustment History" },
+  { href: "/admin/settlement-history", label: "Settlement History" },
+  { href: "/admin/staff", label: "Staff" },
+  { href: "/settings", label: "Settings" },
+];
+
+const staffNavigation = [...navigation, { href: "/settings", label: "Settings" }];
+
 export function AppShell({
   title,
   description,
@@ -35,6 +48,11 @@ export function AppShell({
   const [logoutError, setLogoutError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
 
+  const links = useMemo(
+    () => (user?.role === "admin" ? adminNavigation : staffNavigation),
+    [user?.role],
+  );
+
   useEffect(() => {
     if (!loading && !user) {
       const next = encodeURIComponent(pathname);
@@ -43,34 +61,6 @@ export function AppShell({
       router.replace("/dashboard");
     }
   }, [loading, pathname, requiredRole, router, user]);
-
-  if (loading || !user || (requiredRole && user.role !== requiredRole)) {
-    return <LoadingScreen label="Checking your session…" />;
-  }
-
-  const handleLogout = async () => {
-    setLogoutError("");
-    try {
-      await logout();
-      router.replace("/login");
-    } catch (error) {
-      setLogoutError(friendlyError(error));
-    }
-  };
-
-  const links =
-    user.role === "admin"
-      ? [
-          ...navigation,
-          { href: "/admin/ledger", label: "Ledger" },
-          { href: "/admin/coadmin-summary", label: "Coadmin Summary" },
-          { href: "/admin/staff-balances", label: "Staff Balances" },
-          { href: "/admin/adjustment-history", label: "Adjustment History" },
-          { href: "/admin/settlement-history", label: "Settlement History" },
-          { href: "/admin/staff", label: "Staff" },
-          { href: "/settings", label: "Settings" },
-        ]
-      : [...navigation, { href: "/settings", label: "Settings" }];
 
   useEffect(() => {
     setMenuOpen(false);
@@ -84,6 +74,20 @@ export function AppShell({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [menuOpen]);
+
+  if (loading || !user || (requiredRole && user.role !== requiredRole)) {
+    return <LoadingScreen label="Checking your session..." />;
+  }
+
+  const handleLogout = async () => {
+    setLogoutError("");
+    try {
+      await logout();
+      router.replace("/login");
+    } catch (error) {
+      setLogoutError(friendlyError(error));
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -110,7 +114,7 @@ export function AppShell({
               aria-controls="mobile-admin-navigation"
               aria-expanded={menuOpen}
             >
-              <span aria-hidden="true">☰</span> Menu
+              <span aria-hidden="true">&#9776;</span> Menu
             </button>
             <div className="hidden text-right sm:block">
               <p className="text-sm font-semibold text-slate-800">{user.username}</p>
