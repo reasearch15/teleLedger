@@ -12,6 +12,7 @@ from app.schemas.auth import (
     UserResponse,
 )
 from app.services.user import (
+    CoadminHasAssignedStaffError,
     CoadminNotFoundError,
     StaffNotFoundError,
     StaffSelfDeleteForbiddenError,
@@ -21,6 +22,7 @@ from app.services.user import (
 router = APIRouter(prefix="/api/admin/staff", tags=["staff management"])
 coadmin_router = APIRouter(prefix="/api/admin/coadmins", tags=["coadmin management"])
 StaffId = Annotated[int, Path(gt=0)]
+CoadminId = Annotated[int, Path(gt=0)]
 
 
 @router.get("", response_model=list[UserResponse])
@@ -175,6 +177,82 @@ async def create_coadmin(
             detail=str(error),
         ) from error
     return UserResponse.model_validate(user)
+
+
+@coadmin_router.patch("/{coadmin_id}/reset-password", response_model=UserResponse)
+async def reset_coadmin_password(
+    coadmin_id: CoadminId,
+    request: ResetPasswordRequest,
+    _: AdminUser,
+    service: StaffManagementServiceDependency,
+) -> UserResponse:
+    """Replace a coadmin account password."""
+    try:
+        user = await service.reset_coadmin_password(
+            coadmin_id,
+            request.password.get_secret_value(),
+        )
+    except CoadminNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    return UserResponse.model_validate(user)
+
+
+@coadmin_router.patch("/{coadmin_id}/disable", response_model=UserResponse)
+async def disable_coadmin(
+    coadmin_id: CoadminId,
+    _: AdminUser,
+    service: StaffManagementServiceDependency,
+) -> UserResponse:
+    """Disable a coadmin account."""
+    try:
+        user = await service.disable_coadmin(coadmin_id)
+    except CoadminNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    return UserResponse.model_validate(user)
+
+
+@coadmin_router.patch("/{coadmin_id}/activate", response_model=UserResponse)
+async def activate_coadmin(
+    coadmin_id: CoadminId,
+    _: AdminUser,
+    service: StaffManagementServiceDependency,
+) -> UserResponse:
+    """Reactivate a disabled coadmin account."""
+    try:
+        user = await service.activate_coadmin(coadmin_id)
+    except CoadminNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    return UserResponse.model_validate(user)
+
+
+@coadmin_router.delete("/{coadmin_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_coadmin(
+    coadmin_id: CoadminId,
+    _: AdminUser,
+    service: StaffManagementServiceDependency,
+) -> None:
+    """Permanently delete a coadmin account when no staff remain assigned."""
+    try:
+        await service.delete_coadmin(coadmin_id)
+    except CoadminNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except CoadminHasAssignedStaffError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
 
 
 def _serialize_user(

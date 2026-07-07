@@ -41,6 +41,10 @@ class CoadminNotFoundError(Exception):
     """Raised when an administrative coadmin target does not exist."""
 
 
+class CoadminHasAssignedStaffError(Exception):
+    """Raised when a coadmin cannot be deleted while staff remain assigned."""
+
+
 class StaffSelfDeleteForbiddenError(Exception):
     """Raised when an administrator attempts to delete their own account."""
 
@@ -159,6 +163,69 @@ class StaffManagementService(ApplicationService):
             user_id=coadmin.id,
         )
         return coadmin
+
+    async def reset_coadmin_password(self, user_id: int, password: str) -> User:
+        """Replace a coadmin password with a freshly generated hash."""
+        password_hash = await asyncio.to_thread(hash_password, password)
+        async with self._session.begin():
+            user = await self._repository.get_coadmin_for_update(user_id)
+            if user is None:
+                raise CoadminNotFoundError(f"Coadmin user {user_id} was not found")
+            user.password_hash = password_hash
+            await self._repository.flush(user)
+        await event_broker.publish(
+            LiveEventType.STAFF_CHANGED,
+            user_id=user.id,
+        )
+        return user
+
+    async def disable_coadmin(self, user_id: int) -> User:
+        """Disable a coadmin account with a row-level lock."""
+        async with self._session.begin():
+            user = await self._repository.get_coadmin_for_update(user_id)
+            if user is None:
+                raise CoadminNotFoundError(f"Coadmin user {user_id} was not found")
+            user.is_active = False
+            await self._repository.flush(user)
+        await event_broker.publish(
+            LiveEventType.STAFF_CHANGED,
+            user_id=user.id,
+        )
+        return user
+
+    async def activate_coadmin(self, user_id: int) -> User:
+        """Reactivate a disabled coadmin account."""
+        async with self._session.begin():
+            user = await self._repository.get_coadmin_for_update(user_id)
+            if user is None:
+                raise CoadminNotFoundError(f"Coadmin user {user_id} was not found")
+            user.is_active = True
+            await self._repository.flush(user)
+        await event_broker.publish(
+            LiveEventType.STAFF_CHANGED,
+            user_id=user.id,
+        )
+        return user
+
+    async def delete_coadmin(self, user_id: int) -> None:
+        """Permanently remove a coadmin account when no staff remain assigned."""
+        async with self._session.begin():
+            user = await self._repository.get_coadmin_for_update(user_id)
+            if user is None:
+                raise CoadminNotFoundError(f"Coadmin user {user_id} was not found")
+            assigned_staff = await self._repository.count_staff_assigned_to_coadmin(
+                user_id
+            )
+            if assigned_staff > 0:
+                raise CoadminHasAssignedStaffError(
+                    "Cannot delete coadmin while staff are assigned. "
+                    "Reassign or delete staff first."
+                )
+            await self._repository.delete(user)
+        await event_broker.publish(
+            LiveEventType.STAFF_CHANGED,
+            user_id=user_id,
+        )
 
     async def create_staff(
         self,

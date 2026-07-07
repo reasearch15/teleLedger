@@ -66,3 +66,31 @@ export function deleteStaff(staffId: number): Promise<void> {
     method: "DELETE",
   });
 }
+
+export function resetCoadminPassword(
+  coadminId: number,
+  password: string,
+): Promise<User> {
+  return apiRequest<User>(`/api/admin/coadmins/${coadminId}/reset-password`, {
+    method: "PATCH",
+    body: JSON.stringify({ password }),
+  });
+}
+
+export function disableCoadmin(coadminId: number): Promise<User> {
+  return apiRequest<User>(`/api/admin/coadmins/${coadminId}/disable`, {
+    method: "PATCH",
+  });
+}
+
+export function activateCoadmin(coadminId: number): Promise<User> {
+  return apiRequest<User>(`/api/admin/coadmins/${coadminId}/activate`, {
+    method: "PATCH",
+  });
+}
+
+export function deleteCoadmin(coadminId: number): Promise<void> {
+  return apiRequest<void>(`/api/admin/coadmins/${coadminId}`, {
+    method: "DELETE",
+  });
+}

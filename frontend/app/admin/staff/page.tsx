@@ -8,13 +8,17 @@ import { useLiveUpdates } from "@/components/live-updates-provider";
 import { friendlyError } from "@/lib/api-client";
 import { STAFF_PAGE_EVENTS } from "@/lib/live-events";
 import {
+  activateCoadmin,
   assignStaffCoadmin,
   createCoadmin,
   createStaff,
+  deleteCoadmin,
   deleteStaff,
+  disableCoadmin,
   disableStaff,
   listCoadmins,
   listStaff,
+  resetCoadminPassword,
   resetStaffPassword,
 } from "@/services/staff";
 import type { User } from "@/types/api";
@@ -46,13 +50,29 @@ export default function StaffPage() {
   const [coadminActive, setCoadminActive] = useState(true);
   const [resetId, setResetId] = useState<number | null>(null);
   const [resetPassword, setResetPassword] = useState("");
+  const [coadminResetId, setCoadminResetId] = useState<number | null>(null);
+  const [coadminResetPassword, setCoadminResetPassword] = useState("");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [busyCoadminId, setBusyCoadminId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
   const [creatingCoadmin, setCreatingCoadmin] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<User | null>(null);
+  const [coadminDeleteTarget, setCoadminDeleteTarget] = useState<User | null>(
+    null,
+  );
+
+  const staffCountByCoadmin = staff.reduce<Record<number, number>>(
+    (counts, staffUser) => {
+      if (staffUser.coadmin_id != null) {
+        counts[staffUser.coadmin_id] = (counts[staffUser.coadmin_id] ?? 0) + 1;
+      }
+      return counts;
+    },
+    {},
+  );
 
   const loadStaff = useCallback(async () => {
     if (user?.role !== "admin") return;
@@ -245,6 +265,86 @@ export default function StaffPage() {
     }
   };
 
+  const handleCoadminReset = async (
+    event: FormEvent<HTMLFormElement>,
+    coadminUser: User,
+  ) => {
+    event.preventDefault();
+    setError("");
+    setMessage("");
+    const passwordError = validatePassword(coadminResetPassword);
+    if (passwordError) {
+      setError(passwordError);
+      return;
+    }
+
+    setBusyCoadminId(coadminUser.id);
+    try {
+      await resetCoadminPassword(coadminUser.id, coadminResetPassword);
+      setCoadminResetId(null);
+      setCoadminResetPassword("");
+      setMessage(`Password reset for “${coadminUser.username}”.`);
+    } catch (resetError) {
+      setError(friendlyError(resetError));
+    } finally {
+      setBusyCoadminId(null);
+    }
+  };
+
+  const handleCoadminDisable = async (coadminUser: User) => {
+    if (
+      !window.confirm(
+        `Disable ${coadminUser.username}? They will lose access immediately.`,
+      )
+    ) {
+      return;
+    }
+    setBusyCoadminId(coadminUser.id);
+    setError("");
+    setMessage("");
+    try {
+      await disableCoadmin(coadminUser.id);
+      setMessage(`“${coadminUser.username}” has been disabled.`);
+      await loadStaff();
+    } catch (disableError) {
+      setError(friendlyError(disableError));
+    } finally {
+      setBusyCoadminId(null);
+    }
+  };
+
+  const handleCoadminActivate = async (coadminUser: User) => {
+    setBusyCoadminId(coadminUser.id);
+    setError("");
+    setMessage("");
+    try {
+      await activateCoadmin(coadminUser.id);
+      setMessage(`“${coadminUser.username}” has been reactivated.`);
+      await loadStaff();
+    } catch (activateError) {
+      setError(friendlyError(activateError));
+    } finally {
+      setBusyCoadminId(null);
+    }
+  };
+
+  const handleCoadminDelete = async () => {
+    if (!coadminDeleteTarget) return;
+    setBusyCoadminId(coadminDeleteTarget.id);
+    setError("");
+    setMessage("");
+    try {
+      await deleteCoadmin(coadminDeleteTarget.id);
+      setMessage(`“${coadminDeleteTarget.username}” was permanently deleted.`);
+      setCoadminDeleteTarget(null);
+      await loadStaff();
+    } catch (deleteError) {
+      setError(friendlyError(deleteError));
+    } finally {
+      setBusyCoadminId(null);
+    }
+  };
+
   return (
     <AppShell
       title="Staff management"
@@ -383,6 +483,129 @@ export default function StaffPage() {
               {message}
             </div>
           ) : null}
+
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-bold text-slate-950">Coadmin accounts</h2>
+          </div>
+
+          {!loading && coadmins.length === 0 ? (
+            <div className="mb-8 rounded-2xl border border-dashed border-slate-300 bg-white py-10 text-center">
+              <p className="font-bold text-slate-800">No coadmin accounts yet</p>
+              <p className="mt-2 text-sm text-slate-500">
+                Create a coadmin using the form on the left.
+              </p>
+            </div>
+          ) : (
+            <div className="mb-8 grid gap-3">
+              {coadmins.map((coadminUser) => {
+                const assignedStaff = staffCountByCoadmin[coadminUser.id] ?? 0;
+                return (
+                  <article
+                    key={coadminUser.id}
+                    className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+                  >
+                    <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="font-bold text-slate-950">
+                            {coadminUser.username}
+                          </h3>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs font-bold ${
+                              coadminUser.is_active
+                                ? "bg-emerald-50 text-emerald-700"
+                                : "bg-slate-100 text-slate-500"
+                            }`}
+                          >
+                            {coadminUser.is_active ? "Active" : "Disabled"}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Last login: {formatDate(coadminUser.last_login_at)}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Assigned staff: {assignedStaff}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCoadminResetId(
+                              coadminResetId === coadminUser.id
+                                ? null
+                                : coadminUser.id,
+                            );
+                            setCoadminResetPassword("");
+                          }}
+                          className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                        >
+                          Reset password
+                        </button>
+                        {coadminUser.is_active ? (
+                          <button
+                            type="button"
+                            disabled={busyCoadminId === coadminUser.id}
+                            onClick={() => void handleCoadminDisable(coadminUser)}
+                            className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+                          >
+                            Disable
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={busyCoadminId === coadminUser.id}
+                            onClick={() => void handleCoadminActivate(coadminUser)}
+                            className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
+                          >
+                            Activate
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={busyCoadminId === coadminUser.id}
+                          onClick={() => setCoadminDeleteTarget(coadminUser)}
+                          className="rounded-lg border border-red-300 bg-white px-3 py-2 text-sm font-semibold text-red-800 hover:bg-red-50 disabled:opacity-50"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+
+                    {coadminResetId === coadminUser.id ? (
+                      <form
+                        onSubmit={(event) =>
+                          void handleCoadminReset(event, coadminUser)
+                        }
+                        className="mt-4 flex flex-col gap-2 border-t border-slate-100 pt-4 sm:flex-row"
+                      >
+                        <label className="flex-1">
+                          <span className="sr-only">New password</span>
+                          <input
+                            type="password"
+                            value={coadminResetPassword}
+                            onChange={(event) =>
+                              setCoadminResetPassword(event.target.value)
+                            }
+                            autoComplete="new-password"
+                            placeholder="New password, at least 12 characters"
+                            className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:border-indigo-500"
+                          />
+                        </label>
+                        <button
+                          type="submit"
+                          disabled={busyCoadminId === coadminUser.id}
+                          className="rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-bold text-white hover:bg-slate-700 disabled:opacity-50"
+                        >
+                          Save password
+                        </button>
+                      </form>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+          )}
 
           <div className="mb-3 flex items-center justify-between">
             <h2 className="font-bold text-slate-950">Staff accounts</h2>
@@ -526,6 +749,59 @@ export default function StaffPage() {
           )}
         </section>
       </div>
+
+      {coadminDeleteTarget ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"
+          role="presentation"
+          onClick={() => setCoadminDeleteTarget(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-coadmin-title"
+            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2
+              id="delete-coadmin-title"
+              className="text-lg font-bold text-slate-950"
+            >
+              Delete coadmin permanently?
+            </h2>
+            <p className="mt-3 text-sm leading-6 text-slate-600">
+              Delete {coadminDeleteTarget.username} permanently? This removes
+              login access. Payments, ledger records, settlements, and audit
+              history are preserved.
+            </p>
+            {(staffCountByCoadmin[coadminDeleteTarget.id] ?? 0) > 0 ? (
+              <p className="mt-3 text-sm font-semibold text-red-700">
+                This coadmin still has assigned staff. Reassign or delete staff
+                first.
+              </p>
+            ) : null}
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setCoadminDeleteTarget(null)}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busyCoadminId === coadminDeleteTarget.id}
+                onClick={() => void handleCoadminDelete()}
+                className="rounded-lg bg-red-700 px-4 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:opacity-50"
+              >
+                {busyCoadminId === coadminDeleteTarget.id
+                  ? "Deleting…"
+                  : "Delete permanently"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {deleteTarget ? (
         <div

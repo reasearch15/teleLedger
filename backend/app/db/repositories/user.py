@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.repositories.base import BaseRepository
@@ -77,6 +77,27 @@ class UserRepository(BaseRepository[User]):
             )
         )
         return result.scalar_one_or_none()
+
+    async def get_coadmin_for_update(self, user_id: int) -> User | None:
+        """Lock one coadmin account for an administrative mutation."""
+        result = await self._session.execute(
+            select(User)
+            .where(User.id == user_id, User.role == UserRole.COADMIN)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
+    async def count_staff_assigned_to_coadmin(self, coadmin_id: int) -> int:
+        """Count staff accounts owned by one coadmin."""
+        result = await self._session.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(
+                User.role == UserRole.STAFF,
+                User.coadmin_id == coadmin_id,
+            )
+        )
+        return int(result or 0)
 
     async def flush(self, user: User) -> None:
         """Flush a mutation and reload its database-managed update time."""
