@@ -11,6 +11,9 @@ import type { CoadminLedgerSummary } from "@/types/api";
 import {
   EmptyTableRow,
   formatMoney,
+  MobileCardList,
+  MobileEmptyState,
+  MobileRow,
   netClass,
   Panel,
   TableShell,
@@ -113,6 +116,27 @@ export function CoadminSummaryPanel() {
           </tbody>
         </table>
       </TableShell>
+      <MobileCardList>
+        {loading ? <MobileEmptyState message="Loading coadmin balances..." /> : null}
+        {!loading && items.length === 0 ? (
+          <MobileEmptyState message="No records found." />
+        ) : null}
+        {items.map((item) => (
+          <CoadminMobileCard
+            key={item.coadmin_id ?? "default"}
+            item={item}
+            busy={actionId === item.coadmin_id}
+            onSettle={() => {
+              if (item.coadmin_id == null) return;
+              setPendingSettlement({
+                coadminId: item.coadmin_id,
+                coadminUsername: item.coadmin_username,
+                amount: item.net,
+              });
+            }}
+          />
+        ))}
+      </MobileCardList>
 
       {pendingSettlement ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 px-4">
@@ -183,5 +207,45 @@ const CoadminLedgerRow = memo(function CoadminLedgerRow({
         </button>
       </td>
     </tr>
+  );
+});
+
+const CoadminMobileCard = memo(function CoadminMobileCard({
+  item,
+  busy,
+  onSettle,
+}: {
+  item: CoadminLedgerSummary;
+  busy: boolean;
+  onSettle: () => void;
+}) {
+  const disabled = Number(item.net) <= 0 || item.coadmin_id == null;
+  return (
+    <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <dl className="grid gap-2.5">
+        <MobileRow label="Coadmin" value={item.coadmin_username} strong />
+        <MobileRow label="Total In" value={formatMoney(item.total_in)} strong />
+        <MobileRow label="Total Out" value={formatMoney(item.total_out)} />
+        <MobileRow label="Settled" value={formatMoney(item.settled_amount)} />
+        <MobileRow
+          label="Net"
+          value={formatMoney(item.net)}
+          strong
+          className={netClass(item.net)}
+        />
+        <MobileRow label="Staff" value={item.staff_count} />
+        <MobileRow label="Payments" value={item.payments_count} />
+        <MobileRow label="Cashouts" value={item.cashouts_count} />
+        <MobileRow label="Settlements" value={item.settlements_count} />
+      </dl>
+      <button
+        type="button"
+        disabled={disabled || busy}
+        onClick={onSettle}
+        className="mt-4 w-full rounded-lg bg-indigo-600 px-3 py-2.5 text-sm font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+      >
+        Settle / Withdraw
+      </button>
+    </article>
   );
 });

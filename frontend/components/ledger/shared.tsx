@@ -116,11 +116,11 @@ export function Panel({
   children: React.ReactNode;
 }) {
   return (
-    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <div className="flex flex-col gap-3 border-b border-slate-200 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
+    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-lg shadow-slate-200/60 ring-1 ring-white">
+      <div className="flex flex-col gap-3 border-b border-slate-200 bg-slate-100 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="font-black text-slate-950">{title}</h2>
-          <p className="mt-1 text-sm text-slate-500">{description}</p>
+          <h2 className="text-base font-black text-slate-950">{title}</h2>
+          <p className="mt-1 text-sm leading-6 text-slate-600">{description}</p>
         </div>
         {action ? <div className="shrink-0">{action}</div> : null}
       </div>
@@ -129,14 +129,14 @@ export function Panel({
           {error}
         </div>
       ) : null}
-      <div className="p-4 sm:p-5">{children}</div>
+      <div className="bg-white p-3 sm:p-6">{children}</div>
     </section>
   );
 }
 
 export function TableShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="-mx-4 overflow-x-auto sm:-mx-5">
+    <div className="-mx-4 hidden overflow-x-auto sm:-mx-5 md:block">
       <div className="inline-block min-w-full px-4 align-middle sm:px-5">
         {children}
       </div>
@@ -171,10 +171,47 @@ export function LoadMoreButton({
         type="button"
         disabled={loading}
         onClick={onClick}
-        className="rounded-lg border border-indigo-300 px-4 py-2 text-sm font-bold text-indigo-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+        className="w-full rounded-lg border border-indigo-300 px-4 py-2.5 text-sm font-bold text-indigo-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400 sm:w-auto sm:py-2"
       >
         {loading ? "Loading..." : "Load more"}
       </button>
+    </div>
+  );
+}
+
+export function MobileCardList({ children }: { children: React.ReactNode }) {
+  return <div className="grid gap-3 md:hidden">{children}</div>;
+}
+
+export function MobileEmptyState({ message }: { message: string }) {
+  return (
+    <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500 md:hidden">
+      {message}
+    </div>
+  );
+}
+
+export function MobileRow({
+  label,
+  value,
+  strong = false,
+  className = "",
+}: {
+  label: string;
+  value: React.ReactNode;
+  strong?: boolean;
+  className?: string;
+}) {
+  return (
+    <div className="grid grid-cols-[7.5rem_1fr] gap-3 text-sm">
+      <dt className="font-semibold text-slate-500">{label}</dt>
+      <dd
+        className={`min-w-0 break-words text-right ${
+          strong ? "font-black text-slate-950" : "font-semibold text-slate-800"
+        } ${className}`}
+      >
+        {value}
+      </dd>
     </div>
   );
 }

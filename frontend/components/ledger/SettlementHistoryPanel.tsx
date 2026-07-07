@@ -20,6 +20,9 @@ import {
   formatIds,
   formatMoney,
   LoadMoreButton,
+  MobileCardList,
+  MobileEmptyState,
+  MobileRow,
   pageRows,
   Panel,
   TableShell,
@@ -134,6 +137,20 @@ export function SettlementHistoryPanel() {
           </tbody>
         </table>
       </TableShell>
+      <MobileCardList>
+        {loading ? <MobileEmptyState message="Loading settlements..." /> : null}
+        {!loading && items.length === 0 ? (
+          <MobileEmptyState message="No records found." />
+        ) : null}
+        {items.map((settlement) => (
+          <SettlementMobileCard
+            key={settlement.id}
+            settlement={settlement}
+            busy={actionId === settlement.id}
+            onAction={runSettlementAction}
+          />
+        ))}
+      </MobileCardList>
       {hasMore ? (
         <LoadMoreButton loading={loadingMore} onClick={() => void load(false, cursor)} />
       ) : null}
@@ -219,5 +236,75 @@ const SettlementRow = memo(function SettlementRow({
         )}
       </td>
     </tr>
+  );
+});
+
+const SettlementMobileCard = memo(function SettlementMobileCard({
+  settlement,
+  busy,
+  onAction,
+}: {
+  settlement: Settlement;
+  busy: boolean;
+  onAction: (
+    settlementId: number,
+    action: (id: number) => Promise<Settlement>,
+  ) => Promise<void>;
+}) {
+  const displayName =
+    settlement.scope === "coadmin"
+      ? settlement.coadmin_username ?? "Coadmin"
+      : settlement.staff_username || "Deleted Staff";
+  return (
+    <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <dl className="grid gap-2.5">
+        <MobileRow label="Staff" value={displayName} strong />
+        <MobileRow label="Scope" value={settlement.scope} />
+        <MobileRow label="Coadmin" value={settlement.coadmin_username ?? "-"} />
+        <MobileRow label="Amount" value={formatMoney(settlement.amount)} strong />
+        <MobileRow label="Status" value={settlement.status} />
+        <MobileRow label="Created by" value={settlement.created_by_admin_username} />
+        <MobileRow
+          label="Completed by"
+          value={settlement.completed_by_admin_username ?? "-"}
+        />
+        <MobileRow label="Created" value={formatDate(settlement.created_at)} />
+        <MobileRow label="Completed" value={formatDate(settlement.completed_at)} />
+        <MobileRow label="Payments" value={formatIds(settlement.payment_ids)} />
+        <MobileRow label="Cashouts" value={formatIds(settlement.cashout_ids)} />
+        <MobileRow label="Adjustments" value={formatIds(settlement.adjustment_ids)} />
+        <MobileRow label="Notes" value={settlement.notes ?? "-"} />
+      </dl>
+      {settlement.status === "pending" || settlement.status === "claimed" ? (
+        <div className="mt-4 grid gap-2">
+          {settlement.status === "pending" ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void onAction(settlement.id, claimSettlement)}
+              className="w-full rounded-lg border border-blue-300 px-3 py-2.5 text-sm font-bold text-blue-700 disabled:cursor-not-allowed disabled:text-slate-400"
+            >
+              Claim
+            </button>
+          ) : null}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onAction(settlement.id, completeSettlement)}
+            className="w-full rounded-lg border border-emerald-300 px-3 py-2.5 text-sm font-bold text-emerald-700 disabled:cursor-not-allowed disabled:text-slate-400"
+          >
+            Done
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onAction(settlement.id, cancelSettlement)}
+            className="w-full rounded-lg border border-red-300 px-3 py-2.5 text-sm font-bold text-red-700 disabled:cursor-not-allowed disabled:text-slate-400"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : null}
+    </article>
   );
 });

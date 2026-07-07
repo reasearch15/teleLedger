@@ -15,6 +15,9 @@ import type { LedgerItem } from "@/types/api";
 import {
   EmptyTableRow,
   formatMoney,
+  MobileCardList,
+  MobileEmptyState,
+  MobileRow,
   netClass,
   Panel,
   TableShell,
@@ -161,6 +164,27 @@ export function StaffBalancesPanel() {
           </tbody>
         </table>
       </TableShell>
+      <MobileCardList>
+        {loading ? <MobileEmptyState message="Loading staff balances..." /> : null}
+        {!loading && filteredItems.length === 0 ? (
+          <MobileEmptyState message="No records found." />
+        ) : null}
+        {filteredItems.map((item) => (
+          <StaffMobileCard
+            key={item.staff_id}
+            item={item}
+            busy={actionId === item.staff_id}
+            onSettle={() =>
+              setPendingSettlement({
+                staffId: item.staff_id,
+                staffUsername: item.staff_username,
+                amount: item.net,
+              })
+            }
+            onEditTotalIn={() => openAdjustment(item)}
+          />
+        ))}
+      </MobileCardList>
 
       {pendingSettlement ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 px-4">
@@ -308,5 +332,57 @@ const StaffLedgerRow = memo(function StaffLedgerRow({
         </button>
       </td>
     </tr>
+  );
+});
+
+const StaffMobileCard = memo(function StaffMobileCard({
+  item,
+  busy,
+  onSettle,
+  onEditTotalIn,
+}: {
+  item: LedgerItem;
+  busy: boolean;
+  onSettle: () => void;
+  onEditTotalIn: () => void;
+}) {
+  const disabled = Number(item.net) <= 0;
+  return (
+    <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <dl className="grid gap-2.5">
+        <MobileRow label="Staff" value={item.staff_username} strong />
+        <MobileRow label="Coadmin" value={item.coadmin_username} />
+        <MobileRow label="Total In" value={formatMoney(item.total_in)} strong />
+        <MobileRow label="Total Out" value={formatMoney(item.total_out)} />
+        <MobileRow label="Settled" value={formatMoney(item.settled_amount)} />
+        <MobileRow
+          label="Net"
+          value={formatMoney(item.net)}
+          strong
+          className={netClass(item.net)}
+        />
+        <MobileRow label="Payments" value={item.payments_count} />
+        <MobileRow label="Cashouts" value={item.cashouts_count} />
+        <MobileRow label="Settlements" value={item.settlements_count} />
+      </dl>
+      <div className="mt-4 grid gap-2">
+        <button
+          type="button"
+          disabled={disabled || busy}
+          onClick={onSettle}
+          className="w-full rounded-lg bg-indigo-600 px-3 py-2.5 text-sm font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+        >
+          Settle / Withdraw
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onEditTotalIn}
+          className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm font-bold text-slate-700 disabled:cursor-not-allowed disabled:text-slate-400"
+        >
+          Edit Total In
+        </button>
+      </div>
+    </article>
   );
 });

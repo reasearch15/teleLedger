@@ -3,6 +3,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -228,17 +229,21 @@ describe("AdminLedgerPage", () => {
     expect(screen.getAllByText("$1,000.00").length).toBeGreaterThan(0);
     expect(screen.getAllByText("$300.00").length).toBeGreaterThan(0);
     expect(screen.getAllByText("$700.00").length).toBeGreaterThan(0);
-    expect(screen.getByText("Weekly")).toBeInTheDocument();
-    expect(screen.getByText("Correction")).toBeInTheDocument();
+    expect(screen.getAllByText("Weekly").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Correction").length).toBeGreaterThan(0);
   });
 
   it("disables settlement when net is zero", async () => {
     render(<AdminLedgerPage />);
 
-    await screen.findByText("Alex");
-    const buttons = screen.getAllByRole("button", { name: "Settle / Withdraw" });
+    await screen.findAllByText("Alex");
+    const staffPanel = screen.getByText("Staff Balances").closest("section");
+    expect(staffPanel).not.toBeNull();
+    const buttons = within(staffPanel as HTMLElement).getAllByRole("button", {
+      name: "Settle / Withdraw",
+    });
 
-    expect(buttons[3]).toBeDisabled();
+    expect(buttons.some((button) => button.hasAttribute("disabled"))).toBe(true);
   });
 
   it("confirms settlement and refreshes ledger to zero", async () => {
@@ -248,7 +253,13 @@ describe("AdminLedgerPage", () => {
     render(<AdminLedgerPage />);
 
     await screen.findAllByText("Sarah");
-    fireEvent.click(screen.getAllByRole("button", { name: "Settle / Withdraw" })[2]);
+    const staffPanel = screen.getByText("Staff Balances").closest("section");
+    expect(staffPanel).not.toBeNull();
+    fireEvent.click(
+      within(staffPanel as HTMLElement).getAllByRole("button", {
+        name: "Settle / Withdraw",
+      })[0],
+    );
     expect(screen.getByText("Confirm settlement")).toBeInTheDocument();
     expect(screen.getAllByText("$700.00").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
@@ -261,7 +272,13 @@ describe("AdminLedgerPage", () => {
     render(<AdminLedgerPage />);
 
     await screen.findAllByText("default_coadmin");
-    fireEvent.click(screen.getAllByRole("button", { name: "Settle / Withdraw" })[0]);
+    const coadminPanel = screen.getByText("Coadmin Summary").closest("section");
+    expect(coadminPanel).not.toBeNull();
+    fireEvent.click(
+      within(coadminPanel as HTMLElement).getAllByRole("button", {
+        name: "Settle / Withdraw",
+      })[0],
+    );
     expect(screen.getByText("Confirm settlement")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
 
@@ -275,7 +292,7 @@ describe("AdminLedgerPage", () => {
 
     await screen.findAllByText("Sarah");
     fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
-    expect(screen.getByText("Edit Total In")).toBeInTheDocument();
+    expect(screen.getAllByText("Edit Total In").length).toBeGreaterThan(0);
     fireEvent.change(screen.getByLabelText("New Total In"), {
       target: { value: "150.00" },
     });

@@ -15,7 +15,7 @@ export default function AdminLedgerPage() {
       description="Cashout belongs to the staff who created/requested it."
       requiredRole="admin"
     >
-      <div className="space-y-6">
+      <div className="-mx-4 space-y-10 bg-slate-100 px-4 py-6 sm:-mx-6 sm:px-6 lg:rounded-3xl">
         <LedgerFilterPanel />
         <LedgerSummaryPanel />
         <CoadminSummaryPanel />

@@ -13,6 +13,9 @@ import {
   formatDate,
   formatMoney,
   LoadMoreButton,
+  MobileCardList,
+  MobileEmptyState,
+  MobileRow,
   netClass,
   pageRows,
   Panel,
@@ -92,6 +95,15 @@ export function AdjustmentHistoryPanel() {
           </tbody>
         </table>
       </TableShell>
+      <MobileCardList>
+        {loading ? <MobileEmptyState message="Loading adjustments..." /> : null}
+        {!loading && items.length === 0 ? (
+          <MobileEmptyState message="No records found." />
+        ) : null}
+        {items.map((adjustment) => (
+          <AdjustmentMobileCard key={adjustment.id} adjustment={adjustment} />
+        ))}
+      </MobileCardList>
       {hasMore ? (
         <LoadMoreButton
           loading={loadingMore}
@@ -125,5 +137,44 @@ const AdjustmentRow = memo(function AdjustmentRow({
       <td className="px-5 py-3">{adjustment.created_by_admin_username ?? "-"}</td>
       <td className="px-5 py-3">{formatDate(adjustment.created_at)}</td>
     </tr>
+  );
+});
+
+const AdjustmentMobileCard = memo(function AdjustmentMobileCard({
+  adjustment,
+}: {
+  adjustment: LedgerAdjustment;
+}) {
+  return (
+    <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <dl className="grid gap-2.5">
+        <MobileRow
+          label="Staff"
+          value={adjustment.staff_username || "Deleted Staff"}
+          strong
+        />
+        <MobileRow
+          label="Previous"
+          value={formatMoney(adjustment.previous_total_in)}
+        />
+        <MobileRow
+          label="New Total"
+          value={formatMoney(adjustment.new_total_in)}
+          strong
+        />
+        <MobileRow
+          label="Delta"
+          value={formatMoney(adjustment.amount_delta)}
+          strong
+          className={netClass(adjustment.amount_delta)}
+        />
+        <MobileRow label="Reason" value={adjustment.reason} />
+        <MobileRow
+          label="Admin"
+          value={adjustment.created_by_admin_username ?? "-"}
+        />
+        <MobileRow label="Created" value={formatDate(adjustment.created_at)} />
+      </dl>
+    </article>
   );
 });
