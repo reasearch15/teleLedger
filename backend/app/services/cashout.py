@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.db.repositories.cashout import (
     CashoutAuditRecord,
     CashoutListPage,
@@ -23,6 +24,8 @@ from app.models.cashout import (
 from app.models.user import User, UserRole
 from app.services.base import ApplicationService
 from app.websocket.events import LiveEventType, event_broker
+
+logger = get_logger(__name__)
 
 
 class CashoutNotFoundError(Exception):
@@ -237,6 +240,7 @@ class CashoutService(ApplicationService):
             LiveEventType.CASHOUT_CANCELLED,
             cashout_id=cashout.id,
         )
+        await _delete_cancelled_cashout_telegram_message(cashout)
         return cashout
 
     async def retry_telegram(
@@ -352,3 +356,84 @@ class CashoutService(ApplicationService):
             f"{staff_id}:{idempotency_key}".encode()
         ).digest()
         return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1) or 1
+
+
+async def _delete_cancelled_cashout_telegram_message(cashout: CashoutRequest) -> None:
+    message_id = cashout.telegram_message_id
+    cashout_group_id: int | None = None
+    if message_id is None:
+        logger.info(
+            "cashout_telegram_delete_missing",
+            extra={
+                "cashout_request_id": cashout.id,
+                "reason_ignored": "no_telegram_message_id",
+            },
+        )
+        return
+
+    try:
+        from telethon.tl import types  # type: ignore[import-untyped]
+
+        from app.core.config import get_settings
+        from app.telegram.client import create_telegram_client
+
+        settings = get_settings()
+        cashout_group_id = settings.telegram_cashout_group_id
+        if cashout_group_id is None:
+            logger.warning(
+                "cashout_telegram_delete_failed",
+                extra={
+                    "cashout_request_id": cashout.id,
+                    "telegram_message_id": message_id,
+                    "reason_ignored": "missing_cashout_group_id",
+                },
+            )
+            return
+
+        client = create_telegram_client(settings)
+        await client.connect()
+        try:
+            if not await client.is_user_authorized():
+                logger.warning(
+                    "cashout_telegram_delete_failed",
+                    extra={
+                        "cashout_request_id": cashout.id,
+                        "telegram_message_id": message_id,
+                        "telegram_chat_id": cashout_group_id,
+                        "reason_ignored": "telegram_session_unauthorized",
+                    },
+                )
+                return
+            message = await client.get_messages(cashout_group_id, ids=message_id)
+            if message is None or isinstance(message, types.MessageEmpty):
+                logger.info(
+                    "cashout_telegram_delete_missing",
+                    extra={
+                        "cashout_request_id": cashout.id,
+                        "telegram_message_id": message_id,
+                        "telegram_chat_id": cashout_group_id,
+                    },
+                )
+                return
+            await client.delete_messages(cashout_group_id, [message_id], revoke=True)
+        finally:
+            await client.disconnect()
+    except Exception:
+        logger.exception(
+            "cashout_telegram_delete_failed",
+            extra={
+                "cashout_request_id": cashout.id,
+                "telegram_message_id": message_id,
+                "telegram_chat_id": cashout_group_id,
+            },
+        )
+        return
+
+    logger.info(
+        "cashout_telegram_delete_succeeded",
+        extra={
+            "cashout_request_id": cashout.id,
+            "telegram_message_id": message_id,
+            "telegram_chat_id": cashout_group_id,
+        },
+    )
