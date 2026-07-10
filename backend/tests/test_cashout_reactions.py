@@ -143,7 +143,11 @@ async def audit_actions() -> list[CashoutAuditAction]:
 async def test_any_reaction_completes_cashout_and_writes_audit() -> None:
     await seed_cashout(1, message_id=555)
 
-    result = await complete_cashout_from_reaction(555)
+    result = await complete_cashout_from_reaction(
+        555,
+        -1001234567890,
+        -1001234567890,
+    )
 
     assert result.completed is True
     assert result.cashout_id == 1
@@ -163,8 +167,16 @@ async def test_any_reaction_completes_cashout_and_writes_audit() -> None:
 async def test_multiple_reactions_do_not_duplicate_completion() -> None:
     await seed_cashout(1, message_id=555)
 
-    first = await complete_cashout_from_reaction(555)
-    second = await complete_cashout_from_reaction(555)
+    first = await complete_cashout_from_reaction(
+        555,
+        -1001234567890,
+        -1001234567890,
+    )
+    second = await complete_cashout_from_reaction(
+        555,
+        -1001234567890,
+        -1001234567890,
+    )
 
     assert first.completed is True
     assert second.completed is False
@@ -181,8 +193,11 @@ async def test_reaction_removal_has_no_effect() -> None:
 
     async def complete(
         message_id: int,
+        chat_id: int,
+        expected_chat_id: int,
     ) -> cashout_reactions.CashoutReactionCompletionResult:
         calls.append(message_id)
+        assert chat_id == expected_chat_id
         return cashout_reactions.CashoutReactionCompletionResult(
             completed=True,
             cashout_id=1,
@@ -211,8 +226,11 @@ async def test_active_reaction_update_invokes_completion() -> None:
 
     async def complete(
         message_id: int,
+        chat_id: int,
+        expected_chat_id: int,
     ) -> cashout_reactions.CashoutReactionCompletionResult:
         calls.append(message_id)
+        assert chat_id == expected_chat_id
         return cashout_reactions.CashoutReactionCompletionResult(
             completed=True,
             cashout_id=1,
@@ -243,8 +261,11 @@ async def test_new_reactions_update_invokes_completion() -> None:
 
     async def complete(
         message_id: int,
+        chat_id: int,
+        expected_chat_id: int,
     ) -> cashout_reactions.CashoutReactionCompletionResult:
         calls.append(message_id)
+        assert chat_id == expected_chat_id
         return cashout_reactions.CashoutReactionCompletionResult(
             completed=True,
             cashout_id=1,
@@ -278,8 +299,11 @@ async def test_bot_message_reactions_update_invokes_completion(
 
     async def complete(
         message_id: int,
+        chat_id: int,
+        expected_chat_id: int,
     ) -> cashout_reactions.CashoutReactionCompletionResult:
         calls.append(message_id)
+        assert chat_id == expected_chat_id
         return cashout_reactions.CashoutReactionCompletionResult(
             completed=True,
             cashout_id=1,
@@ -317,7 +341,11 @@ async def test_bot_message_reactions_update_invokes_completion(
 
 @pytest.mark.asyncio
 async def test_unrelated_message_reactions_are_ignored() -> None:
-    result = await complete_cashout_from_reaction(999)
+    result = await complete_cashout_from_reaction(
+        999,
+        -1001234567890,
+        -1001234567890,
+    )
 
     assert result.completed is False
     assert result.cashout_id is None
@@ -329,7 +357,11 @@ async def test_unrelated_message_reactions_are_ignored() -> None:
 async def test_cancelled_cashouts_are_ignored() -> None:
     await seed_cashout(1, message_id=555, status=CashoutStatus.CANCELLED)
 
-    result = await complete_cashout_from_reaction(555)
+    result = await complete_cashout_from_reaction(
+        555,
+        -1001234567890,
+        -1001234567890,
+    )
 
     assert result.completed is False
     assert result.reason == "cancelled"
@@ -338,6 +370,25 @@ async def test_cancelled_cashouts_are_ignored() -> None:
         assert cashout is not None
         assert cashout.status == CashoutStatus.CANCELLED
     assert await session_audit_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_reaction_from_payment_group_does_not_complete_cashout() -> None:
+    await seed_cashout(1, message_id=555)
+
+    result = await complete_cashout_from_reaction(
+        555,
+        -1001111111111,
+        -1001234567890,
+    )
+
+    assert result.completed is False
+    assert result.reason == "different_chat"
+    async with TestSessionFactory() as session:
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        assert cashout.status == CashoutStatus.SENT
+    assert await audit_actions() == [CashoutAuditAction.TELEGRAM_SENT]
 
 
 async def session_audit_count() -> int:

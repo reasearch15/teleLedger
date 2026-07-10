@@ -153,14 +153,20 @@ TELEGRAM_API_HASH=your_api_hash
 TELEGRAM_SESSION_NAME=telegram-ledger
 TELEGRAM_GROUP_USERNAME=@your_group_username
 # Or use TELEGRAM_GROUP_ID=-1001234567890 instead.
+TELEGRAM_CASHOUT_GROUP_ID=-1009876543210
 TELEGRAM_ENABLED=true
 TELEGRAM_BACKFILL_LIMIT=500
 ```
 
-Set exactly one group selector:
+Set exactly one payment group selector:
 
 - `TELEGRAM_GROUP_USERNAME` is the public group username, including `@`.
 - `TELEGRAM_GROUP_ID` is the full Telegram chat ID, normally beginning with `-100`.
+
+Set `TELEGRAM_CASHOUT_GROUP_ID` to the separate cashout Telegram group ID. Cashout
+requests are sent only to this group, and cashout completion reactions are accepted
+only from this group. If it is missing while the listener is enabled, startup fails
+instead of falling back to the payment group.
 
 For a private group without a username, list every chat available to the configured
 Telegram account:
@@ -176,9 +182,11 @@ the group by title, copy its full marked ID, then update `backend/.env`:
 ```dotenv
 TELEGRAM_GROUP_ID=-1001234567890
 # TELEGRAM_GROUP_USERNAME must be removed or commented out.
+TELEGRAM_CASHOUT_GROUP_ID=-1009876543210
 ```
 
-Configured ID or username matches are marked with `>>> TARGET GROUP`.
+Configured payment ID or username matches are marked with `>>> TARGET GROUP`. Use
+the same command output to copy the separate cashout group ID.
 
 Before connecting to Telegram, verify the parser locally from
 `telegram-ledger/backend`:
@@ -195,8 +203,8 @@ alembic upgrade head
 python -m app.telegram.run_listener
 ```
 
-Listener startup now connects to Telegram, resolves the configured group, and runs
-checkpointed backfill before live listening. The first run scans the most recent
+Listener startup now connects to Telegram, resolves the configured payment group and
+cashout group, and runs checkpointed backfill before live listening. The first run scans the most recent
 `TELEGRAM_BACKFILL_LIMIT` messages and stores the highest scanned message ID; later
 starts only fetch messages newer than that checkpoint. The default limit is 500 when
 the variable is omitted.
@@ -224,14 +232,15 @@ login code, and two-step verification password when applicable. It creates a loc
 session file so later runs can reconnect without repeating login. Session files and
 environment credentials are excluded from Git.
 
-Each new message from the configured group is stored once in `telegram_messages`.
+Each new message from the configured payment group is stored once in `telegram_messages`.
 Recognized payment notifications create a `payment_events` row in the same
 transaction; ordinary messages retain only the raw source row.
 
-The listener prints its enabled state, session name, configured group, connected
-account, resolved group title/ID, and session filename. Each text message prints a
-short preview followed by `parsed`, `ignored`, or `duplicate skipped`. Parsed
-payments also print the amount, sender, and recipient tag.
+The listener prints its enabled state, session name, whether the payment and cashout
+groups are configured, connected account, resolved group titles/IDs, and session
+filename. Each text message prints a short preview followed by `parsed`, `ignored`,
+or `duplicate skipped`. Parsed payments also print the amount, sender, and recipient
+tag.
 
 For normal local use, keep three terminals open:
 

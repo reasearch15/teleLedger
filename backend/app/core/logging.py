@@ -25,6 +25,7 @@ class JsonFormatter(logging.Formatter):
             "telegram_message_id",
             "telegram_chat_id",
             "telegram_group",
+            "cashout_telegram_group",
             "outcome",
             "duration_ms",
             "connection_acquisition_ms",

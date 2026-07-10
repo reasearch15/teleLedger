@@ -39,6 +39,7 @@ async def complete_recent_cashout_reactions(
     client: TelegramMessageFetcher,
     group: object,
     *,
+    expected_chat_id: int,
     limit: int = 100,
 ) -> list[CashoutReactionCompletionResult]:
     """Use fieldless UpdateRecentReactions as a trigger to inspect sent messages."""
@@ -80,7 +81,13 @@ async def complete_recent_cashout_reactions(
                 "reaction_summary": _message_reaction_summary(message),
             },
         )
-        results.append(await complete_cashout_from_reaction(message_id))
+        results.append(
+            await complete_cashout_from_reaction(
+                message_id,
+                expected_chat_id,
+                expected_chat_id,
+            )
+        )
 
     logger.info(
         "cashout_recent_reaction_scan_finished",
@@ -94,8 +101,29 @@ async def complete_recent_cashout_reactions(
 
 async def complete_cashout_from_reaction(
     telegram_message_id: int,
+    telegram_chat_id: int,
+    expected_chat_id: int,
 ) -> CashoutReactionCompletionResult:
     """Complete a sent cashout when any reaction exists on its message."""
+    if telegram_chat_id != expected_chat_id:
+        logger.info(
+            "cashout_reaction_ignored",
+            extra={
+                "telegram_message_id": telegram_message_id,
+                "telegram_chat_id": telegram_chat_id,
+                "expected_telegram_chat_id": expected_chat_id,
+                "matched_cashout": False,
+                "completed": False,
+                "reason_ignored": "different_chat",
+            },
+        )
+        return CashoutReactionCompletionResult(
+            completed=False,
+            cashout_id=None,
+            reason="different_chat",
+            matched_cashout=False,
+        )
+
     async with SessionFactory() as session, session.begin():
         repository = CashoutRepository(session)
         cashout = await repository.get_by_telegram_message_id_for_update(telegram_message_id)

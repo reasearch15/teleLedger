@@ -18,8 +18,11 @@ async def test_update_recent_reactions_invokes_recent_reaction_scan(
 
     async def complete_from_reaction(
         message_id: int,
+        chat_id: int,
+        expected_chat_id: int,
     ) -> cashout_reactions.CashoutReactionCompletionResult:
         direct_message_ids.append(message_id)
+        assert chat_id == expected_chat_id
         return cashout_reactions.CashoutReactionCompletionResult(
             completed=True,
             cashout_id=1,

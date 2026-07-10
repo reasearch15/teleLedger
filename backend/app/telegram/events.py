@@ -32,7 +32,7 @@ class TelegramReactionEvent(Protocol):
 
 IngestMessage = Callable[[IncomingTelegramMessage], Awaitable[TelegramIngestionResult]]
 CompleteCashoutFromReaction = Callable[
-    [int],
+    [int, int, int],
     Awaitable[CashoutReactionCompletionResult],
 ]
 CompleteRecentReactions = Callable[[], Awaitable[list[CashoutReactionCompletionResult]]]
@@ -238,7 +238,11 @@ def create_reaction_handler(
             return
 
         try:
-            result = await complete_from_reaction(message_id)
+            result = await complete_from_reaction(
+                message_id,
+                chat_id,
+                expected_chat_id,
+            )
         except Exception:
             report(f"Reaction on message {message_id}: processing failed; see logs")
             logger.exception(

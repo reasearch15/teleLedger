@@ -75,6 +75,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="TELEGRAM_GROUP_ID",
     )
+    telegram_cashout_group_id: int | None = Field(
+        default=None,
+        validation_alias="TELEGRAM_CASHOUT_GROUP_ID",
+    )
     telegram_group_username: str | None = Field(
         default=None,
         min_length=2,
