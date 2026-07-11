@@ -22,6 +22,7 @@ import { usePaymentNotificationSound } from "@/lib/payment-notifications";
 import {
   assignPayment,
   claimPayment,
+  dismissDeclinedPaymentReview,
   dismissPaymentNotOurs,
   forceUnclaimPayment,
   listPaymentAudit,
@@ -367,6 +368,26 @@ export default function PaymentsPage() {
     }
   };
 
+  const dismissFullyDeclinedPayment = async (paymentId: number) => {
+    if (user?.role !== "admin") return;
+    setActionId(paymentId);
+    setError("");
+    setMessage("");
+    try {
+      await dismissDeclinedPaymentReview(paymentId);
+      setPayments((current) =>
+        current.filter((payment) => payment.id !== paymentId),
+      );
+      setMessage("Payment removed from admin review.");
+      await loadFirstPage();
+    } catch (dismissError) {
+      setError(friendlyError(dismissError));
+      notifyPaymentError();
+    } finally {
+      setActionId(null);
+    }
+  };
+
   const handleAssign = async (paymentId: number) => {
     const staffId = assignmentByPayment[paymentId];
     if (!staffId) {
@@ -672,6 +693,19 @@ export default function PaymentsPage() {
                         className="rounded-lg border border-emerald-300 bg-white px-3 py-2 text-sm font-bold text-emerald-700"
                       >
                         Reopen
+                      </button>
+                    ) : null}
+                    {user?.role === "admin" && payment.can_dismiss ? (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void dismissFullyDeclinedPayment(payment.id);
+                        }}
+                        className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-bold text-slate-700 disabled:opacity-50"
+                      >
+                        Dismiss
                       </button>
                     ) : null}
                     {user?.role === "admin" && payment.status !== "done" ? (

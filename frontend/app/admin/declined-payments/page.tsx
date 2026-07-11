@@ -237,7 +237,7 @@ export default function AdminDeclinedPaymentsPage() {
                   <div className="flex flex-wrap gap-2 lg:justify-end">
                     <button
                       type="button"
-                      disabled={busy}
+                      disabled={busy || !payment.can_dismiss}
                       onClick={() => void handleDismiss(payment.id)}
                       className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-bold text-slate-700 disabled:opacity-50"
                     >

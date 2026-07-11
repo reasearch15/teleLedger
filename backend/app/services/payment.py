@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.db.repositories.payment_audit import (
     PaymentAuditRecord,
     PaymentAuditRepository,
 )
-from app.db.repositories.payment_event import PaymentEventRepository, PaymentListPage
+from app.db.repositories.payment_event import (
+    PaymentEventRepository,
+    PaymentListItem,
+    PaymentListPage,
+)
 from app.db.repositories.user import UserRepository
 from app.models.payment_audit import PaymentAuditAction, PaymentAuditLog
 from app.models.payment_dismissal import PaymentEventCoadminDismissal
@@ -17,6 +23,20 @@ from app.models.payment_event import PaymentEvent, PaymentStatus
 from app.models.user import User, UserRole
 from app.services.base import ApplicationService
 from app.websocket.events import LiveEventType, event_broker
+
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentDismissalEligibility:
+    """Computed decline coverage for one pending payment."""
+
+    eligible_coadmin_ids: tuple[int, ...]
+    declined_coadmin_ids: tuple[int, ...]
+    eligible_coadmin_count: int
+    declined_coadmin_count: int
+    all_declined: bool
+    can_dismiss: bool
 
 
 class PaymentNotFoundError(Exception):
@@ -70,7 +90,7 @@ class PaymentService(ApplicationService):
             raise InvalidPaymentFilterError("date_from must not be after date_to")
 
         normalized_search = search.strip() if search else None
-        return await self._repository.list_payments(
+        page = await self._repository.list_payments(
             status=status,
             search=normalized_search or None,
             date_from=date_from,
@@ -90,8 +110,15 @@ class PaymentService(ApplicationService):
                 else None
             ),
             include_dismissals=current_user.role == UserRole.ADMIN,
-            exclude_all_coadmins_declined=True,
+            exclude_all_coadmins_declined=current_user.role == UserRole.STAFF,
+            exclude_declined_review_dismissed=(
+                active_only and current_user.role == UserRole.ADMIN
+            ),
         )
+        if current_user.role != UserRole.ADMIN:
+            return page
+
+        return await self._attach_admin_dismissal_eligibility(page)
 
     async def dismiss_not_ours(self, payment_event_id: int, actor: User) -> None:
         """Dismiss a pending payment for the acting staff member's coadmin team."""
@@ -145,13 +172,16 @@ class PaymentService(ApplicationService):
     ) -> PaymentListPage:
         """Return payments declined by every active coadmin awaiting admin review."""
         self._require_admin(current_user)
-        return await self._repository.list_payments(
+        page = await self._repository.list_payments(
             limit=limit,
             offset=offset,
             include_total=include_total,
             include_dismissals=True,
             admin_review_only=True,
         )
+        page = await self._attach_admin_dismissal_eligibility(page)
+        filtered_items = [item for item in page.items if item.can_dismiss]
+        return replace(page, items=filtered_items)
 
     async def dismiss_declined_review(
         self,
@@ -162,7 +192,8 @@ class PaymentService(ApplicationService):
         self._require_admin(actor)
         async with self._session.begin():
             payment = await self._get_locked(payment_event_id)
-            if payment.all_coadmins_declined_at is None:
+            eligibility = await self._compute_dismissal_eligibility(payment)
+            if not eligibility.can_dismiss:
                 raise PaymentStateConflictError(
                     "Only payments declined by all coadmins can be dismissed."
                 )
@@ -180,7 +211,8 @@ class PaymentService(ApplicationService):
         self._require_admin(actor)
         async with self._session.begin():
             payment = await self._get_locked(payment_event_id)
-            if payment.all_coadmins_declined_at is None:
+            eligibility = await self._compute_dismissal_eligibility(payment)
+            if not eligibility.can_dismiss:
                 raise PaymentStateConflictError(
                     "Only payments declined by all coadmins can be deleted."
                 )
@@ -450,18 +482,135 @@ class PaymentService(ApplicationService):
         self,
         payment: PaymentEvent,
     ) -> bool:
-        """Mark a payment declined by all active coadmins when every team has dismissed."""
+        """Mark a payment declined by all eligible coadmins when every team has dismissed."""
+        eligibility = await self._compute_dismissal_eligibility(payment)
+        self._log_dismissal_eligibility(payment, eligibility)
         if payment.all_coadmins_declined_at is not None:
+            if eligibility.all_declined:
+                return False
+            if payment.declined_review_dismissed_at is None:
+                payment.all_coadmins_declined_at = None
+                await self._repository.flush(payment)
             return False
-        active_coadmin_ids = await self._user_repository.list_active_coadmin_ids()
-        if not active_coadmin_ids:
-            return False
-        dismissal_count = await self._repository.count_coadmin_dismissals_for_active_coadmins(
-            payment.id,
-            active_coadmin_ids,
-        )
-        if dismissal_count < len(active_coadmin_ids):
+        if not eligibility.all_declined:
             return False
         payment.all_coadmins_declined_at = datetime.now(UTC)
         await self._repository.flush(payment)
         return True
+
+    async def _attach_admin_dismissal_eligibility(
+        self,
+        page: PaymentListPage,
+    ) -> PaymentListPage:
+        if not page.items:
+            return page
+
+        payment_ids = [item.payment.id for item in page.items]
+        eligible_coadmin_ids = (
+            await self._user_repository.list_eligible_coadmin_ids_for_payment_decline()
+        )
+        declined_by_payment = await self._repository.declined_coadmin_ids_by_payment(
+            payment_ids,
+            eligible_coadmin_ids,
+        )
+        items: list[PaymentListItem] = []
+        for item in page.items:
+            declined_ids = tuple(
+                sorted(declined_by_payment.get(item.payment.id, []))
+            )
+            eligibility = self._build_dismissal_eligibility(
+                item.payment,
+                eligible_coadmin_ids=eligible_coadmin_ids,
+                declined_coadmin_ids=declined_ids,
+            )
+            items.append(
+                replace(
+                    item,
+                    can_dismiss=eligibility.can_dismiss,
+                    eligible_coadmin_count=eligibility.eligible_coadmin_count,
+                    declined_coadmin_count=eligibility.declined_coadmin_count,
+                )
+            )
+        return replace(page, items=items)
+
+    async def _compute_dismissal_eligibility(
+        self,
+        payment: PaymentEvent,
+    ) -> PaymentDismissalEligibility:
+        eligible_coadmin_ids = (
+            await self._user_repository.list_eligible_coadmin_ids_for_payment_decline()
+        )
+        if not eligible_coadmin_ids:
+            return PaymentDismissalEligibility(
+                eligible_coadmin_ids=(),
+                declined_coadmin_ids=(),
+                eligible_coadmin_count=0,
+                declined_coadmin_count=0,
+                all_declined=False,
+                can_dismiss=False,
+            )
+        declined_coadmin_ids = tuple(
+            sorted(
+                await self._session.scalars(
+                    select(PaymentEventCoadminDismissal.coadmin_id)
+                    .where(
+                        PaymentEventCoadminDismissal.payment_event_id == payment.id,
+                        PaymentEventCoadminDismissal.coadmin_id.in_(
+                            eligible_coadmin_ids
+                        ),
+                    )
+                    .distinct()
+                )
+            )
+        )
+        return self._build_dismissal_eligibility(
+            payment,
+            eligible_coadmin_ids=eligible_coadmin_ids,
+            declined_coadmin_ids=declined_coadmin_ids,
+        )
+
+    @staticmethod
+    def _build_dismissal_eligibility(
+        payment: PaymentEvent,
+        *,
+        eligible_coadmin_ids: list[int],
+        declined_coadmin_ids: tuple[int, ...],
+    ) -> PaymentDismissalEligibility:
+        eligible_ids = tuple(sorted(set(eligible_coadmin_ids)))
+        declined_ids = tuple(sorted(set(declined_coadmin_ids)))
+        eligible_count = len(eligible_ids)
+        declined_count = len(declined_ids)
+        all_declined = eligible_count > 0 and declined_count >= eligible_count
+        can_dismiss = (
+            payment.status == PaymentStatus.PENDING
+            and payment.declined_review_dismissed_at is None
+            and all_declined
+        )
+        return PaymentDismissalEligibility(
+            eligible_coadmin_ids=eligible_ids,
+            declined_coadmin_ids=declined_ids,
+            eligible_coadmin_count=eligible_count,
+            declined_coadmin_count=declined_count,
+            all_declined=all_declined,
+            can_dismiss=can_dismiss,
+        )
+
+    @staticmethod
+    def _log_dismissal_eligibility(
+        payment: PaymentEvent,
+        eligibility: PaymentDismissalEligibility,
+    ) -> None:
+        logger.info(
+            "payment_dismissal_eligibility",
+            extra={
+                "payment_id": payment.id,
+                "status": payment.status.value,
+                "telegram_message_id": payment.telegram_message_id,
+                "eligible_coadmin_ids": list(eligibility.eligible_coadmin_ids),
+                "declined_coadmin_ids": list(eligibility.declined_coadmin_ids),
+                "eligible_coadmin_count": eligibility.eligible_coadmin_count,
+                "declined_coadmin_count": eligibility.declined_coadmin_count,
+                "all_declined": eligibility.all_declined,
+                "can_dismiss": eligibility.can_dismiss,
+            },
+        )

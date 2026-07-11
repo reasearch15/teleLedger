@@ -464,6 +464,9 @@ def _serialize_payment_page(
                         else None
                     ),
                     "coadmin_dismissals": item.coadmin_dismissals,
+                    "can_dismiss": item.can_dismiss,
+                    "eligible_coadmin_count": item.eligible_coadmin_count,
+                    "declined_coadmin_count": item.declined_coadmin_count,
                 }
             )
             for item in page.items

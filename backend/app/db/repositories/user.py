@@ -97,6 +97,26 @@ class UserRepository(BaseRepository[User]):
         )
         return list(result)
 
+    async def list_eligible_coadmin_ids_for_payment_decline(self) -> list[int]:
+        """Return active coadmins that have at least one active staff member."""
+        staffed_coadmin_ids = (
+            select(User.coadmin_id)
+            .where(
+                User.role == UserRole.STAFF,
+                User.is_active.is_(True),
+                User.coadmin_id.is_not(None),
+            )
+            .distinct()
+        )
+        result = await self._session.scalars(
+            select(User.id).where(
+                User.role == UserRole.COADMIN,
+                User.is_active.is_(True),
+                User.id.in_(staffed_coadmin_ids),
+            )
+        )
+        return list(result)
+
     async def count_staff_assigned_to_coadmin(self, coadmin_id: int) -> int:
         """Count staff accounts owned by one coadmin."""
         result = await self._session.scalar(

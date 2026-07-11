@@ -32,6 +32,9 @@ class PaymentListItem:
     claimed_by_staff: StaffIdentity | None
     completed_by_staff: StaffIdentity | None
     coadmin_dismissals: list["PaymentDismissalIdentity"]
+    can_dismiss: bool = False
+    eligible_coadmin_count: int = 0
+    declined_coadmin_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +106,7 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         history_only: bool = False,
         include_dismissals: bool = False,
         exclude_all_coadmins_declined: bool = False,
+        exclude_declined_review_dismissed: bool = False,
         admin_review_only: bool = False,
     ) -> PaymentListPage:
         """Return one lightweight page without counting unless requested."""
@@ -117,6 +121,7 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
             active_only=active_only,
             history_only=history_only,
             exclude_all_coadmins_declined=exclude_all_coadmins_declined,
+            exclude_declined_review_dismissed=exclude_declined_review_dismissed,
             admin_review_only=admin_review_only,
         )
         claimed_staff = aliased(User, name="claimed_staff")
@@ -284,6 +289,7 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         active_only: bool,
         history_only: bool,
         exclude_all_coadmins_declined: bool,
+        exclude_declined_review_dismissed: bool,
         admin_review_only: bool,
     ) -> tuple[ColumnElement[bool], ...]:
         """Build reusable list/count predicates without changing filter semantics."""
@@ -370,6 +376,9 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         if exclude_all_coadmins_declined:
             conditions.append(PaymentEvent.all_coadmins_declined_at.is_(None))
 
+        if exclude_declined_review_dismissed:
+            conditions.append(PaymentEvent.declined_review_dismissed_at.is_(None))
+
         if admin_review_only:
             conditions.append(PaymentEvent.all_coadmins_declined_at.is_not(None))
             conditions.append(PaymentEvent.declined_review_dismissed_at.is_(None))
@@ -417,16 +426,43 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         payment_event_id: int,
         active_coadmin_ids: list[int],
     ) -> int:
-        """Count dismissals covering every active coadmin for one payment."""
+        """Count unique eligible coadmin dismissals for one payment."""
         if not active_coadmin_ids:
             return 0
         result = await self._session.scalar(
-            select(func.count(PaymentEventCoadminDismissal.id)).where(
+            select(
+                func.count(func.distinct(PaymentEventCoadminDismissal.coadmin_id))
+            ).where(
                 PaymentEventCoadminDismissal.payment_event_id == payment_event_id,
                 PaymentEventCoadminDismissal.coadmin_id.in_(active_coadmin_ids),
             )
         )
         return int(result or 0)
+
+    async def declined_coadmin_ids_by_payment(
+        self,
+        payment_ids: list[int],
+        eligible_coadmin_ids: list[int],
+    ) -> dict[int, list[int]]:
+        """Return unique declining coadmin IDs keyed by payment."""
+        if not payment_ids or not eligible_coadmin_ids:
+            return {}
+        statement = (
+            select(
+                PaymentEventCoadminDismissal.payment_event_id,
+                PaymentEventCoadminDismissal.coadmin_id,
+            )
+            .where(
+                PaymentEventCoadminDismissal.payment_event_id.in_(payment_ids),
+                PaymentEventCoadminDismissal.coadmin_id.in_(eligible_coadmin_ids),
+            )
+            .distinct()
+        )
+        rows = (await self._session.execute(statement)).all()
+        declined_by_payment: dict[int, list[int]] = {}
+        for payment_id, coadmin_id in rows:
+            declined_by_payment.setdefault(payment_id, []).append(coadmin_id)
+        return declined_by_payment
 
     async def get_by_telegram_message_id(
         self,

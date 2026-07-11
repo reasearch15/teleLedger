@@ -46,6 +46,9 @@ export type Payment = {
   }>;
   all_coadmins_declined_at: string | null;
   declined_review_dismissed_at: string | null;
+  can_dismiss: boolean;
+  eligible_coadmin_count: number;
+  declined_coadmin_count: number;
   parser_confidence: number;
   created_at: string;
   updated_at: string;

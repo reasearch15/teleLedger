@@ -1309,7 +1309,11 @@ async def test_admin_declined_review_lists_coadmin_dismissals() -> None:
         declined_list = await api.get("/api/payments/admin/declined")
 
     assert normal_list.status_code == 200
-    assert [item["id"] for item in normal_list.json()["items"]] == []
+    normal_body = normal_list.json()
+    assert [item["id"] for item in normal_body["items"]] == [1]
+    assert normal_body["items"][0]["can_dismiss"] is True
+    assert normal_body["items"][0]["eligible_coadmin_count"] == 2
+    assert normal_body["items"][0]["declined_coadmin_count"] == 2
     assert declined_list.status_code == 200
     body = declined_list.json()
     assert [item["id"] for item in body["items"]] == [1]
@@ -1393,6 +1397,13 @@ async def test_partial_coadmin_decline_does_not_trigger_all_declined() -> None:
         color="#2563EB",
         coadmin_id=10,
     )
+    await seed_account(
+        84,
+        username="other_staff",
+        role=UserRole.STAFF,
+        color="#16A34A",
+        coadmin_id=11,
+    )
     await seed_payment(1)
 
     admin_user = User(
@@ -1425,5 +1436,318 @@ async def test_partial_coadmin_decline_does_not_trigger_all_declined() -> None:
         normal_list = await api.get("/api/payments")
 
     assert declined_list.json()["items"] == []
-    assert [item["id"] for item in normal_list.json()["items"]] == [1]
-    assert normal_list.json()["items"][0]["all_coadmins_declined_at"] is None
+    normal_body = normal_list.json()
+    assert [item["id"] for item in normal_body["items"]] == [1]
+    assert normal_body["items"][0]["all_coadmins_declined_at"] is None
+    assert normal_body["items"][0]["can_dismiss"] is False
+    assert normal_body["items"][0]["declined_coadmin_count"] == 1
+    assert normal_body["items"][0]["eligible_coadmin_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_zero_declines_has_no_dismiss_button_for_admin() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(1, username="ledger_admin", role=UserRole.ADMIN, color="#7C3AED")
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_payment(1)
+
+    admin_user = User(
+        id=1,
+        username="ledger_admin",
+        password_hash="not-used",
+        role=UserRole.ADMIN,
+        is_active=True,
+        staff_color="#7C3AED",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(admin_user) as api:
+        response = await api.get("/api/payments?active_only=true")
+
+    body = response.json()["items"][0]
+    assert body["can_dismiss"] is False
+    assert body["declined_coadmin_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_empty_active_coadmin_does_not_block_all_declined() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(1, username="ledger_admin", role=UserRole.ADMIN, color="#7C3AED")
+    await seed_account(10, username="charlie", role=UserRole.COADMIN, color="#111111")
+    await seed_account(11, username="default_coadmin", role=UserRole.COADMIN, color="#222222")
+    await seed_account(
+        42,
+        username="bella",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_payment(1)
+
+    admin_user = User(
+        id=1,
+        username="ledger_admin",
+        password_hash="not-used",
+        role=UserRole.ADMIN,
+        is_active=True,
+        staff_color="#7C3AED",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    staff_user = User(
+        id=42,
+        username="bella",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_user) as api:
+        assert (await api.post("/api/payments/1/not-ours")).status_code == 204
+
+    async with payment_client_for(admin_user) as api:
+        response = await api.get("/api/payments?active_only=true")
+
+    body = response.json()["items"][0]
+    assert body["status"] == "pending"
+    assert body["can_dismiss"] is True
+    assert body["eligible_coadmin_count"] == 1
+    assert body["declined_coadmin_count"] == 1
+    assert body["all_coadmins_declined_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_same_coadmin_decline_is_counted_once() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_account(
+        43,
+        username="staff_two",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_payment(1)
+
+    staff_one = User(
+        id=42,
+        username="staff_one",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    staff_two = User(
+        id=43,
+        username="staff_two",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_one) as api:
+        await api.post("/api/payments/1/not-ours")
+    async with payment_client_for(staff_two) as api:
+        await api.post("/api/payments/1/not-ours")
+
+    async with TestSessionFactory() as session:
+        service = PaymentService(session)
+        payment = await service._repository.get_by_id(1)
+        assert payment is not None
+        eligibility = await service._compute_dismissal_eligibility(payment)
+
+    assert eligibility.declined_coadmin_count == 1
+    assert eligibility.can_dismiss is True
+
+
+@pytest.mark.asyncio
+async def test_disabled_coadmin_is_not_required_for_dismiss() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(1, username="ledger_admin", role=UserRole.ADMIN, color="#7C3AED")
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(11, username="coadmin_two", role=UserRole.COADMIN, color="#222222")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_account(
+        84,
+        username="other_staff",
+        role=UserRole.STAFF,
+        color="#16A34A",
+        coadmin_id=11,
+    )
+    await seed_payment(1)
+
+    async with TestSessionFactory() as session:
+        disabled = await session.get(User, 11)
+        assert disabled is not None
+        disabled.is_active = False
+        await session.commit()
+
+    admin_user = User(
+        id=1,
+        username="ledger_admin",
+        password_hash="not-used",
+        role=UserRole.ADMIN,
+        is_active=True,
+        staff_color="#7C3AED",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    staff_one = User(
+        id=42,
+        username="staff_one",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_one) as api:
+        await api.post("/api/payments/1/not-ours")
+
+    async with payment_client_for(admin_user) as api:
+        response = await api.get("/api/payments?active_only=true")
+
+    body = response.json()["items"][0]
+    assert body["eligible_coadmin_count"] == 1
+    assert body["can_dismiss"] is True
+
+
+@pytest.mark.asyncio
+async def test_new_active_coadmin_requires_decline_before_dismiss() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(1, username="ledger_admin", role=UserRole.ADMIN, color="#7C3AED")
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_payment(1)
+
+    admin_user = User(
+        id=1,
+        username="ledger_admin",
+        password_hash="not-used",
+        role=UserRole.ADMIN,
+        is_active=True,
+        staff_color="#7C3AED",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    staff_one = User(
+        id=42,
+        username="staff_one",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_one) as api:
+        await api.post("/api/payments/1/not-ours")
+
+    await seed_account(11, username="coadmin_two", role=UserRole.COADMIN, color="#222222")
+    await seed_account(
+        84,
+        username="other_staff",
+        role=UserRole.STAFF,
+        color="#16A34A",
+        coadmin_id=11,
+    )
+
+    async with payment_client_for(admin_user) as api:
+        response = await api.get("/api/payments?active_only=true")
+
+    body = response.json()["items"][0]
+    assert body["eligible_coadmin_count"] == 2
+    assert body["declined_coadmin_count"] == 1
+    assert body["can_dismiss"] is False
+
+
+@pytest.mark.asyncio
+async def test_admin_dismiss_removes_fully_declined_payment_from_active_list() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(1, username="ledger_admin", role=UserRole.ADMIN, color="#7C3AED")
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_payment(1)
+
+    admin_user = User(
+        id=1,
+        username="ledger_admin",
+        password_hash="not-used",
+        role=UserRole.ADMIN,
+        is_active=True,
+        staff_color="#7C3AED",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    staff_one = User(
+        id=42,
+        username="staff_one",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_one) as api:
+        await api.post("/api/payments/1/not-ours")
+
+    async with payment_client_for(admin_user) as api:
+        before = await api.get("/api/payments?active_only=true")
+        assert before.json()["items"][0]["can_dismiss"] is True
+        dismiss_response = await api.post("/api/payments/admin/1/dismiss-declined")
+        after = await api.get("/api/payments?active_only=true")
+
+    assert dismiss_response.status_code == 204
+    assert after.json()["items"] == []

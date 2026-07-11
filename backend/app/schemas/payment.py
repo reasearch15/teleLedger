@@ -99,6 +99,9 @@ class PaymentListItemResponse(BaseModel):
     coadmin_dismissals: list[PaymentDismissalResponse] = Field(default_factory=list)
     all_coadmins_declined_at: datetime | None = None
     declined_review_dismissed_at: datetime | None = None
+    can_dismiss: bool = False
+    eligible_coadmin_count: int = 0
+    declined_coadmin_count: int = 0
     parser_confidence: int
     created_at: datetime
     updated_at: datetime
