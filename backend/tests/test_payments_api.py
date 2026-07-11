@@ -1180,3 +1180,250 @@ async def test_list_payments_returns_total_only_when_requested(
     assert response.status_code == 200
     assert response.json()["total"] == 10
     assert response.json()["has_more"] is True
+
+
+@pytest.mark.asyncio
+async def test_all_coadmins_declined_moves_payment_to_admin_review() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(11, username="coadmin_two", role=UserRole.COADMIN, color="#222222")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_account(
+        84,
+        username="other_staff",
+        role=UserRole.STAFF,
+        color="#16A34A",
+        coadmin_id=11,
+    )
+    await seed_payment(1)
+
+    staff_one = User(
+        id=42,
+        username="staff_one",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    other_staff = User(
+        id=84,
+        username="other_staff",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#16A34A",
+        coadmin_id=11,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_one) as api:
+        assert (await api.post("/api/payments/1/not-ours")).status_code == 204
+        after_first = await api.get("/api/payments")
+    async with payment_client_for(other_staff) as api:
+        assert (await api.post("/api/payments/1/not-ours")).status_code == 204
+        after_second = await api.get("/api/payments")
+
+    async with payment_client_for(staff_one) as api:
+        staff_one_list = await api.get("/api/payments")
+    async with payment_client_for(other_staff) as api:
+        staff_two_list = await api.get("/api/payments")
+
+    assert [item["id"] for item in after_first.json()["items"]] == []
+    assert [item["id"] for item in after_second.json()["items"]] == []
+    assert staff_one_list.json()["items"] == []
+    assert staff_two_list.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_admin_declined_review_lists_coadmin_dismissals() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(1, username="ledger_admin", role=UserRole.ADMIN, color="#7C3AED")
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(11, username="coadmin_two", role=UserRole.COADMIN, color="#222222")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_account(
+        84,
+        username="other_staff",
+        role=UserRole.STAFF,
+        color="#16A34A",
+        coadmin_id=11,
+    )
+    await seed_payment(1)
+
+    admin_user = User(
+        id=1,
+        username="ledger_admin",
+        password_hash="not-used",
+        role=UserRole.ADMIN,
+        is_active=True,
+        staff_color="#7C3AED",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    staff_one = User(
+        id=42,
+        username="staff_one",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    other_staff = User(
+        id=84,
+        username="other_staff",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#16A34A",
+        coadmin_id=11,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_one) as api:
+        await api.post("/api/payments/1/not-ours")
+    async with payment_client_for(other_staff) as api:
+        await api.post("/api/payments/1/not-ours")
+
+    async with payment_client_for(admin_user) as api:
+        normal_list = await api.get("/api/payments")
+        declined_list = await api.get("/api/payments/admin/declined")
+
+    assert normal_list.status_code == 200
+    assert [item["id"] for item in normal_list.json()["items"]] == []
+    assert declined_list.status_code == 200
+    body = declined_list.json()
+    assert [item["id"] for item in body["items"]] == [1]
+    assert body["items"][0]["all_coadmins_declined_at"] is not None
+    assert len(body["items"][0]["coadmin_dismissals"]) == 2
+    usernames = {
+        dismissal["coadmin_username"]
+        for dismissal in body["items"][0]["coadmin_dismissals"]
+    }
+    assert usernames == {"coadmin_one", "coadmin_two"}
+
+
+@pytest.mark.asyncio
+async def test_admin_can_dismiss_and_delete_declined_payment() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(1, username="ledger_admin", role=UserRole.ADMIN, color="#7C3AED")
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_payment(1)
+
+    admin_user = User(
+        id=1,
+        username="ledger_admin",
+        password_hash="not-used",
+        role=UserRole.ADMIN,
+        is_active=True,
+        staff_color="#7C3AED",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    staff_one = User(
+        id=42,
+        username="staff_one",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_one) as api:
+        await api.post("/api/payments/1/not-ours")
+
+    async with payment_client_for(admin_user) as api:
+        dismiss_response = await api.post("/api/payments/admin/1/dismiss-declined")
+        after_dismiss = await api.get("/api/payments/admin/declined")
+
+    assert dismiss_response.status_code == 204
+    assert after_dismiss.json()["items"] == []
+
+    await seed_payment(2)
+    async with payment_client_for(staff_one) as api:
+        await api.post("/api/payments/2/not-ours")
+
+    async with payment_client_for(admin_user) as api:
+        delete_response = await api.delete("/api/payments/admin/2")
+        after_delete = await api.get("/api/payments/admin/declined")
+
+    assert delete_response.status_code == 204
+    assert [item["id"] for item in after_delete.json()["items"]] == []
+
+
+@pytest.mark.asyncio
+async def test_partial_coadmin_decline_does_not_trigger_all_declined() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    await seed_account(1, username="ledger_admin", role=UserRole.ADMIN, color="#7C3AED")
+    await seed_account(10, username="coadmin_one", role=UserRole.COADMIN, color="#111111")
+    await seed_account(11, username="coadmin_two", role=UserRole.COADMIN, color="#222222")
+    await seed_account(
+        42,
+        username="staff_one",
+        role=UserRole.STAFF,
+        color="#2563EB",
+        coadmin_id=10,
+    )
+    await seed_payment(1)
+
+    admin_user = User(
+        id=1,
+        username="ledger_admin",
+        password_hash="not-used",
+        role=UserRole.ADMIN,
+        is_active=True,
+        staff_color="#7C3AED",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    staff_one = User(
+        id=42,
+        username="staff_one",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        coadmin_id=10,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+    async with payment_client_for(staff_one) as api:
+        await api.post("/api/payments/1/not-ours")
+
+    async with payment_client_for(admin_user) as api:
+        declined_list = await api.get("/api/payments/admin/declined")
+        normal_list = await api.get("/api/payments")
+
+    assert declined_list.json()["items"] == []
+    assert [item["id"] for item in normal_list.json()["items"]] == [1]
+    assert normal_list.json()["items"][0]["all_coadmins_declined_at"] is None

@@ -225,6 +225,97 @@ async def dismiss_payment_not_ours(
         ) from error
 
 
+@router.get("/admin/declined", response_model=PaymentListResponse)
+async def list_declined_payments(
+    session: DatabaseSession,
+    current_user: CurrentUser,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    include_total: bool = False,
+) -> Response:
+    """Return payments declined by every active coadmin awaiting admin review."""
+    try:
+        page = await run_read_with_retry(
+            lambda read_session: PaymentService(read_session).list_declined_review(
+                limit=limit,
+                offset=offset,
+                include_total=include_total,
+                current_user=current_user,
+            ),
+            session=session,
+            operation_name="payments.declined_review",
+        )
+    except PaymentAuthorizationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(error),
+        ) from error
+
+    response_model = _serialize_payment_page(page, limit=limit, offset=offset)
+    return Response(
+        content=response_model.model_dump_json(),
+        media_type="application/json",
+    )
+
+
+@router.post(
+    "/admin/{payment_id}/dismiss-declined",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def dismiss_declined_payment_review(
+    payment_id: PaymentId,
+    service: PaymentServiceDependency,
+    current_user: CurrentUser,
+) -> None:
+    """Remove a fully declined payment from the admin review queue."""
+    try:
+        await service.dismiss_declined_review(payment_id, current_user)
+    except PaymentNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except PaymentStateConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except PaymentAuthorizationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(error),
+        ) from error
+
+
+@router.delete(
+    "/admin/{payment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_payment(
+    payment_id: PaymentId,
+    service: PaymentServiceDependency,
+    current_user: CurrentUser,
+) -> None:
+    """Permanently delete a payment declined by all coadmins."""
+    try:
+        await service.delete_payment(payment_id, current_user)
+    except PaymentNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except PaymentStateConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except PaymentAuthorizationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(error),
+        ) from error
+
+
 @router.post(
     "/admin/{payment_id}/force-unclaim",
     response_model=PaymentEventResponse,

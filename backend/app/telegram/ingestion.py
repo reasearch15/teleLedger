@@ -17,6 +17,7 @@ async def ingest_telegram_message(
         await event_broker.publish(
             LiveEventType.PAYMENT_CREATED,
             payment_id=result.payment_event_id,
+            broadcast=True,
         )
     return result
 

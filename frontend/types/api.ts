@@ -44,6 +44,8 @@ export type Payment = {
     dismissed_by_staff_username: string | null;
     created_at: string;
   }>;
+  all_coadmins_declined_at: string | null;
+  declined_review_dismissed_at: string | null;
   parser_confidence: number;
   created_at: string;
   updated_at: string;

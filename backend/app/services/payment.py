@@ -90,6 +90,7 @@ class PaymentService(ApplicationService):
                 else None
             ),
             include_dismissals=current_user.role == UserRole.ADMIN,
+            exclude_all_coadmins_declined=True,
         )
 
     async def dismiss_not_ours(self, payment_event_id: int, actor: User) -> None:
@@ -99,6 +100,7 @@ class PaymentService(ApplicationService):
             raise StaffCoadminRequiredError(
                 "Staff must be assigned to a coadmin before dismissing payments."
             )
+        all_coadmins_declined = False
         async with self._session.begin():
             payment = await self._get_locked(payment_event_id)
             if payment.status != PaymentStatus.PENDING:
@@ -119,10 +121,73 @@ class PaymentService(ApplicationService):
                         dismissed_by_staff_id=actor.id,
                     )
                 )
+            all_coadmins_declined = await self._mark_all_coadmins_declined_if_complete(
+                payment
+            )
         await event_broker.publish(
             LiveEventType.PAYMENT_DISMISSED,
             payment_id=payment_event_id,
             coadmin_id=actor.coadmin_id,
+        )
+        if all_coadmins_declined:
+            await event_broker.publish(
+                LiveEventType.PAYMENT_ALL_COADMINS_DECLINED,
+                payment_id=payment_event_id,
+            )
+
+    async def list_declined_review(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        include_total: bool = False,
+        current_user: User,
+    ) -> PaymentListPage:
+        """Return payments declined by every active coadmin awaiting admin review."""
+        self._require_admin(current_user)
+        return await self._repository.list_payments(
+            limit=limit,
+            offset=offset,
+            include_total=include_total,
+            include_dismissals=True,
+            admin_review_only=True,
+        )
+
+    async def dismiss_declined_review(
+        self,
+        payment_event_id: int,
+        actor: User,
+    ) -> None:
+        """Remove a fully declined payment from the admin review queue."""
+        self._require_admin(actor)
+        async with self._session.begin():
+            payment = await self._get_locked(payment_event_id)
+            if payment.all_coadmins_declined_at is None:
+                raise PaymentStateConflictError(
+                    "Only payments declined by all coadmins can be dismissed."
+                )
+            if payment.declined_review_dismissed_at is not None:
+                return
+            payment.declined_review_dismissed_at = datetime.now(UTC)
+            await self._repository.flush(payment)
+        await event_broker.publish(
+            LiveEventType.PAYMENT_DECLINED_REVIEW_DISMISSED,
+            payment_id=payment_event_id,
+        )
+
+    async def delete_payment(self, payment_event_id: int, actor: User) -> None:
+        """Permanently delete a payment and related coadmin dismissal records."""
+        self._require_admin(actor)
+        async with self._session.begin():
+            payment = await self._get_locked(payment_event_id)
+            if payment.all_coadmins_declined_at is None:
+                raise PaymentStateConflictError(
+                    "Only payments declined by all coadmins can be deleted."
+                )
+            await self._repository.delete(payment)
+        await event_broker.publish(
+            LiveEventType.PAYMENT_DELETED,
+            payment_id=payment_event_id,
         )
 
     async def list_history(
@@ -380,3 +445,23 @@ class PaymentService(ApplicationService):
         if payment is None:
             raise PaymentNotFoundError(f"Payment event {payment_event_id} was not found")
         return payment
+
+    async def _mark_all_coadmins_declined_if_complete(
+        self,
+        payment: PaymentEvent,
+    ) -> bool:
+        """Mark a payment declined by all active coadmins when every team has dismissed."""
+        if payment.all_coadmins_declined_at is not None:
+            return False
+        active_coadmin_ids = await self._user_repository.list_active_coadmin_ids()
+        if not active_coadmin_ids:
+            return False
+        dismissal_count = await self._repository.count_coadmin_dismissals_for_active_coadmins(
+            payment.id,
+            active_coadmin_ids,
+        )
+        if dismissal_count < len(active_coadmin_ids):
+            return False
+        payment.all_coadmins_declined_at = datetime.now(UTC)
+        await self._repository.flush(payment)
+        return True

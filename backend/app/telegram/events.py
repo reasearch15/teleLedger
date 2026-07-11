@@ -134,31 +134,13 @@ def create_reaction_handler(
     """Build a Telethon raw update handler for cashout message reactions."""
 
     async def handle_reaction(event: object) -> None:
+        raw_update_type = type(event).__name__
+        if "Reaction" not in raw_update_type:
+            return
+
         message_id = _reaction_message_id(event)
         chat_id = _reaction_chat_id(event)
-        raw_update_type = type(event).__name__
         reaction_summary = _reaction_summary(event)
-        logger.info(
-            "telegram_raw_update_received",
-            extra={
-                "telegram_message_id": message_id,
-                "telegram_chat_id": chat_id,
-                "expected_telegram_chat_id": expected_chat_id,
-                "raw_update_type": raw_update_type,
-                "reaction_summary": reaction_summary,
-            },
-        )
-        if "Reaction" in raw_update_type:
-            logger.info(
-                "telegram_reaction_raw_update_received",
-                extra={
-                    "telegram_message_id": message_id,
-                    "telegram_chat_id": chat_id,
-                    "expected_telegram_chat_id": expected_chat_id,
-                    "raw_update_type": raw_update_type,
-                    "reaction_summary": reaction_summary,
-                },
-            )
         if raw_update_type == "UpdateRecentReactions":
             logger.info(
                 "telegram_recent_reactions_update_received",
@@ -197,7 +179,28 @@ def create_reaction_handler(
             return
         has_active_reaction = _has_active_reaction_update(event)
         if not isinstance(message_id, int):
+            logger.info(
+                "telegram_reaction_update_ignored",
+                extra={
+                    "telegram_chat_id": chat_id,
+                    "expected_telegram_chat_id": expected_chat_id,
+                    "raw_update_type": raw_update_type,
+                    "reaction_summary": reaction_summary,
+                    "completed": False,
+                    "reason_ignored": "missing_message_id",
+                },
+            )
             return
+        logger.info(
+            "telegram_reaction_raw_update_received",
+            extra={
+                "telegram_message_id": message_id,
+                "telegram_chat_id": chat_id,
+                "expected_telegram_chat_id": expected_chat_id,
+                "raw_update_type": raw_update_type,
+                "reaction_summary": reaction_summary,
+            },
+        )
         logger.info(
             "telegram_reaction_update_received",
             extra={

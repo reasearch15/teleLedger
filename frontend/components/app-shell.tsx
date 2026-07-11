@@ -26,6 +26,7 @@ const navigation = [
 const adminNavigation = [
   ...navigation,
   { href: "/admin/ledger", label: "Ledger" },
+  { href: "/admin/declined-payments", label: "Declined Payments" },
   { href: "/admin/coadmin-summary", label: "Coadmin Summary" },
   { href: "/admin/staff-balances", label: "Staff Balances" },
   { href: "/admin/adjustment-history", label: "Adjustment History" },

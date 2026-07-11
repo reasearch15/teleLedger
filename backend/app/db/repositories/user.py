@@ -87,6 +87,16 @@ class UserRepository(BaseRepository[User]):
         )
         return result.scalar_one_or_none()
 
+    async def list_active_coadmin_ids(self) -> list[int]:
+        """Return IDs of active coadmin accounts."""
+        result = await self._session.scalars(
+            select(User.id).where(
+                User.role == UserRole.COADMIN,
+                User.is_active.is_(True),
+            )
+        )
+        return list(result)
+
     async def count_staff_assigned_to_coadmin(self, coadmin_id: int) -> int:
         """Count staff accounts owned by one coadmin."""
         result = await self._session.scalar(

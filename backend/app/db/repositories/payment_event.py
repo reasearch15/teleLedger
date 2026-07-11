@@ -102,6 +102,8 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         active_only: bool = False,
         history_only: bool = False,
         include_dismissals: bool = False,
+        exclude_all_coadmins_declined: bool = False,
+        admin_review_only: bool = False,
     ) -> PaymentListPage:
         """Return one lightweight page without counting unless requested."""
         conditions = self._list_conditions(
@@ -114,6 +116,8 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
             history_staff_id=history_staff_id,
             active_only=active_only,
             history_only=history_only,
+            exclude_all_coadmins_declined=exclude_all_coadmins_declined,
+            admin_review_only=admin_review_only,
         )
         claimed_staff = aliased(User, name="claimed_staff")
         completed_staff = aliased(User, name="completed_staff")
@@ -147,6 +151,8 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
                     PaymentEvent.completed_by_staff_id,
                     PaymentEvent.completed_at,
                     PaymentEvent.parser_confidence,
+                    PaymentEvent.all_coadmins_declined_at,
+                    PaymentEvent.declined_review_dismissed_at,
                     PaymentEvent.created_at,
                     PaymentEvent.updated_at,
                 )
@@ -164,6 +170,7 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         statement = statement.order_by(*self._list_order_by(
             history_only=history_only,
             history_staff_id=history_staff_id,
+            admin_review_only=admin_review_only,
         )).limit(limit + 1).offset(offset)
 
         acquisition_started_at = perf_counter()
@@ -276,6 +283,8 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         history_staff_id: int | None,
         active_only: bool,
         history_only: bool,
+        exclude_all_coadmins_declined: bool,
+        admin_review_only: bool,
     ) -> tuple[ColumnElement[bool], ...]:
         """Build reusable list/count predicates without changing filter semantics."""
         conditions: list[ColumnElement[bool]] = []
@@ -358,6 +367,13 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
             inclusive_end = datetime.combine(date_to, time.max)
             conditions.append(PaymentEvent.payment_datetime <= inclusive_end)
 
+        if exclude_all_coadmins_declined:
+            conditions.append(PaymentEvent.all_coadmins_declined_at.is_(None))
+
+        if admin_review_only:
+            conditions.append(PaymentEvent.all_coadmins_declined_at.is_not(None))
+            conditions.append(PaymentEvent.declined_review_dismissed_at.is_(None))
+
         return tuple(conditions)
 
     @staticmethod
@@ -365,8 +381,14 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         *,
         history_only: bool,
         history_staff_id: int | None,
+        admin_review_only: bool = False,
     ) -> tuple[Any, ...]:
         """Choose list ordering based on whether this is a history query."""
+        if admin_review_only:
+            return (
+                PaymentEvent.all_coadmins_declined_at.desc(),
+                PaymentEvent.id.desc(),
+            )
         if history_only or history_staff_id is not None:
             return (
                 PaymentEvent.completed_at.desc().nulls_last(),
@@ -384,6 +406,27 @@ class PaymentEventRepository(BaseRepository[PaymentEvent]):
         """Flush changes and load the database-managed update timestamp."""
         await self._session.flush()
         await self._session.refresh(payment_event, attribute_names=["updated_at"])
+
+    async def delete(self, payment_event: PaymentEvent) -> None:
+        """Permanently remove one payment event and related cascade rows."""
+        await self._session.delete(payment_event)
+        await self._session.flush()
+
+    async def count_coadmin_dismissals_for_active_coadmins(
+        self,
+        payment_event_id: int,
+        active_coadmin_ids: list[int],
+    ) -> int:
+        """Count dismissals covering every active coadmin for one payment."""
+        if not active_coadmin_ids:
+            return 0
+        result = await self._session.scalar(
+            select(func.count(PaymentEventCoadminDismissal.id)).where(
+                PaymentEventCoadminDismissal.payment_event_id == payment_event_id,
+                PaymentEventCoadminDismissal.coadmin_id.in_(active_coadmin_ids),
+            )
+        )
+        return int(result or 0)
 
     async def get_by_telegram_message_id(
         self,

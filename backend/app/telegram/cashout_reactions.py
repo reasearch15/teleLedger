@@ -211,8 +211,9 @@ async def complete_cashout_from_reaction(
     await event_broker.publish(
         LiveEventType.CASHOUT_COMPLETED,
         cashout_id=cashout_id,
+        broadcast=True,
     )
-    await event_broker.publish(LiveEventType.LEDGER_CHANGED)
+    await event_broker.publish(LiveEventType.LEDGER_CHANGED, broadcast=True)
     logger.info(
         "cashout_reaction_sse_published",
         extra={

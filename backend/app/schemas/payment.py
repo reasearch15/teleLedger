@@ -97,6 +97,8 @@ class PaymentListItemResponse(BaseModel):
     claimed_by_staff: StaffIdentityResponse | None = None
     completed_by_staff: StaffIdentityResponse | None = None
     coadmin_dismissals: list[PaymentDismissalResponse] = Field(default_factory=list)
+    all_coadmins_declined_at: datetime | None = None
+    declined_review_dismissed_at: datetime | None = None
     parser_confidence: int
     created_at: datetime
     updated_at: datetime

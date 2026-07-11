@@ -334,9 +334,54 @@ async def test_bot_message_reactions_update_invokes_completion(
     )
 
     assert calls == [555]
-    assert "telegram_raw_update_received" in caplog.messages
     assert "telegram_reaction_raw_update_received" in caplog.messages
+    assert "telegram_reaction_update_received" in caplog.messages
     assert "cashout_reaction_processed" in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_message_reactions_update_invokes_completion() -> None:
+    calls: list[int] = []
+
+    async def complete(
+        message_id: int,
+        chat_id: int,
+        expected_chat_id: int,
+    ) -> cashout_reactions.CashoutReactionCompletionResult:
+        calls.append(message_id)
+        assert chat_id == expected_chat_id
+        return cashout_reactions.CashoutReactionCompletionResult(
+            completed=True,
+            cashout_id=1,
+            reason="completed",
+            matched_cashout=True,
+            previous_status="sent",
+        )
+
+    handler = create_reaction_handler(
+        expected_chat_id=-1001234567890,
+        complete_from_reaction=complete,
+        report=lambda _: None,
+    )
+    await handler(
+        types.UpdateMessageReactions(
+            peer=types.PeerChannel(1234567890),
+            msg_id=555,
+            reactions=types.MessageReactions(
+                results=[
+                    types.ReactionCount(
+                        reaction=types.ReactionEmoji("✅"),
+                        count=1,
+                    )
+                ],
+                recent_reactions=[],
+                min=False,
+                can_see_list=True,
+            ),
+        )
+    )
+
+    assert calls == [555]
 
 
 @pytest.mark.asyncio

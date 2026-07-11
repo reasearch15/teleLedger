@@ -144,6 +144,76 @@ async def test_payment_claim_publishes_event(
 
 
 @pytest.mark.asyncio
+async def test_not_ours_publishes_all_coadmins_declined_event() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    async with TestSessionFactory() as session:
+        coadmin = User(
+            id=10,
+            username="coadmin_one",
+            password_hash="not-used",
+            role=UserRole.COADMIN,
+            is_active=True,
+            staff_color="#111111",
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        staff_user = User(
+            id=42,
+            username="staff_one",
+            password_hash="not-used",
+            role=UserRole.STAFF,
+            is_active=True,
+            staff_color="#2563EB",
+            coadmin_id=10,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        message = TelegramMessage(
+            id=1,
+            telegram_chat_id=100,
+            telegram_message_id=200,
+            sender_id=1,
+            sender_name="sender",
+            raw_text="payment",
+            received_at=timestamp,
+        )
+        session.add(coadmin)
+        session.add(staff_user)
+        session.add(message)
+        await session.flush()
+        payment = PaymentEvent(
+            telegram_message_id=message.id,
+            recipient_tag="#player",
+            amount=Decimal("25.00"),
+            payment_sender_name="Alice",
+            payment_datetime=timestamp,
+            total_in=Decimal("25.00"),
+            total_out=Decimal("0.00"),
+            raw_text="payment",
+            status=PaymentStatus.PENDING,
+            parser_confidence=100,
+        )
+        session.add(payment)
+        await session.commit()
+        await session.refresh(payment)
+
+    async with event_broker.subscribe() as queue, TestSessionFactory() as session:
+        await PaymentService(session).dismiss_not_ours(payment.id, staff_user)
+        dismissed = json.loads(await queue.get())
+        all_declined = json.loads(await queue.get())
+
+    assert dismissed == {
+        "event": LiveEventType.PAYMENT_DISMISSED,
+        "payment_id": payment.id,
+        "coadmin_id": 10,
+    }
+    assert all_declined == {
+        "event": LiveEventType.PAYMENT_ALL_COADMINS_DECLINED,
+        "payment_id": payment.id,
+    }
+
+
+@pytest.mark.asyncio
 async def test_cashout_complete_publishes_event(
     seed_users: tuple[User, User],
     pending_cashout: CashoutRequest,

@@ -103,6 +103,14 @@ class PaymentEvent(Base):
         nullable=True,
     )
     parser_confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    all_coadmins_declined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    declined_review_dismissed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

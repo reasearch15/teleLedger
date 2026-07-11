@@ -120,3 +120,29 @@ export function listPaymentAudit(paymentId: number): Promise<PaymentAudit[]> {
     `/api/payments/admin/${paymentId}/audit`,
   );
 }
+
+export function listDeclinedPayments(
+  pagination: PaymentPagination = {},
+): Promise<PaymentPage> {
+  const query = new URLSearchParams();
+  query.set("limit", String(pagination.limit ?? PAYMENT_HISTORY_PAGE_SIZE));
+  query.set("offset", String(pagination.offset ?? 0));
+  return apiRequest<PaymentPage>(
+    `/api/payments/admin/declined?${query.toString()}`,
+  );
+}
+
+export function dismissDeclinedPaymentReview(
+  paymentId: number,
+): Promise<void> {
+  return apiRequest<void>(
+    `/api/payments/admin/${paymentId}/dismiss-declined`,
+    { method: "POST" },
+  );
+}
+
+export function deletePayment(paymentId: number): Promise<void> {
+  return apiRequest<void>(`/api/payments/admin/${paymentId}`, {
+    method: "DELETE",
+  });
+}

@@ -41,8 +41,14 @@ TestSessionFactory = async_sessionmaker(
 
 
 class FakeTelegramClient:
-    def __init__(self, *, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+        recovery_messages: list[object] | None = None,
+    ) -> None:
         self.error = error
+        self.recovery_messages = recovery_messages or []
         self.requests: list[Any] = []
 
     async def __call__(self, request: Any) -> Any:
@@ -50,6 +56,9 @@ class FakeTelegramClient:
         if self.error is not None:
             raise self.error
         return SimpleNamespace(id=555)
+
+    async def get_messages(self, group: Any, *, limit: int = 25) -> list[object]:
+        return self.recovery_messages[:limit]
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -183,3 +192,24 @@ async def test_crash_recovery_reuses_same_telegram_random_id(
             )
         ).all()
         assert CashoutAuditAction.TELEGRAM_RETRY in actions
+
+
+@pytest.mark.asyncio
+async def test_duplicate_send_recovers_telegram_message_id() -> None:
+    recovery_message = SimpleNamespace(
+        id=777,
+        message="🔴 CASHOUT REQUEST\n\nRequest ID:\nCR-000001",
+    )
+    client = FakeTelegramClient(
+        error=RandomIdDuplicateError(None),
+        recovery_messages=[recovery_message],
+    )
+
+    processed = await cashout_delivery.deliver_next_cashout(client, "group")
+
+    assert processed is True
+    async with TestSessionFactory() as session:
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        assert cashout.telegram_status == CashoutTelegramStatus.SENT
+        assert cashout.telegram_message_id == 777

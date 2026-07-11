@@ -108,12 +108,15 @@ async def deliver_next_cashout(
     except errors.RandomIdDuplicateError:
         # Telegram already accepted this persisted random_id before the
         # application could record success (for example, during a crash).
-        await _record_success(delivery, None)
+        message_id = await _recover_message_id(client, group_input, delivery)
+        await _record_success(delivery, message_id)
         logger.info(
             "cashout_telegram_duplicate_confirmed",
             extra={
                 "cashout_request_id": delivery.cashout_id,
                 "cashout_attempt": delivery.attempt,
+                "telegram_message_id": message_id,
+                "recovered_message_id": message_id is not None,
             },
         )
     except Exception as error:
@@ -180,7 +183,27 @@ async def _record_success(
     async with SessionFactory() as session, session.begin():
         repository = CashoutRepository(session)
         cashout = await repository.get_by_id_for_update(delivery.cashout_id)
-        if cashout is None or cashout.telegram_status == CashoutTelegramStatus.SENT:
+        if cashout is None:
+            return
+        if cashout.telegram_status == CashoutTelegramStatus.SENT:
+            if message_id is not None and cashout.telegram_message_id is None:
+                cashout.telegram_message_id = message_id
+                await repository.add_audit(
+                    CashoutRequestAudit(
+                        cashout_request_id=cashout.id,
+                        action=CashoutAuditAction.TELEGRAM_SENT,
+                        actor_user_id=None,
+                        previous_value={"telegram_message_id": None},
+                        new_value={"telegram_message_id": message_id, "recovered": True},
+                    )
+                )
+                logger.info(
+                    "cashout_telegram_message_id_backfilled",
+                    extra={
+                        "cashout_request_id": delivery.cashout_id,
+                        "telegram_message_id": message_id,
+                    },
+                )
             return
         previous = {
             "telegram_status": cashout.telegram_status.value,
@@ -212,6 +235,7 @@ async def _record_success(
     await event_broker.publish(
         LiveEventType.CASHOUT_SENT,
         cashout_id=delivery.cashout_id,
+        broadcast=True,
     )
     if message_id is None:
         logger.warning(
@@ -269,4 +293,48 @@ def _extract_message_id(result: Any, random_id: int) -> int | None:
         message_id = getattr(message, "id", None)
         if isinstance(message_id, int):
             return message_id
+    return None
+
+
+async def _recover_message_id(
+    client: TelegramClient,
+    group_input: Any,
+    delivery: CashoutDelivery,
+) -> int | None:
+    """Best-effort lookup for a cashout message after duplicate-send recovery."""
+    try:
+        messages = await client.get_messages(group_input, limit=25)
+    except Exception:
+        logger.exception(
+            "cashout_telegram_message_id_recovery_failed",
+            extra={
+                "cashout_request_id": delivery.cashout_id,
+                "cashout_attempt": delivery.attempt,
+            },
+        )
+        return None
+
+    request_marker = f"Request ID:\n{delivery.request_number}"
+    for message in messages:
+        text = getattr(message, "message", None) or getattr(message, "text", None)
+        message_id = getattr(message, "id", None)
+        if not isinstance(message_id, int) or not isinstance(text, str):
+            continue
+        if delivery.request_number in text or request_marker in text:
+            logger.info(
+                "cashout_telegram_message_id_recovered",
+                extra={
+                    "cashout_request_id": delivery.cashout_id,
+                    "telegram_message_id": message_id,
+                },
+            )
+            return message_id
+
+    logger.warning(
+        "cashout_telegram_message_id_recovery_not_found",
+        extra={
+            "cashout_request_id": delivery.cashout_id,
+            "request_number": delivery.request_number,
+        },
+    )
     return None
