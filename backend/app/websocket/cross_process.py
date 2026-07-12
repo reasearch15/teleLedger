@@ -12,6 +12,8 @@ from app.db.session import engine
 
 logger = get_logger(__name__)
 LIVE_EVENTS_CHANNEL = "teleledger_live_events"
+RECONNECT_BASE_SECONDS = 1
+RECONNECT_MAX_SECONDS = 30
 
 
 def postgres_dsn() -> str:
@@ -51,36 +53,50 @@ async def notify_live_event(payload: str) -> None:
 async def run_live_event_listener(
     on_payload: Callable[[str], Awaitable[None]],
 ) -> None:
-    """Listen for NOTIFY payloads and forward them into the local event broker."""
-    connection: asyncpg.Connection | None = None
-    loop = asyncio.get_running_loop()
+    """Listen for NOTIFY payloads and forward them into the local event broker.
 
-    def _callback(
-        _connection: asyncpg.Connection,
-        _pid: int,
-        channel: str,
-        payload: str,
-    ) -> None:
-        if channel != LIVE_EVENTS_CHANNEL:
-            return
-        loop.call_soon_threadsafe(lambda: asyncio.create_task(on_payload(payload)))
+    Automatically reconnects with exponential backoff so listener-originated
+    cashout events keep reaching browser SSE clients after transient DB blips.
+    """
+    reconnect_delay = RECONNECT_BASE_SECONDS
+    while True:
+        connection: asyncpg.Connection | None = None
+        loop = asyncio.get_running_loop()
 
-    try:
-        connection = await asyncpg.connect(postgres_dsn())
-        await connection.add_listener(LIVE_EVENTS_CHANNEL, _callback)
-        logger.info("live_event_listener_started")
-        while True:
-            await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.exception("live_event_listener_failed")
-        raise
-    finally:
-        if connection is not None:
-            try:
-                await connection.remove_listener(LIVE_EVENTS_CHANNEL, _callback)
-            except Exception:
-                logger.exception("live_event_listener_remove_failed")
-            await connection.close()
-        logger.info("live_event_listener_stopped")
+        def _callback(
+            _connection: asyncpg.Connection,
+            _pid: int,
+            channel: str,
+            payload: str,
+        ) -> None:
+            if channel != LIVE_EVENTS_CHANNEL:
+                return
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(on_payload(payload)))
+
+        try:
+            connection = await asyncpg.connect(postgres_dsn())
+            await connection.add_listener(LIVE_EVENTS_CHANNEL, _callback)
+            logger.info("live_event_listener_started")
+            reconnect_delay = RECONNECT_BASE_SECONDS
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "live_event_listener_failed",
+                extra={"reconnect_delay_seconds": reconnect_delay},
+            )
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(RECONNECT_MAX_SECONDS, reconnect_delay * 2)
+        finally:
+            if connection is not None:
+                try:
+                    await connection.remove_listener(LIVE_EVENTS_CHANNEL, _callback)
+                except Exception:
+                    logger.exception("live_event_listener_remove_failed")
+                try:
+                    await connection.close()
+                except Exception:
+                    logger.exception("live_event_listener_close_failed")
+            logger.info("live_event_listener_stopped")

@@ -8,14 +8,29 @@ from telethon import utils  # type: ignore[import-untyped]
 from app.core.logging import get_logger
 from app.schemas.telegram import IncomingTelegramMessage
 from app.services.telegram_ingestion import TelegramIngestionResult
+from app.telegram import listener_health
 from app.telegram.cashout_reactions import (
     CashoutReactionCompletionResult,
     complete_cashout_from_reaction,
 )
 from app.telegram.diagnostics import report_ingestion_diagnostic
 from app.telegram.messages import TelegramMessageLike, convert_telegram_message
+from app.telegram.peer_ids import normalize_telegram_chat_id, peer_to_chat_id
+from app.telegram.reaction_matching import (
+    extract_reaction_emoticons,
+    reaction_matches_completion,
+)
 
 logger = get_logger(__name__)
+
+REACTION_UPDATE_TYPES = frozenset(
+    {
+        "UpdateMessageReactions",
+        "UpdateBotMessageReactions",
+        "UpdateBotMessageReaction",
+        "UpdateRecentReactions",
+    }
+)
 
 
 class TelegramNewMessageEvent(TelegramMessageLike, Protocol):
@@ -31,10 +46,7 @@ class TelegramReactionEvent(Protocol):
 
 
 IngestMessage = Callable[[IncomingTelegramMessage], Awaitable[TelegramIngestionResult]]
-CompleteCashoutFromReaction = Callable[
-    [int, int, int],
-    Awaitable[CashoutReactionCompletionResult],
-]
+CompleteCashoutFromReaction = Callable[..., Awaitable[CashoutReactionCompletionResult]]
 CompleteRecentReactions = Callable[[], Awaitable[list[CashoutReactionCompletionResult]]]
 EventHandler = Callable[[TelegramNewMessageEvent], Awaitable[None]]
 ReactionEventHandler = Callable[[object], Awaitable[None]]
@@ -55,6 +67,7 @@ def create_new_message_handler(
     """Build a Telethon handler around an injected ingestion use case."""
 
     async def handle_new_message(event: TelegramNewMessageEvent) -> None:
+        listener_health.mark_update_received()
         if not event.raw_text:
             report(f"Message {event.id}: ignored (non-text message)")
             logger.info(
@@ -127,27 +140,47 @@ def create_new_message_handler(
 def create_reaction_handler(
     *,
     expected_chat_id: int,
+    allowed_reactions: frozenset[str] | None = None,
     complete_from_reaction: CompleteCashoutFromReaction = (complete_cashout_from_reaction),
     complete_recent_reactions: CompleteRecentReactions | None = None,
     report: TerminalReporter = print,
 ) -> ReactionEventHandler:
     """Build a Telethon raw update handler for cashout message reactions."""
 
+    normalized_expected = normalize_telegram_chat_id(expected_chat_id)
+    assert normalized_expected is not None
+
     async def handle_reaction(event: object) -> None:
         raw_update_type = type(event).__name__
-        if "Reaction" not in raw_update_type:
+        if "Reaction" not in raw_update_type and raw_update_type not in REACTION_UPDATE_TYPES:
             return
 
+        listener_health.mark_reaction_update_received()
         message_id = _reaction_message_id(event)
         chat_id = _reaction_chat_id(event)
         reaction_summary = _reaction_summary(event)
+        emoticons = _event_emoticons(event)
+        primary_emoji = next(iter(sorted(emoticons)), None)
+
+        logger.info(
+            "reaction_update_received",
+            extra={
+                "telegram_message_id": message_id,
+                "telegram_chat_id": chat_id,
+                "expected_telegram_chat_id": normalized_expected,
+                "raw_update_type": raw_update_type,
+                "reaction_summary": reaction_summary,
+                "reaction_emoji": primary_emoji,
+            },
+        )
+
         if raw_update_type == "UpdateRecentReactions":
             logger.info(
                 "telegram_recent_reactions_update_received",
                 extra={
                     "telegram_message_id": message_id,
                     "telegram_chat_id": chat_id,
-                    "expected_telegram_chat_id": expected_chat_id,
+                    "expected_telegram_chat_id": normalized_expected,
                     "raw_update_type": raw_update_type,
                     "reaction_summary": reaction_summary,
                     "reason_ignored": (
@@ -177,13 +210,13 @@ def create_reaction_handler(
                     if result.completed and result.cashout_id is not None:
                         report(f"Cashout {result.cashout_id}: completed by recent reaction")
             return
-        has_active_reaction = _has_active_reaction_update(event)
+
         if not isinstance(message_id, int):
             logger.info(
-                "telegram_reaction_update_ignored",
+                "reaction_update_ignored",
                 extra={
                     "telegram_chat_id": chat_id,
-                    "expected_telegram_chat_id": expected_chat_id,
+                    "expected_telegram_chat_id": normalized_expected,
                     "raw_update_type": raw_update_type,
                     "reaction_summary": reaction_summary,
                     "completed": False,
@@ -191,61 +224,93 @@ def create_reaction_handler(
                 },
             )
             return
-        logger.info(
-            "telegram_reaction_raw_update_received",
-            extra={
-                "telegram_message_id": message_id,
-                "telegram_chat_id": chat_id,
-                "expected_telegram_chat_id": expected_chat_id,
-                "raw_update_type": raw_update_type,
-                "reaction_summary": reaction_summary,
-            },
-        )
-        logger.info(
-            "telegram_reaction_update_received",
-            extra={
-                "telegram_message_id": message_id,
-                "telegram_chat_id": chat_id,
-                "expected_telegram_chat_id": expected_chat_id,
-                "raw_update_type": raw_update_type,
-                "reaction_summary": reaction_summary,
-            },
-        )
-        if chat_id != expected_chat_id:
+
+        if chat_id is not None:
             logger.info(
-                "telegram_reaction_update_ignored",
+                "reaction_chat_resolved",
                 extra={
                     "telegram_message_id": message_id,
                     "telegram_chat_id": chat_id,
-                    "expected_telegram_chat_id": expected_chat_id,
+                    "expected_telegram_chat_id": normalized_expected,
+                    "raw_update_type": raw_update_type,
+                },
+            )
+
+        if chat_id != normalized_expected:
+            logger.info(
+                "reaction_update_ignored",
+                extra={
+                    "telegram_message_id": message_id,
+                    "telegram_chat_id": chat_id,
+                    "expected_telegram_chat_id": normalized_expected,
                     "raw_update_type": raw_update_type,
                     "reaction_summary": reaction_summary,
                     "completed": False,
                     "reason_ignored": "different_chat",
-                },
-            )
-            return
-        if not has_active_reaction:
-            logger.info(
-                "telegram_reaction_update_ignored",
-                extra={
-                    "telegram_message_id": message_id,
-                    "telegram_chat_id": chat_id,
-                    "expected_telegram_chat_id": expected_chat_id,
-                    "raw_update_type": raw_update_type,
-                    "reaction_summary": reaction_summary,
-                    "completed": False,
-                    "reason_ignored": "no_active_reaction",
+                    "reaction_emoji": primary_emoji,
                 },
             )
             return
 
+        has_active_reaction = _has_active_reaction_update(event)
+        if not has_active_reaction:
+            logger.info(
+                "reaction_update_ignored",
+                extra={
+                    "telegram_message_id": message_id,
+                    "telegram_chat_id": chat_id,
+                    "expected_telegram_chat_id": normalized_expected,
+                    "raw_update_type": raw_update_type,
+                    "reaction_summary": reaction_summary,
+                    "completed": False,
+                    "reason_ignored": "no_active_reaction",
+                    "reaction_emoji": primary_emoji,
+                },
+            )
+            return
+
+        if not reaction_matches_completion(emoticons, allowed_reactions):
+            logger.info(
+                "reaction_update_ignored",
+                extra={
+                    "telegram_message_id": message_id,
+                    "telegram_chat_id": chat_id,
+                    "expected_telegram_chat_id": normalized_expected,
+                    "raw_update_type": raw_update_type,
+                    "reaction_summary": reaction_summary,
+                    "completed": False,
+                    "reason_ignored": "reaction_not_allowed",
+                    "reaction_emoji": primary_emoji,
+                },
+            )
+            return
+
+        reactor_user_id = _reactor_user_id(event)
         try:
             result = await complete_from_reaction(
                 message_id,
                 chat_id,
-                expected_chat_id,
+                normalized_expected,
+                allowed_reactions=allowed_reactions,
+                reaction_emoji=primary_emoji,
+                reactor_user_id=reactor_user_id,
+                source="reaction_event",
             )
+        except TypeError:
+            # Tests / older injectable callables use the 3-arg signature.
+            try:
+                result = await complete_from_reaction(
+                    message_id,
+                    chat_id,
+                    normalized_expected,
+                )
+            except Exception:
+                report(f"Reaction on message {message_id}: processing failed; see logs")
+                logger.exception(
+                    "cashout_reaction_processing_failed",
+                    extra={"telegram_message_id": message_id},
+                )
+                return
         except Exception:
             report(f"Reaction on message {message_id}: processing failed; see logs")
             logger.exception(
@@ -262,6 +327,7 @@ def create_reaction_handler(
                 "telegram_chat_id": chat_id,
                 "outcome": result.reason,
                 "reaction_summary": reaction_summary,
+                "reaction_emoji": primary_emoji,
                 "matched_cashout": result.matched_cashout,
                 "previous_status": result.previous_status,
                 "completed": result.completed,
@@ -276,13 +342,13 @@ def create_reaction_handler(
 
 def _reaction_chat_id(event: object) -> int | None:
     peer = getattr(event, "peer", None) or getattr(event, "peer_id", None)
-    if peer is None:
-        return None
-    try:
-        return int(utils.get_peer_id(peer))
-    except Exception:
-        logger.exception("cashout_reaction_peer_parse_failed")
-        return None
+    chat_id = peer_to_chat_id(peer)
+    if chat_id is not None:
+        return chat_id
+    raw = getattr(event, "chat_id", None)
+    if isinstance(raw, int):
+        return normalize_telegram_chat_id(raw)
+    return None
 
 
 def _reaction_message_id(event: object) -> int | None:
@@ -291,6 +357,33 @@ def _reaction_message_id(event: object) -> int | None:
         if isinstance(value, int):
             return value
     return None
+
+
+def _reactor_user_id(event: object) -> int | None:
+    for attribute in ("user_id", "actor_id"):
+        value = getattr(event, attribute, None)
+        if isinstance(value, int):
+            return value
+    peer = getattr(event, "actor", None) or getattr(event, "from_id", None)
+    if peer is not None:
+        try:
+            return int(utils.get_peer_id(peer))
+        except Exception:
+            return None
+    return None
+
+
+def _event_emoticons(event: object) -> set[str]:
+    found: set[str] = set()
+    for attribute in (
+        "reactions",
+        "new_reactions",
+        "recent_reactions",
+        "reaction",
+        "old_reactions",
+    ):
+        found |= extract_reaction_emoticons(getattr(event, attribute, None))
+    return found
 
 
 def _has_active_reaction_update(event: object) -> bool:
@@ -307,6 +400,13 @@ def _has_active_reaction_update(event: object) -> bool:
         return True
     if reactions is not None and _has_active_reaction_collection(
         getattr(reactions, "recent_reactions", None)
+    ):
+        return True
+    # Singular UpdateBotMessageReaction carries one reaction field.
+    if getattr(event, "new_reaction", None) is not None:
+        return True
+    if getattr(event, "reaction", None) is not None and type(event).__name__ == (
+        "UpdateBotMessageReaction"
     ):
         return True
     return False
@@ -349,6 +449,8 @@ def _reaction_summary(event: object) -> str | None:
         "new_reactions",
         "recent_reactions",
         "reactions",
+        "reaction",
+        "new_reaction",
     ):
         value = getattr(event, attribute, None)
         if value is not None:
@@ -365,6 +467,9 @@ def _summarize_reaction_value(value: object) -> str:
         return f"recent:{_summarize_reaction_iterable(recent)}"
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
         return _summarize_reaction_iterable(value)
+    emoticon = getattr(value, "emoticon", None)
+    if isinstance(emoticon, str):
+        return emoticon
     return type(value).__name__
 
 

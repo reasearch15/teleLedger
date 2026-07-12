@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 from telethon.tl import types  # type: ignore[import-untyped]
+from unittest.mock import AsyncMock
 
 from app.db.base import Base
 from app.models.cashout import (
@@ -87,6 +88,10 @@ async def reset_database(
         )
         await session.commit()
     monkeypatch.setattr(cashout_reactions, "SessionFactory", TestSessionFactory)
+    monkeypatch.setattr(
+        "app.websocket.cross_process.notify_live_event",
+        AsyncMock(return_value=None),
+    )
     yield
     async with test_engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
@@ -97,6 +102,7 @@ async def seed_cashout(
     *,
     message_id: int,
     status: CashoutStatus = CashoutStatus.SENT,
+    chat_id: int | None = -1001234567890,
 ) -> None:
     timestamp = datetime(2026, 7, 6, 20, 35, tzinfo=UTC)
     async with TestSessionFactory() as session:
@@ -111,6 +117,7 @@ async def seed_cashout(
                 status=status,
                 telegram_status=CashoutTelegramStatus.SENT,
                 telegram_message_id=message_id,
+                telegram_chat_id=chat_id,
                 telegram_random_id=10_000 + cashout_id,
                 telegram_sent_at=timestamp,
                 created_by_staff_id=42,
@@ -334,8 +341,7 @@ async def test_bot_message_reactions_update_invokes_completion(
     )
 
     assert calls == [555]
-    assert "telegram_reaction_raw_update_received" in caplog.messages
-    assert "telegram_reaction_update_received" in caplog.messages
+    assert "reaction_update_received" in caplog.messages
     assert "cashout_reaction_processed" in caplog.messages
 
 
@@ -440,3 +446,111 @@ async def session_audit_count() -> int:
     async with TestSessionFactory() as session:
         count = await session.scalar(select(func.count(CashoutRequestAudit.id)))
     return int(count or 0)
+
+
+@pytest.mark.asyncio
+async def test_unrelated_emoji_is_ignored_by_allowlist() -> None:
+    calls: list[int] = []
+
+    async def complete(
+        message_id: int,
+        chat_id: int,
+        expected_chat_id: int,
+        **_: object,
+    ) -> cashout_reactions.CashoutReactionCompletionResult:
+        calls.append(message_id)
+        return cashout_reactions.CashoutReactionCompletionResult(
+            completed=True,
+            cashout_id=1,
+            reason="completed",
+        )
+
+    handler = create_reaction_handler(
+        expected_chat_id=-1001234567890,
+        allowed_reactions=frozenset({"✅", "👍"}),
+        complete_from_reaction=complete,
+        report=lambda _: None,
+    )
+    await handler(
+        types.UpdateMessageReactions(
+            peer=types.PeerChannel(1234567890),
+            msg_id=555,
+            reactions=types.MessageReactions(
+                results=[
+                    types.ReactionCount(
+                        reaction=types.ReactionEmoji("🔥"),
+                        count=1,
+                    )
+                ],
+                recent_reactions=[],
+                min=False,
+                can_see_list=True,
+            ),
+        )
+    )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_allowed_emoji_completes_cashout() -> None:
+    await seed_cashout(1, message_id=555)
+
+    result = await complete_cashout_from_reaction(
+        555,
+        -1001234567890,
+        -1001234567890,
+        allowed_reactions=frozenset({"✅"}),
+        reaction_emoji="✅",
+    )
+
+    assert result.completed is True
+    assert result.cashout_id == 1
+
+
+@pytest.mark.asyncio
+async def test_same_message_id_in_other_group_does_not_match() -> None:
+    await seed_cashout(1, message_id=555, chat_id=-1001234567890)
+
+    result = await complete_cashout_from_reaction(
+        555,
+        -1009999999999,
+        -1009999999999,
+    )
+
+    assert result.completed is False
+    assert result.reason == "no_matching_cashout"
+    async with TestSessionFactory() as session:
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        assert cashout.status == CashoutStatus.SENT
+
+
+@pytest.mark.asyncio
+async def test_historical_null_chat_id_falls_back_to_configured_group() -> None:
+    await seed_cashout(1, message_id=555, chat_id=None)
+
+    result = await complete_cashout_from_reaction(
+        555,
+        -1001234567890,
+        -1001234567890,
+    )
+
+    assert result.completed is True
+    async with TestSessionFactory() as session:
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        assert cashout.telegram_chat_id == -1001234567890
+
+
+@pytest.mark.asyncio
+async def test_positive_channel_id_normalizes_to_marked_form() -> None:
+    await seed_cashout(1, message_id=555, chat_id=-1001234567890)
+
+    result = await complete_cashout_from_reaction(
+        555,
+        1234567890,
+        -1001234567890,
+    )
+
+    assert result.completed is True

@@ -94,6 +94,22 @@ class Settings(BaseSettings):
         le=10_000,
         validation_alias="TELEGRAM_BACKFILL_LIMIT",
     )
+    cashout_completion_reactions: str = Field(
+        default="✅,👍",
+        validation_alias="CASHOUT_COMPLETION_REACTIONS",
+    )
+    cashout_reconciliation_interval_seconds: int = Field(
+        default=20,
+        gt=0,
+        le=300,
+        validation_alias="CASHOUT_RECONCILIATION_INTERVAL_SECONDS",
+    )
+    cashout_reconciliation_batch_size: int = Field(
+        default=40,
+        gt=0,
+        le=200,
+        validation_alias="CASHOUT_RECONCILIATION_BATCH_SIZE",
+    )
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -170,6 +186,13 @@ class Settings(BaseSettings):
         if self.telegram_group_id is not None:
             return self.telegram_group_id
         return self.telegram_group_username
+
+    @property
+    def cashout_completion_reaction_allowlist(self) -> frozenset[str] | None:
+        """Parsed completion-reaction allowlist (None = any active reaction)."""
+        from app.telegram.reaction_matching import parse_completion_reactions
+
+        return parse_completion_reactions(self.cashout_completion_reactions)
 
     @property
     def cors_origin_strings(self) -> list[str]:

@@ -101,6 +101,40 @@ describe("LiveUpdatesProvider", () => {
     expect(onCashoutUpdate).not.toHaveBeenCalled();
   });
 
+  it("refetches cashout subscribers when cashout_completed arrives", async () => {
+    const onCashoutUpdate = vi.fn();
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <LiveUpdatesProvider>{children}</LiveUpdatesProvider>
+    );
+
+    renderHook(
+      () => {
+        useLiveUpdates([LIVE_EVENTS.CASHOUT_COMPLETED], onCashoutUpdate);
+      },
+      { wrapper },
+    );
+
+    await waitFor(() => expect(eventSources).toHaveLength(1));
+
+    act(() => {
+      eventSources[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: LIVE_EVENTS.CASHOUT_COMPLETED,
+          cashout_id: 42,
+        }),
+      } as MessageEvent<string>);
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+
+    expect(onCashoutUpdate).toHaveBeenCalledTimes(1);
+    expect(onCashoutUpdate.mock.calls[0]?.[0]).toEqual([
+      { event: LIVE_EVENTS.CASHOUT_COMPLETED, cashout_id: 42 },
+    ]);
+  });
+
   it("does not open duplicate SSE connections when navigating between subscribers", async () => {
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <LiveUpdatesProvider>{children}</LiveUpdatesProvider>

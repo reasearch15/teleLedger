@@ -15,6 +15,7 @@ import { environment } from "@/lib/env";
 import {
   matchesLiveEvent,
   parseLiveEvent,
+  LIVE_EVENTS,
   type LiveEvent,
   type LiveEventType,
 } from "@/lib/live-events";
@@ -95,6 +96,20 @@ export function LiveUpdatesProvider({
   );
 
   const dispatchEvent = useCallback((event: LiveEvent) => {
+    if (
+      event.event === LIVE_EVENTS.CASHOUT_COMPLETED ||
+      event.event === LIVE_EVENTS.CASHOUT_SENT ||
+      event.event === LIVE_EVENTS.CASHOUT_CREATED
+    ) {
+      if (process.env.NODE_ENV === "development") {
+        // eslint-disable-next-line no-console -- cashout live-update diagnostics
+        console.debug("cashout:updated", event);
+        if (event.event === LIVE_EVENTS.CASHOUT_COMPLETED) {
+          // eslint-disable-next-line no-console -- cashout live-update diagnostics
+          console.debug("cashout:completed", event);
+        }
+      }
+    }
     for (const subscription of subscriptionsRef.current.values()) {
       if (subscription.events.includes(event.event)) {
         subscription.debouncedCallback(event);

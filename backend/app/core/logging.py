@@ -47,7 +47,12 @@ class JsonFormatter(logging.Formatter):
             "raw_update_type",
             "expected_telegram_chat_id",
             "reaction_summary",
+            "reaction_emoji",
             "sse_event",
+            "interval_seconds",
+            "batch_size",
+            "wait_seconds",
+            "reconnect_delay_seconds",
         ):
             field_value = getattr(record, field_name, None)
             if field_value is not None:

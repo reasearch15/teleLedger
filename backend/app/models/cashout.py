@@ -70,6 +70,11 @@ class CashoutRequest(Base):
             "telegram_status",
             "telegram_next_attempt_at",
         ),
+        Index(
+            "ix_cashout_requests_telegram_chat_message",
+            "telegram_chat_id",
+            "telegram_message_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -106,6 +111,7 @@ class CashoutRequest(Base):
         server_default=CashoutTelegramStatus.PENDING.value,
     )
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     telegram_random_id: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,

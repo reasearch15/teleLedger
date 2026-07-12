@@ -156,6 +156,10 @@ TELEGRAM_GROUP_USERNAME=@your_group_username
 TELEGRAM_CASHOUT_GROUP_ID=-1009876543210
 TELEGRAM_ENABLED=true
 TELEGRAM_BACKFILL_LIMIT=500
+# Completion reactions (comma-separated). Use * or any for legacy "any reaction".
+CASHOUT_COMPLETION_REACTIONS=✅,👍
+CASHOUT_RECONCILIATION_INTERVAL_SECONDS=20
+CASHOUT_RECONCILIATION_BATCH_SIZE=40
 ```
 
 Set exactly one payment group selector:
@@ -167,6 +171,12 @@ Set `TELEGRAM_CASHOUT_GROUP_ID` to the separate cashout Telegram group ID. Casho
 requests are sent only to this group, and cashout completion reactions are accepted
 only from this group. If it is missing while the listener is enabled, startup fails
 instead of falling back to the payment group.
+
+`CASHOUT_COMPLETION_REACTIONS` controls which Telegram reactions mark a cashout
+completed (default `✅,👍`). Set to `*` or `any` to accept any active reaction.
+The listener also runs a bounded reaction reconciliation loop every
+`CASHOUT_RECONCILIATION_INTERVAL_SECONDS` (default 20) so reactions missed during
+disconnects are still applied without requiring a browser refresh.
 
 For a private group without a username, list every chat available to the configured
 Telegram account:

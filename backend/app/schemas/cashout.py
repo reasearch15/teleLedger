@@ -72,6 +72,7 @@ class CashoutResponse(BaseModel):
     status: CashoutStatus
     telegram_status: CashoutTelegramStatus
     telegram_message_id: int | None
+    telegram_chat_id: int | None = None
     telegram_attempts: int
     telegram_sent_at: datetime | None
     telegram_last_error: str | None

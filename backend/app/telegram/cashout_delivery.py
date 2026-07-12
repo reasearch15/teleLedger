@@ -74,12 +74,21 @@ def format_cashout_message(delivery: CashoutDelivery) -> str:
 async def run_cashout_delivery_worker(
     client: TelegramClient,
     group_input: Any,
+    *,
+    telegram_chat_id: int | None = None,
 ) -> None:
     """Continuously drain pending cashouts through the existing client."""
-    logger.info("cashout_delivery_worker_started")
+    logger.info(
+        "cashout_delivery_worker_started",
+        extra={"telegram_chat_id": telegram_chat_id},
+    )
     try:
         while True:
-            processed = await deliver_next_cashout(client, group_input)
+            processed = await deliver_next_cashout(
+                client,
+                group_input,
+                telegram_chat_id=telegram_chat_id,
+            )
             if not processed:
                 await asyncio.sleep(DELIVERY_POLL_SECONDS)
     finally:
@@ -89,6 +98,8 @@ async def run_cashout_delivery_worker(
 async def deliver_next_cashout(
     client: TelegramClient,
     group_input: Any,
+    *,
+    telegram_chat_id: int | None = None,
 ) -> bool:
     """Claim and deliver one due outbox row."""
     delivery = await _claim_delivery()
@@ -104,18 +115,27 @@ async def deliver_next_cashout(
     try:
         result = await client(request)
         message_id = _extract_message_id(result, delivery.random_id)
-        await _record_success(delivery, message_id)
+        await _record_success(
+            delivery,
+            message_id,
+            telegram_chat_id=telegram_chat_id,
+        )
     except errors.RandomIdDuplicateError:
         # Telegram already accepted this persisted random_id before the
         # application could record success (for example, during a crash).
         message_id = await _recover_message_id(client, group_input, delivery)
-        await _record_success(delivery, message_id)
+        await _record_success(
+            delivery,
+            message_id,
+            telegram_chat_id=telegram_chat_id,
+        )
         logger.info(
             "cashout_telegram_duplicate_confirmed",
             extra={
                 "cashout_request_id": delivery.cashout_id,
                 "cashout_attempt": delivery.attempt,
                 "telegram_message_id": message_id,
+                "telegram_chat_id": telegram_chat_id,
                 "recovered_message_id": message_id is not None,
             },
         )
@@ -178,6 +198,8 @@ async def _claim_delivery() -> CashoutDelivery | None:
 async def _record_success(
     delivery: CashoutDelivery,
     message_id: int | None,
+    *,
+    telegram_chat_id: int | None = None,
 ) -> None:
     now = datetime.now(UTC)
     async with SessionFactory() as session, session.begin():
@@ -188,13 +210,19 @@ async def _record_success(
         if cashout.telegram_status == CashoutTelegramStatus.SENT:
             if message_id is not None and cashout.telegram_message_id is None:
                 cashout.telegram_message_id = message_id
+                if telegram_chat_id is not None:
+                    cashout.telegram_chat_id = telegram_chat_id
                 await repository.add_audit(
                     CashoutRequestAudit(
                         cashout_request_id=cashout.id,
                         action=CashoutAuditAction.TELEGRAM_SENT,
                         actor_user_id=None,
                         previous_value={"telegram_message_id": None},
-                        new_value={"telegram_message_id": message_id, "recovered": True},
+                        new_value={
+                            "telegram_message_id": message_id,
+                            "telegram_chat_id": telegram_chat_id,
+                            "recovered": True,
+                        },
                     )
                 )
                 logger.info(
@@ -202,8 +230,11 @@ async def _record_success(
                     extra={
                         "cashout_request_id": delivery.cashout_id,
                         "telegram_message_id": message_id,
+                        "telegram_chat_id": telegram_chat_id,
                     },
                 )
+            elif telegram_chat_id is not None and cashout.telegram_chat_id is None:
+                cashout.telegram_chat_id = telegram_chat_id
             return
         previous = {
             "telegram_status": cashout.telegram_status.value,
@@ -211,6 +242,7 @@ async def _record_success(
         }
         cashout.telegram_status = CashoutTelegramStatus.SENT
         cashout.telegram_message_id = message_id
+        cashout.telegram_chat_id = telegram_chat_id
         cashout.telegram_sent_at = now
         cashout.telegram_next_attempt_at = None
         cashout.telegram_last_error = None
@@ -229,6 +261,7 @@ async def _record_success(
                     "telegram_status": cashout.telegram_status.value,
                     "status": cashout.status.value,
                     "telegram_message_id": message_id,
+                    "telegram_chat_id": telegram_chat_id,
                 },
             )
         )
@@ -251,6 +284,7 @@ async def _record_success(
             "cashout_request_id": delivery.cashout_id,
             "cashout_attempt": delivery.attempt,
             "telegram_message_id": message_id,
+            "telegram_chat_id": telegram_chat_id,
         },
     )
 

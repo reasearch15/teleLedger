@@ -115,6 +115,7 @@ export type Cashout = {
   status: CashoutStatus;
   telegram_status: CashoutTelegramStatus;
   telegram_message_id: number | null;
+  telegram_chat_id?: number | null;
   telegram_attempts: number;
   telegram_sent_at: string | null;
   telegram_last_error: string | null;

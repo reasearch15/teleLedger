@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 from telethon.errors import RandomIdDuplicateError  # type: ignore[import-untyped]
+from unittest.mock import AsyncMock
 
 from app.db.base import Base
 from app.models.cashout import (
@@ -107,6 +108,10 @@ async def reset_database(
         )
         await session.commit()
     monkeypatch.setattr(cashout_delivery, "SessionFactory", TestSessionFactory)
+    monkeypatch.setattr(
+        "app.websocket.cross_process.notify_live_event",
+        AsyncMock(return_value=None),
+    )
     yield
     async with test_engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
@@ -116,7 +121,11 @@ async def reset_database(
 async def test_delivery_formats_message_and_marks_sent() -> None:
     client = FakeTelegramClient()
 
-    processed = await cashout_delivery.deliver_next_cashout(client, "group")
+    processed = await cashout_delivery.deliver_next_cashout(
+        client,
+        "group",
+        telegram_chat_id=-1001234567890,
+    )
 
     assert processed is True
     assert len(client.requests) == 1
@@ -132,6 +141,7 @@ async def test_delivery_formats_message_and_marks_sent() -> None:
     async with TestSessionFactory() as session:
         cashout = await session.get(CashoutRequest, 1)
         assert cashout is not None
+        assert cashout.telegram_chat_id == -1001234567890
         assert cashout.status == CashoutStatus.SENT
         assert cashout.telegram_status == CashoutTelegramStatus.SENT
         assert cashout.telegram_message_id == 555
