@@ -1,7 +1,7 @@
 from fastapi import APIRouter, status
 
 from app.schemas.health import HealthResponse, ListenerHealthResponse
-from app.telegram import listener_health
+import app.telegram.listener_health as listener_health
 
 router = APIRouter(tags=["health"])
 

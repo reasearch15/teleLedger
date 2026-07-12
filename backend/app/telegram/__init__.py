@@ -1,6 +1,6 @@
-"""Telethon connection and event conversion adapters."""
+"""Telethon adapters for payment ingestion and cashout reaction sync.
 
-from app.telegram.client import create_telegram_client
-from app.telegram.events import create_new_message_handler
-
-__all__ = ["create_new_message_handler", "create_telegram_client"]
+This package init stays empty on purpose: importing lightweight helpers such as
+``app.telegram.peer_ids`` must not pull listener, event, or reaction modules.
+Import concrete modules from their own paths when needed.
+"""

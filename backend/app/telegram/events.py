@@ -8,7 +8,7 @@ from telethon import utils  # type: ignore[import-untyped]
 from app.core.logging import get_logger
 from app.schemas.telegram import IncomingTelegramMessage
 from app.services.telegram_ingestion import TelegramIngestionResult
-from app.telegram import listener_health
+import app.telegram.listener_health as listener_health
 from app.telegram.cashout_reactions import (
     CashoutReactionCompletionResult,
     complete_cashout_from_reaction,

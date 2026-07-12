@@ -7,7 +7,7 @@ from telethon import events  # type: ignore[import-untyped]
 
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
-from app.telegram import listener_health
+import app.telegram.listener_health as listener_health
 from app.telegram.backfill import backfill_new_messages
 from app.telegram.cashout_delivery import run_cashout_delivery_worker
 from app.telegram.cashout_reactions import complete_recent_cashout_reactions

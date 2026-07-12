@@ -17,7 +17,7 @@ from telethon import errors  # type: ignore[import-untyped]
 from app.core.logging import get_logger
 from app.db.repositories.cashout import CashoutRepository
 from app.db.session import SessionFactory
-from app.telegram import listener_health
+import app.telegram.listener_health as listener_health
 from app.telegram.cashout_reactions import (
     CashoutReactionCompletionResult,
     complete_cashout_from_reaction,
