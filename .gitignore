@@ -29,3 +29,6 @@ Thumbs.db
 backend/.tmp_pytest/
 frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
+backend/.tmp_pytest_fresh/
+backend/.tmp_pytest/
+backend/.pytest_cache/
