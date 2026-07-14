@@ -5,6 +5,7 @@ from typing import Any
 
 from app.core.logging import get_logger
 from app.telegram.inquiry_ingestion import ingest_inquiry_telegram_message
+from app.telegram.inquiry_message_parser import InquiryMessageNotVisibleError
 
 logger = get_logger(__name__)
 
@@ -27,6 +28,15 @@ def create_inquiry_message_handlers(
         try:
             await _ingest(event)
             report(f"Inquiry message {event.id}: stored")
+        except InquiryMessageNotVisibleError as error:
+            report(f"Inquiry message {event.id}: ignored ({error})")
+            logger.info(
+                "inquiry_message_ignored",
+                extra={
+                    "telegram_message_id": getattr(event, "id", None),
+                    "reason": str(error),
+                },
+            )
         except ValueError as error:
             report(f"Inquiry message {event.id}: ignored ({error})")
             logger.info(
@@ -47,11 +57,24 @@ def create_inquiry_message_handlers(
         try:
             await _ingest(event)
             report(f"Inquiry message {event.id}: updated")
+        except InquiryMessageNotVisibleError as error:
+            report(f"Inquiry message {event.id}: edit ignored (no visible content)")
+            logger.info(
+                "inquiry_edit_ignored",
+                extra={
+                    "telegram_message_id": getattr(event, "id", None),
+                    "telegram_chat_id": getattr(event, "chat_id", None),
+                    "reason": str(error),
+                },
+            )
         except Exception:
             report(f"Inquiry message {event.id}: edit processing failed; see logs")
             logger.exception(
                 "inquiry_message_edit_failed",
-                extra={"telegram_message_id": getattr(event, "id", None)},
+                extra={
+                    "telegram_message_id": getattr(event, "id", None),
+                    "telegram_chat_id": getattr(event, "chat_id", None),
+                },
             )
 
     return handle_new_message, handle_edited_message

@@ -191,18 +191,23 @@ async def download_inquiry_media(
 ) -> bool:
     """Download one supported Telegram image into the inquiry media cache."""
     active_settings = settings or get_settings()
-    if row.media_mime_type not in ALLOWED_IMAGE_MIME_TYPES:
-        return False
-
-    storage_key = build_media_storage_key(
-        telegram_chat_id=row.telegram_chat_id,
-        telegram_message_id=row.telegram_message_id,
-        mime_type=row.media_mime_type,
-    )
-    destination = media_path_for_key(active_settings, storage_key)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
+    log_extra = {
+        "inquiry_message_id": row.id,
+        "telegram_message_id": row.telegram_message_id,
+        "telegram_chat_id": row.telegram_chat_id,
+    }
     try:
+        if row.media_mime_type not in ALLOWED_IMAGE_MIME_TYPES:
+            raise RuntimeError(f"Unsupported media mime type: {row.media_mime_type}")
+
+        storage_key = build_media_storage_key(
+            telegram_chat_id=row.telegram_chat_id,
+            telegram_message_id=row.telegram_message_id,
+            mime_type=row.media_mime_type,
+        )
+        destination = media_path_for_key(active_settings, storage_key)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
         downloaded = await client.download_media(telegram_message, file=str(destination))
         if downloaded is None and not destination.exists():
             raise RuntimeError("Telegram media download returned no file")
@@ -211,22 +216,11 @@ async def download_inquiry_media(
             destination.unlink(missing_ok=True)
             raise RuntimeError("Downloaded media exceeds configured size limit")
     except Exception:
-        logger.exception(
-            "inquiry_media_download_failed",
-            extra={
-                "inquiry_message_id": row.id,
-                "telegram_message_id": row.telegram_message_id,
-            },
+        logger.exception("inquiry_media_download_failed", extra=log_extra)
+        await _mark_media_failed(
+            telegram_chat_id=row.telegram_chat_id,
+            telegram_message_id=row.telegram_message_id,
         )
-        async with SessionFactory() as session, session.begin():
-            repository = InquiryMessageRepository(session)
-            stored = await repository.get_by_telegram_identity(
-                telegram_chat_id=row.telegram_chat_id,
-                telegram_message_id=row.telegram_message_id,
-                for_update=True,
-            )
-            if stored is not None:
-                stored.media_download_status = InquiryMediaDownloadStatus.FAILED
         return False
 
     async with SessionFactory() as session, session.begin():
@@ -240,13 +234,94 @@ async def download_inquiry_media(
             stored.media_storage_key = storage_key
             stored.media_size_bytes = size_bytes
             stored.media_download_status = InquiryMediaDownloadStatus.READY
+            if stored.media_filename is None and row.media_filename is not None:
+                stored.media_filename = row.media_filename
 
     await event_broker.publish(
         LiveEventType.INQUIRY_MEDIA_READY,
         inquiry_message_id=row.id,
         broadcast=True,
     )
+    logger.info(
+        "inquiry_media_download_succeeded",
+        extra={
+            **log_extra,
+            "media_storage_key": storage_key,
+            "media_size_bytes": size_bytes,
+        },
+    )
     return True
+
+
+async def retry_pending_inquiry_media(
+    client: Any,
+    group: object,
+    *,
+    limit: int = 40,
+) -> int:
+    """Retry Telegram downloads for inquiry rows stuck in pending or failed."""
+    async with SessionFactory() as session:
+        repository = InquiryMessageRepository(session)
+        pending_rows = await repository.list_pending_media(limit=limit)
+
+    recovered = 0
+    for row in pending_rows:
+        try:
+            message = await client.get_messages(group, ids=row.telegram_message_id)
+            if message is None:
+                logger.warning(
+                    "inquiry_media_retry_message_missing",
+                    extra={
+                        "inquiry_message_id": row.id,
+                        "telegram_message_id": row.telegram_message_id,
+                        "telegram_chat_id": row.telegram_chat_id,
+                    },
+                )
+                await _mark_media_failed(
+                    telegram_chat_id=row.telegram_chat_id,
+                    telegram_message_id=row.telegram_message_id,
+                )
+                continue
+            if await download_inquiry_media(client, message, row):
+                recovered += 1
+        except Exception:
+            logger.exception(
+                "inquiry_media_retry_failed",
+                extra={
+                    "inquiry_message_id": row.id,
+                    "telegram_message_id": row.telegram_message_id,
+                    "telegram_chat_id": row.telegram_chat_id,
+                },
+            )
+            await _mark_media_failed(
+                telegram_chat_id=row.telegram_chat_id,
+                telegram_message_id=row.telegram_message_id,
+            )
+    if pending_rows:
+        logger.info(
+            "inquiry_media_retry_finished",
+            extra={
+                "total": len(pending_rows),
+                "recovered": recovered,
+            },
+        )
+    return recovered
+
+
+async def _mark_media_failed(
+    *,
+    telegram_chat_id: int,
+    telegram_message_id: int,
+) -> None:
+    async with SessionFactory() as session, session.begin():
+        repository = InquiryMessageRepository(session)
+        stored = await repository.get_by_telegram_identity(
+            telegram_chat_id=telegram_chat_id,
+            telegram_message_id=telegram_message_id,
+            for_update=True,
+        )
+        if stored is not None:
+            stored.media_download_status = InquiryMediaDownloadStatus.FAILED
 
 
 def _build_row(

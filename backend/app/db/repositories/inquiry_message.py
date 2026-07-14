@@ -168,6 +168,24 @@ class InquiryMessageRepository(BaseRepository[InquiryMessage]):
         )
         return (await self._session.execute(statement.limit(1))).scalar_one_or_none() is not None
 
+    async def list_pending_media(self, *, limit: int) -> list[InquiryMessage]:
+        """Return inquiry rows whose media download is still pending."""
+        statement = (
+            select(InquiryMessage)
+            .where(
+                InquiryMessage.media_download_status
+                == InquiryMediaDownloadStatus.PENDING,
+                InquiryMessage.media_type != InquiryMediaType.NONE,
+                InquiryMessage.media_mime_type.is_not(None),
+            )
+            .order_by(
+                InquiryMessage.message_date.desc(),
+                InquiryMessage.id.desc(),
+            )
+            .limit(limit)
+        )
+        return list((await self._session.execute(statement)).scalars().all())
+
     @staticmethod
     def _apply_update(
         existing: InquiryMessage,

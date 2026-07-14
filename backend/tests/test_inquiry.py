@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -11,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.db.repositories.inquiry_message import InquiryMessageRepository
 from app.models.inquiry_message import (
@@ -20,9 +24,18 @@ from app.models.inquiry_message import (
     InquiryMessage,
     InquiryMessageSource,
 )
-from app.telegram.inquiry_media import build_media_storage_key, media_path_for_key
-from app.telegram.inquiry_message_parser import is_cashout_panel_message_text
-
+from app.telegram import inquiry_ingestion
+from app.telegram.inquiry_events import create_inquiry_message_handlers
+from app.telegram.inquiry_media import (
+    InvalidInquiryMediaStorageKeyError,
+    build_media_storage_key,
+    media_path_for_key,
+)
+from app.telegram.inquiry_message_parser import (
+    InquiryMessageNotVisibleError,
+    is_cashout_panel_message_text,
+    parse_inquiry_telegram_message,
+)
 
 test_engine = create_async_engine(
     "sqlite+aiosqlite://",
@@ -37,7 +50,13 @@ TestSessionFactory = async_sessionmaker(
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def reset_database() -> None:
+async def reset_database(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(inquiry_ingestion, "SessionFactory", TestSessionFactory)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "inquiry_media_dir", str(tmp_path / "media"))
     async with test_engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     yield
@@ -66,6 +85,28 @@ def _message(
         message_source=source,
         media_type=InquiryMediaType.NONE,
         media_download_status=InquiryMediaDownloadStatus.NOT_APPLICABLE,
+    )
+
+
+def _photo_row(
+    *,
+    row_id: int = 1,
+    message_id: int = 8823,
+    chat_id: int = -5467746352,
+) -> InquiryMessage:
+    now = datetime(2026, 7, 14, tzinfo=UTC)
+    return InquiryMessage(
+        id=row_id,
+        telegram_chat_id=chat_id,
+        telegram_message_id=message_id,
+        sender_display_name="Ayush",
+        message_date=now,
+        received_at=now,
+        direction=InquiryDirection.INBOUND,
+        message_source=InquiryMessageSource.TELEGRAM_EXTERNAL,
+        media_type=InquiryMediaType.PHOTO,
+        media_mime_type="image/jpeg",
+        media_download_status=InquiryMediaDownloadStatus.PENDING,
     )
 
 
@@ -225,18 +266,188 @@ def test_cashout_panel_message_detection() -> None:
     assert not is_cashout_panel_message_text("Please help with this cashout")
 
 
-def test_media_storage_key_is_deterministic_and_safe() -> None:
+def test_negative_chat_id_media_key_is_accepted(tmp_path: Path) -> None:
     key = build_media_storage_key(
-        telegram_chat_id=-1001,
-        telegram_message_id=55,
-        mime_type="image/png",
+        telegram_chat_id=-5467746352,
+        telegram_message_id=8823,
+        mime_type="image/jpeg",
     )
-    assert key == "-1001/55.png"
-
-    from app.core.config import get_settings
+    assert key == "chat_-5467746352/8823.jpg"
 
     settings = get_settings()
     path = media_path_for_key(settings, key)
-    assert path.name == "55.png"
-    with pytest.raises(ValueError):
-        media_path_for_key(settings, "../escape.png")
+    assert path.name == "8823.jpg"
+    assert path.parent.name == "chat_-5467746352"
+    assert tmp_path / "media" in path.parents
+
+
+def test_path_traversal_is_rejected() -> None:
+    settings = get_settings()
+    with pytest.raises(InvalidInquiryMediaStorageKeyError):
+        media_path_for_key(settings, "../escape.jpg")
+    with pytest.raises(InvalidInquiryMediaStorageKeyError):
+        media_path_for_key(settings, "chat_1/../../8823.jpg")
+
+
+def test_absolute_paths_are_rejected() -> None:
+    settings = get_settings()
+    with pytest.raises(InvalidInquiryMediaStorageKeyError):
+        media_path_for_key(settings, "/etc/passwd")
+
+
+@pytest.mark.asyncio
+async def test_successful_photo_download_sets_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    row = _photo_row()
+    async with TestSessionFactory() as session, session.begin():
+        session.add(row)
+
+    client = AsyncMock()
+    client.download_media = AsyncMock(side_effect=lambda _message, file: Path(file).write_bytes(b"abc"))
+
+    monkeypatch.setattr(
+        "app.websocket.cross_process.notify_live_event",
+        AsyncMock(return_value=None),
+    )
+
+    assert await inquiry_ingestion.download_inquiry_media(client, object(), row) is True
+
+    async with TestSessionFactory() as session:
+        stored = (
+            await session.execute(select(InquiryMessage).where(InquiryMessage.id == 1))
+        ).scalar_one()
+    assert stored.media_download_status == InquiryMediaDownloadStatus.READY
+    assert stored.media_storage_key == "chat_-5467746352/8823.jpg"
+    assert stored.media_size_bytes == 3
+
+
+@pytest.mark.asyncio
+async def test_failed_photo_download_sets_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _photo_row()
+    async with TestSessionFactory() as session, session.begin():
+        session.add(row)
+
+    client = AsyncMock()
+    client.download_media = AsyncMock(side_effect=RuntimeError("network down"))
+
+    assert await inquiry_ingestion.download_inquiry_media(client, object(), row) is False
+
+    async with TestSessionFactory() as session:
+        stored = (
+            await session.execute(select(InquiryMessage).where(InquiryMessage.id == 1))
+        ).scalar_one()
+    assert stored.media_download_status == InquiryMediaDownloadStatus.FAILED
+    assert stored.media_storage_key is None
+
+
+@pytest.mark.asyncio
+async def test_pending_media_can_be_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    row = _photo_row()
+    async with TestSessionFactory() as session, session.begin():
+        session.add(row)
+
+    client = AsyncMock()
+    client.get_messages = AsyncMock(return_value=object())
+    client.download_media = AsyncMock(side_effect=lambda _message, file: Path(file).write_bytes(b"photo"))
+    monkeypatch.setattr(
+        "app.websocket.cross_process.notify_live_event",
+        AsyncMock(return_value=None),
+    )
+
+    recovered = await inquiry_ingestion.retry_pending_inquiry_media(client, object(), limit=10)
+    assert recovered == 1
+
+    async with TestSessionFactory() as session:
+        stored = (
+            await session.execute(select(InquiryMessage).where(InquiryMessage.id == 1))
+        ).scalar_one()
+    assert stored.media_download_status == InquiryMediaDownloadStatus.READY
+    assert stored.media_storage_key == "chat_-5467746352/8823.jpg"
+
+
+@pytest.mark.asyncio
+async def test_edit_without_visible_content_is_ignored() -> None:
+    class EmptyEditEvent:
+        id = 999
+        chat_id = -5467746352
+
+        async def get_sender(self) -> None:
+            return None
+
+    ingest = AsyncMock(
+        side_effect=InquiryMessageNotVisibleError(
+            "Telegram message has no inquiry-visible content"
+        )
+    )
+    new_handler, edit_handler = create_inquiry_message_handlers(
+        ingest_message=ingest,
+        report=lambda _: None,
+    )
+
+    await edit_handler(EmptyEditEvent())
+    ingest.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_normal_edit_still_updates_existing_row() -> None:
+    now = datetime(2026, 7, 14, tzinfo=UTC)
+    async with TestSessionFactory() as session, session.begin():
+        session.add(
+            InquiryMessage(
+                telegram_chat_id=-1001,
+                telegram_message_id=77,
+                sender_display_name="Ayush",
+                text="old text",
+                message_date=now,
+                received_at=now,
+                direction=InquiryDirection.INBOUND,
+                message_source=InquiryMessageSource.TELEGRAM_EXTERNAL,
+                media_type=InquiryMediaType.NONE,
+                media_download_status=InquiryMediaDownloadStatus.NOT_APPLICABLE,
+            )
+        )
+
+    class EditedEvent:
+        id = 77
+        chat_id = -1001
+        sender_id = 42
+        date = now
+        edit_date = now
+        message = "updated text"
+        raw_text = "updated text"
+        out = False
+        media = None
+
+        async def get_sender(self) -> object:
+            return type(
+                "Sender",
+                (),
+                {"first_name": "Ayush", "last_name": None, "username": "ayush"},
+            )()
+
+    monkeypatch_publish = AsyncMock(return_value=None)
+    import app.telegram.inquiry_ingestion as ingestion_module
+
+    original_publish = ingestion_module.event_broker.publish
+    ingestion_module.event_broker.publish = monkeypatch_publish  # type: ignore[method-assign]
+    try:
+        await ingestion_module.ingest_inquiry_telegram_message(EditedEvent(), client=None)
+    finally:
+        ingestion_module.event_broker.publish = original_publish  # type: ignore[method-assign]
+
+    async with TestSessionFactory() as session:
+        stored = (
+            await session.execute(
+                select(InquiryMessage).where(InquiryMessage.telegram_message_id == 77)
+            )
+        ).scalar_one()
+    assert stored.text == "updated text"
+    assert stored.edited_at is not None
+    assert stored.edited_at.replace(tzinfo=UTC) == now

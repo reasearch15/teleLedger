@@ -13,6 +13,10 @@ from telethon.tl.types import (  # type: ignore[import-untyped]
 from app.telegram.inquiry_media import ALLOWED_IMAGE_MIME_TYPES
 
 
+class InquiryMessageNotVisibleError(ValueError):
+    """Raised when a Telegram payload has no Inquiry-visible content."""
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedInquiryTelegramMessage:
     telegram_chat_id: int
@@ -82,7 +86,9 @@ async def parse_inquiry_telegram_message(message: Any) -> ParsedInquiryTelegramM
             media_filename = _document_filename(document)
 
     if text is None and caption is None and not has_downloadable_media:
-        raise ValueError("Telegram message has no inquiry-visible content")
+        raise InquiryMessageNotVisibleError(
+            "Telegram message has no inquiry-visible content"
+        )
 
     return ParsedInquiryTelegramMessage(
         telegram_chat_id=int(message.chat_id),

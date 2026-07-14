@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import mimetypes
 import re
 from pathlib import Path
 
@@ -18,7 +17,13 @@ MIME_EXTENSION = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
-STORAGE_KEY_PATTERN = re.compile(r"^[0-9]+/[0-9]+\.[a-z0-9]+$")
+ALLOWED_STORAGE_EXTENSIONS = frozenset({".jpg", ".png", ".webp"})
+CHAT_COMPONENT_PATTERN = re.compile(r"^chat_-?\d+$")
+MESSAGE_FILE_PATTERN = re.compile(r"^\d+\.(jpg|png|webp)$", re.IGNORECASE)
+
+
+class InvalidInquiryMediaStorageKeyError(ValueError):
+    """Raised when a storage key fails validation."""
 
 
 def resolve_inquiry_media_root(settings: Settings) -> Path:
@@ -27,7 +32,7 @@ def resolve_inquiry_media_root(settings: Settings) -> Path:
     if not root.is_absolute():
         root = Path.cwd() / root
     root.mkdir(parents=True, exist_ok=True)
-    return root
+    return root.resolve()
 
 
 def build_media_storage_key(
@@ -37,16 +42,46 @@ def build_media_storage_key(
     mime_type: str,
 ) -> str:
     """Build a deterministic, path-safe storage key for one inquiry image."""
-    extension = MIME_EXTENSION.get(mime_type, mimetypes.guess_extension(mime_type) or ".bin")
-    return f"{telegram_chat_id}/{telegram_message_id}{extension}"
+    extension = _extension_for_mime(mime_type)
+    return f"chat_{telegram_chat_id}/{telegram_message_id}{extension}"
+
+
+def validate_storage_key(storage_key: str) -> None:
+    """Reject unsafe or malformed inquiry media storage keys."""
+    if not storage_key or storage_key.startswith(("/", "\\")):
+        raise InvalidInquiryMediaStorageKeyError("Invalid inquiry media storage key")
+    if "\\" in storage_key or ".." in storage_key:
+        raise InvalidInquiryMediaStorageKeyError("Invalid inquiry media storage key")
+
+    parts = storage_key.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise InvalidInquiryMediaStorageKeyError("Invalid inquiry media storage key")
+
+    chat_part, file_part = parts
+    if not CHAT_COMPONENT_PATTERN.fullmatch(chat_part):
+        raise InvalidInquiryMediaStorageKeyError("Invalid inquiry media storage key")
+    if not MESSAGE_FILE_PATTERN.fullmatch(file_part):
+        raise InvalidInquiryMediaStorageKeyError("Invalid inquiry media storage key")
+
+    extension = Path(file_part).suffix.lower()
+    if extension not in ALLOWED_STORAGE_EXTENSIONS:
+        raise InvalidInquiryMediaStorageKeyError("Invalid inquiry media storage key")
 
 
 def media_path_for_key(settings: Settings, storage_key: str) -> Path:
     """Resolve one validated storage key to an on-disk media path."""
-    if not STORAGE_KEY_PATTERN.fullmatch(storage_key):
-        raise ValueError("Invalid inquiry media storage key")
+    validate_storage_key(storage_key)
     root = resolve_inquiry_media_root(settings)
     candidate = (root / storage_key).resolve()
-    if root.resolve() not in candidate.parents and candidate != root.resolve():
-        raise ValueError("Invalid inquiry media storage key")
+    if root not in candidate.parents:
+        raise InvalidInquiryMediaStorageKeyError("Invalid inquiry media storage key")
     return candidate
+
+
+def _extension_for_mime(mime_type: str) -> str:
+    extension = MIME_EXTENSION.get(mime_type)
+    if extension is None or extension not in ALLOWED_STORAGE_EXTENSIONS:
+        raise InvalidInquiryMediaStorageKeyError(
+            f"Unsupported inquiry media mime type: {mime_type}"
+        )
+    return extension

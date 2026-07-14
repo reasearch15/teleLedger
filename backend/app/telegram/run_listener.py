@@ -18,7 +18,10 @@ from app.telegram.cashout_reconciliation import (
 from app.telegram.client import create_telegram_client
 from app.telegram.events import create_new_message_handler, create_reaction_handler
 from app.telegram.inquiry_events import create_inquiry_message_handlers
-from app.telegram.inquiry_ingestion import ingest_inquiry_telegram_message
+from app.telegram.inquiry_ingestion import (
+    ingest_inquiry_telegram_message,
+    retry_pending_inquiry_media,
+)
 from app.telegram.identity import telegram_display_name, telegram_entity_id
 from app.telegram.ingestion import ingest_telegram_message
 from app.telegram.peer_ids import normalize_telegram_chat_id
@@ -183,6 +186,15 @@ async def _run_listener_session(
         if startup_completed:
             report(f"Startup reconciliation completed {startup_completed} cashout(s).")
         listener_health.mark_reconciliation(error=None)
+
+        report("Retrying pending inquiry media…")
+        media_recovered = await retry_pending_inquiry_media(
+            client,
+            cashout_group_input,
+            limit=settings.inquiry_page_size_default,
+        )
+        if media_recovered:
+            report(f"Recovered {media_recovered} inquiry media file(s).")
 
         reaction_handler = create_reaction_handler(
             expected_chat_id=cashout_group_chat_id,
