@@ -29,6 +29,7 @@ async def list_inquiry_messages(
     current_user: CurrentUser,
     limit: Annotated[int, Query(ge=1, le=100)] | None = None,
     cursor: Annotated[str | None, Query(max_length=128)] = None,
+    before_message_id: Annotated[int | None, Query(gt=0)] = None,
 ) -> InquiryMessageListResponse:
     """List visible cashout-group chat messages for the Inquiry panel."""
     settings = get_settings()
@@ -39,6 +40,7 @@ async def list_inquiry_messages(
                 actor=current_user,
                 limit=page_limit,
                 cursor=cursor,
+                before_message_id=before_message_id,
             ),
             session=session,
             operation_name="inquiries.list_messages",
@@ -65,6 +67,12 @@ async def list_inquiry_messages(
             for message in messages
         ],
         pagination=pagination,
+        has_more=bool(pagination["hasMore"]),
+        next_cursor=(
+            str(pagination["nextCursor"])
+            if pagination["nextCursor"] is not None
+            else None
+        ),
     )
 
 

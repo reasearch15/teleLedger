@@ -136,6 +136,8 @@ export type InquiryMessage = {
 
 export type InquiryMessagePage = {
   items: InquiryMessage[];
+  has_more?: boolean;
+  next_cursor?: string | null;
   pagination: {
     hasMore: boolean;
     nextCursor: string | null;

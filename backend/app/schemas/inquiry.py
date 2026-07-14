@@ -39,6 +39,8 @@ class InquiryMessageResponse(BaseModel):
 class InquiryMessageListResponse(BaseModel):
     items: list[InquiryMessageResponse]
     pagination: dict[str, str | bool | None]
+    has_more: bool
+    next_cursor: str | None
 
 
 class SendInquiryMessageRequest(BaseModel):

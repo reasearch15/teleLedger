@@ -57,10 +57,16 @@ class InquiryService(ApplicationService):
         actor: User,
         limit: int,
         cursor: str | None,
+        before_message_id: int | None = None,
     ) -> tuple[list[InquiryMessage], dict[str, bool | str | None], dict[int, str | None]]:
         self._require_viewer(actor)
         chat_id = self._cashout_chat_id()
-        before_cursor = self._parse_cursor(cursor)
+        before_cursor = await self._cursor_from_before_message_id(
+            chat_id=chat_id,
+            before_message_id=before_message_id,
+        )
+        if before_cursor is None:
+            before_cursor = self._parse_cursor(cursor)
         page = await self._repository.list_visible_messages(
             telegram_chat_id=chat_id,
             limit=limit,
@@ -190,6 +196,23 @@ class InquiryService(ApplicationService):
             return datetime.fromisoformat(date_value), int(row_id)
         except ValueError as error:
             raise InquiryValidationError("Invalid pagination cursor") from error
+
+    async def _cursor_from_before_message_id(
+        self,
+        *,
+        chat_id: int,
+        before_message_id: int | None,
+    ) -> tuple[datetime, int] | None:
+        if before_message_id is None:
+            return None
+        message = await self._session.get(InquiryMessage, before_message_id)
+        if (
+            message is None
+            or message.telegram_chat_id != chat_id
+            or message.message_source == InquiryMessageSource.CASHOUT_PANEL
+        ):
+            raise InquiryValidationError("Invalid before_message_id")
+        return message.message_date, message.id
 
     async def _sender_usernames(
         self,

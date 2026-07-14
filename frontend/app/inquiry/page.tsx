@@ -4,6 +4,7 @@ import {
   FormEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -16,7 +17,7 @@ import { friendlyError } from "@/lib/api-client";
 import { INQUIRY_PAGE_EVENTS } from "@/lib/live-events";
 import {
   fetchInquiryMediaBlob,
-  INQUIRY_PAGE_SIZE,
+  INQUIRY_CHAT_PAGE_SIZE,
   listInquiryMessages,
   sendInquiryMessage,
 } from "@/services/inquiries";
@@ -98,6 +99,28 @@ function buildSenderBlocks(messages: InquiryMessage[]): SenderBlock[] {
   return blocks;
 }
 
+function compareMessages(a: InquiryMessage, b: InquiryMessage): number {
+  const dateDelta = new Date(a.message_date).getTime() - new Date(b.message_date).getTime();
+  if (dateDelta !== 0) return dateDelta;
+  return a.id - b.id;
+}
+
+function mergeMessages(
+  current: InquiryMessage[],
+  incoming: InquiryMessage[],
+): InquiryMessage[] {
+  const byId = new Map(current.map((message) => [message.id, message]));
+  for (const message of incoming) {
+    byId.set(message.id, message);
+  }
+  return Array.from(byId.values()).sort(compareMessages);
+}
+
+function isNearBottom(element: HTMLDivElement | null): boolean {
+  if (!element) return true;
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+}
+
 function InquiryMediaPreview({ message }: { message: InquiryMessage }) {
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -169,25 +192,48 @@ export default function InquiryPage() {
   const [error, setError] = useState("");
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [showNewMessages, setShowNewMessages] = useState(false);
   const [draft, setDraft] = useState("");
   const [attachment, setAttachment] = useState<File | null>(null);
   const [sendKey, setSendKey] = useState(() => crypto.randomUUID());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const requestVersion = useRef(0);
+  const messagesRef = useRef<InquiryMessage[]>([]);
+  const shouldScrollToBottom = useRef(false);
+  const prependMetrics = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
 
   const blocks = useMemo(() => buildSenderBlocks(messages), [messages]);
 
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
   const loadLatest = useCallback(async (mode: "initial" | "refresh" = "initial") => {
     const version = ++requestVersion.current;
+    const wasNearBottom = isNearBottom(scrollRef.current);
     if (mode === "initial") setLoading(true);
     if (mode === "refresh") setRefreshing(true);
     setError("");
     try {
-      const page = await listInquiryMessages({ limit: INQUIRY_PAGE_SIZE });
+      const page = await listInquiryMessages({ limit: INQUIRY_CHAT_PAGE_SIZE });
       if (version !== requestVersion.current) return;
-      setMessages(page.items);
-      setHasMore(page.pagination.hasMore);
-      setNextCursor(page.pagination.nextCursor);
+      const loadedItems = [...page.items].sort(compareMessages);
+      if (mode === "initial") {
+        setMessages(loadedItems);
+        setHasMore(page.has_more ?? page.pagination.hasMore);
+        setNextCursor(page.next_cursor ?? page.pagination.nextCursor);
+        shouldScrollToBottom.current = true;
+      } else {
+        const currentIds = new Set(messagesRef.current.map((message) => message.id));
+        const addedNewerMessage = loadedItems.some((message) => !currentIds.has(message.id));
+        setMessages((current) => mergeMessages(current, loadedItems));
+        if (addedNewerMessage && wasNearBottom) {
+          shouldScrollToBottom.current = true;
+        }
+        if (addedNewerMessage && !wasNearBottom) {
+          setShowNewMessages(true);
+        }
+      }
     } catch (loadError) {
       if (version === requestVersion.current) {
         setError(friendlyError(loadError));
@@ -205,30 +251,56 @@ export default function InquiryPage() {
     void loadLatest("initial");
   }, [loadLatest, user]);
 
-  useEffect(() => {
-    if (!scrollRef.current || loading) return;
-    scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [loading, messages.length]);
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element || loading) return;
+    if (prependMetrics.current) {
+      const metrics = prependMetrics.current;
+      prependMetrics.current = null;
+      element.scrollTop = metrics.scrollTop + (element.scrollHeight - metrics.scrollHeight);
+      return;
+    }
+    if (shouldScrollToBottom.current) {
+      shouldScrollToBottom.current = false;
+      element.scrollTop = element.scrollHeight;
+    }
+  }, [loading, messages]);
+
+  const handleScroll = () => {
+    if (isNearBottom(scrollRef.current)) {
+      setShowNewMessages(false);
+    }
+  };
 
   useLiveUpdates(INQUIRY_PAGE_EVENTS, () => void loadLatest("refresh"), Boolean(user?.id));
 
   const loadOlder = async () => {
-    if (!nextCursor || loadingMore) return;
+    if ((!nextCursor && messages.length === 0) || loadingMore || !hasMore) return;
+    const element = scrollRef.current;
+    if (element) {
+      prependMetrics.current = {
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      };
+    }
     setLoadingMore(true);
     setError("");
     try {
+      const oldestLoadedId = messages[0]?.id;
       const page = await listInquiryMessages({
-        limit: INQUIRY_PAGE_SIZE,
-        cursor: nextCursor,
+        limit: INQUIRY_CHAT_PAGE_SIZE,
+        beforeMessageId: oldestLoadedId,
+        cursor: oldestLoadedId ? null : nextCursor,
       });
       setMessages((current) => {
         const existing = new Set(current.map((item) => item.id));
-        const older = page.items.filter((item) => !existing.has(item.id));
+        const older = [...page.items].sort(compareMessages).filter((item) => !existing.has(item.id));
         return [...older, ...current];
       });
-      setHasMore(page.pagination.hasMore);
-      setNextCursor(page.pagination.nextCursor);
+      setHasMore(page.has_more ?? page.pagination.hasMore);
+      setNextCursor(page.next_cursor ?? page.pagination.nextCursor);
     } catch (loadError) {
+      prependMetrics.current = null;
       setError(friendlyError(loadError));
     } finally {
       setLoadingMore(false);
@@ -267,8 +339,8 @@ export default function InquiryPage() {
       title="Inquiry"
       description="Chat with the cashout Telegram group. Workflow messages sent through the Cashout panel stay hidden here."
     >
-      <section className="flex min-h-[70vh] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+      <section className="flex h-[clamp(28rem,calc(100dvh-15rem),52rem)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-4 py-3">
           <div>
             <p className="text-sm font-bold text-slate-900">Cashout group chat</p>
             <p className="text-xs text-slate-500">
@@ -287,7 +359,8 @@ export default function InquiryPage() {
 
         <div
           ref={scrollRef}
-          className="flex-1 space-y-4 overflow-y-auto overflow-x-hidden px-3 py-4 sm:px-5"
+          onScroll={handleScroll}
+          className="relative flex-1 space-y-4 overflow-y-auto overflow-x-hidden px-3 py-4 sm:px-5"
         >
           {hasMore ? (
             <div className="flex justify-center">
@@ -317,7 +390,7 @@ export default function InquiryPage() {
           {blocks.map((block) => (
             <article
               key={block.key}
-              className={`max-w-full rounded-2xl border px-4 py-3 ${
+              className={`min-w-0 max-w-full rounded-2xl border px-4 py-3 ${
                 block.isOutbound
                   ? "ml-auto max-w-[92%] border-indigo-200 bg-indigo-50 sm:max-w-[80%]"
                   : "mr-auto max-w-[92%] border-slate-200 bg-slate-50 sm:max-w-[80%]"
@@ -400,9 +473,28 @@ export default function InquiryPage() {
           ))}
         </div>
 
+        {showNewMessages ? (
+          <div className="pointer-events-none -mt-14 flex justify-center px-4 pb-3">
+            <button
+              type="button"
+              onClick={() => {
+                shouldScrollToBottom.current = true;
+                setShowNewMessages(false);
+                scrollRef.current?.scrollTo({
+                  top: scrollRef.current.scrollHeight,
+                  behavior: "smooth",
+                });
+              }}
+              className="pointer-events-auto rounded-full bg-slate-900 px-4 py-2 text-xs font-bold text-white shadow-lg"
+            >
+              New messages
+            </button>
+          </div>
+        ) : null}
+
         <form
           onSubmit={handleSend}
-          className="border-t border-slate-200 bg-slate-50 px-3 py-4 sm:px-5"
+          className="shrink-0 border-t border-slate-200 bg-slate-50 px-3 py-4 sm:px-5"
         >
           {error ? (
             <p className="mb-3 text-sm font-medium text-red-700">{error}</p>

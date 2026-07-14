@@ -1,15 +1,20 @@
 import { environment } from "@/lib/env";
-import type { InquiryMessage, InquiryMessagePage, SendInquiryResult } from "@/types/api";
+import type { InquiryMessagePage, SendInquiryResult } from "@/types/api";
 
 export const INQUIRY_PAGE_SIZE = 40;
+export const INQUIRY_CHAT_PAGE_SIZE = 10;
 
 export async function listInquiryMessages(options?: {
   limit?: number;
   cursor?: string | null;
+  beforeMessageId?: number | null;
 }): Promise<InquiryMessagePage> {
   const params = new URLSearchParams();
   if (options?.limit) params.set("limit", String(options.limit));
   if (options?.cursor) params.set("cursor", options.cursor);
+  if (options?.beforeMessageId) {
+    params.set("before_message_id", String(options.beforeMessageId));
+  }
   const query = params.toString();
   const response = await fetch(
     `${environment.apiUrl}/api/inquiries/messages${query ? `?${query}` : ""}`,
