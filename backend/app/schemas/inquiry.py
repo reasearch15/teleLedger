@@ -24,7 +24,12 @@ class InquiryMessageResponse(BaseModel):
     media_filename: str | None
     media_size_bytes: int | None
     media_download_status: str
+    media_error: str | None
     has_media: bool
+    telegram_grouped_id: int | None
+    reply_to_telegram_message_id: int | None
+    forward_from_display_name: str | None
+    is_deleted: bool
     sent_by_teleledger_user_id: int | None
     sent_by_username: str | None
     starts_new_sender_block: bool

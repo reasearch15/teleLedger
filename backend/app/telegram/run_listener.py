@@ -17,6 +17,7 @@ from app.telegram.cashout_reconciliation import (
 )
 from app.telegram.client import create_telegram_client
 from app.telegram.events import create_new_message_handler, create_reaction_handler
+from app.telegram.inquiry_backfill import backfill_new_inquiry_messages
 from app.telegram.inquiry_events import create_inquiry_message_handlers
 from app.telegram.inquiry_ingestion import (
     ingest_inquiry_telegram_message,
@@ -163,6 +164,12 @@ async def _run_listener_session(
             limit=settings.telegram_backfill_limit,
             report=report,
         )
+        await backfill_new_inquiry_messages(
+            client,
+            cashout_group,
+            limit=settings.telegram_backfill_limit,
+            report=report,
+        )
         payment_group_input = await client.get_input_entity(payment_group)
         cashout_group_input = await client.get_input_entity(cashout_group)
         payment_group_chat_id = int(telegram_entity_id(payment_group))
@@ -210,15 +217,21 @@ async def _run_listener_session(
         async def ingest_cashout_group_message(message: object) -> None:
             await ingest_inquiry_telegram_message(message, client=client)
 
-        inquiry_new_handler, inquiry_edit_handler = create_inquiry_message_handlers(
-            ingest_message=ingest_cashout_group_message,
-            report=report,
+        inquiry_new_handler, inquiry_edit_handler, inquiry_delete_handler = (
+            create_inquiry_message_handlers(
+                ingest_message=ingest_cashout_group_message,
+                report=report,
+            )
         )
         client.add_event_handler(handler, events.NewMessage(chats=payment_group_input))
         client.add_event_handler(inquiry_new_handler, events.NewMessage(chats=cashout_group_input))
         client.add_event_handler(
             inquiry_edit_handler,
             events.MessageEdited(chats=cashout_group_input),
+        )
+        client.add_event_handler(
+            inquiry_delete_handler,
+            events.MessageDeleted(chats=cashout_group_input),
         )
         client.add_event_handler(reaction_handler, events.Raw())
         report("Listening for message reactions.")

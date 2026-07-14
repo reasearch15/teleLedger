@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -135,6 +136,23 @@ class InquiryMessage(Base):
         default=InquiryMediaDownloadStatus.NOT_APPLICABLE,
         server_default=InquiryMediaDownloadStatus.NOT_APPLICABLE.value,
     )
+    telegram_grouped_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reply_to_telegram_message_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    forward_from_display_name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    is_deleted: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    media_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    media_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
     sent_by_teleledger_user_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("users.id", ondelete="SET NULL"),

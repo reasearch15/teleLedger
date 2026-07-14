@@ -16,7 +16,12 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 from starlette.datastructures import UploadFile
-from telethon.tl.types import MessageMediaPhoto  # type: ignore[import-untyped]
+from telethon.tl.types import (  # type: ignore[import-untyped]
+    DocumentAttributeFilename,
+    DocumentAttributeImageSize,
+    MessageMediaDocument,
+    MessageMediaPhoto,
+)
 
 from app.core.config import get_settings
 from app.db.base import Base
@@ -36,6 +41,7 @@ from app.telegram.inquiry_media import (
     InvalidInquiryMediaStorageKeyError,
     build_media_storage_key,
     media_path_for_key,
+    normalize_image_mime_type,
 )
 from app.telegram.inquiry_message_parser import (
     InquiryMessageNotVisibleError,
@@ -392,7 +398,7 @@ async def test_edit_without_visible_content_is_ignored() -> None:
             "Telegram message has no inquiry-visible content"
         )
     )
-    new_handler, edit_handler = create_inquiry_message_handlers(
+    new_handler, edit_handler, _delete_handler = create_inquiry_message_handlers(
         ingest_message=ingest,
         report=lambda _: None,
     )
@@ -719,3 +725,116 @@ async def test_listener_echo_does_not_duplicate(
     assert rows[0].message_source == InquiryMessageSource.INQUIRY
     assert rows[0].sent_by_teleledger_user_id == 42
     assert rows[0].idempotency_key == idempotency_key
+
+
+@pytest.mark.asyncio
+async def test_image_document_with_octet_stream_is_parsed_as_media() -> None:
+    now = datetime(2026, 7, 14, tzinfo=UTC)
+    document = type(
+        "Document",
+        (),
+        {
+            "mime_type": "application/octet-stream",
+            "attributes": [
+                DocumentAttributeFilename(file_name="payment-screenshot.png"),
+                DocumentAttributeImageSize(w=1080, h=1920),
+            ],
+        },
+    )()
+    media = MessageMediaDocument(document=document, ttl_seconds=None, spoiler=False)
+
+    class DocumentMessage:
+        pass
+
+    message = DocumentMessage()
+    message.id = 991
+    message.chat_id = -5467746352
+    message.sender_id = 12
+    message.date = now
+    message.edit_date = None
+    message.message = "Payment proof"
+    message.raw_text = "Payment proof"
+    message.out = False
+    message.media = media
+    message.grouped_id = None
+    message.reply_to = None
+    message.fwd_from = None
+    message.get_sender = AsyncMock(
+        return_value=type(
+            "Sender",
+            (),
+            {"first_name": "Player", "last_name": None, "username": "player1"},
+        )()
+    )
+
+    parsed = await parse_inquiry_telegram_message(message)
+    assert parsed.media_type == "document"
+    assert parsed.media_mime_type == "image/png"
+    assert parsed.has_downloadable_media is True
+    assert parsed.caption == "Payment proof"
+
+
+def test_normalize_image_mime_from_filename() -> None:
+    assert (
+        normalize_image_mime_type("application/octet-stream", filename="proof.PNG")
+        == "image/png"
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_cashout_request_text_is_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(inquiry_ingestion, "SessionFactory", TestSessionFactory)
+    monkeypatch.setattr(
+        "app.websocket.cross_process.notify_live_event",
+        AsyncMock(return_value=None),
+    )
+    sent = _telegram_text_message(
+        message_id=1200,
+        text="🔴 CASHOUT REQUEST\nmanual test",
+        chat_id=-5467746352,
+    )
+    sent.out = False
+    result = await inquiry_ingestion.ingest_inquiry_telegram_message(sent, client=None)
+    assert result.visible_in_inquiry is True
+    assert result.message_source == InquiryMessageSource.TELEGRAM_EXTERNAL.value
+
+
+@pytest.mark.asyncio
+async def test_mark_inquiry_message_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(inquiry_ingestion, "SessionFactory", TestSessionFactory)
+    monkeypatch.setattr(
+        "app.websocket.cross_process.notify_live_event",
+        AsyncMock(return_value=None),
+    )
+    now = datetime(2026, 7, 14, tzinfo=UTC)
+    async with TestSessionFactory() as session, session.begin():
+        session.add(
+            InquiryMessage(
+                telegram_chat_id=-1001,
+                telegram_message_id=55,
+                text="delete me",
+                message_date=now,
+                received_at=now,
+                direction=InquiryDirection.INBOUND,
+                message_source=InquiryMessageSource.TELEGRAM_EXTERNAL,
+                media_type=InquiryMediaType.NONE,
+                media_download_status=InquiryMediaDownloadStatus.NOT_APPLICABLE,
+            )
+        )
+
+    assert await inquiry_ingestion.mark_inquiry_message_deleted(
+        telegram_chat_id=-1001,
+        telegram_message_id=55,
+    )
+
+    async with TestSessionFactory() as session:
+        stored = (
+            await session.execute(
+                select(InquiryMessage).where(InquiryMessage.telegram_message_id == 55)
+            )
+        ).scalar_one()
+    assert stored.is_deleted is True

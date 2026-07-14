@@ -122,7 +122,12 @@ export type InquiryMessage = {
     | "pending"
     | "ready"
     | "failed";
+  media_error: string | null;
   has_media: boolean;
+  telegram_grouped_id: number | null;
+  reply_to_telegram_message_id: number | null;
+  forward_from_display_name: string | null;
+  is_deleted: boolean;
   sent_by_teleledger_user_id: number | null;
   sent_by_username: string | null;
   starts_new_sender_block: boolean;

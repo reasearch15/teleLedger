@@ -38,9 +38,6 @@ class ParsedInquiryTelegramMessage:
     media_mime_type: str | None
     media_filename: str | None
     has_downloadable_media: bool
-    telegram_grouped_id: int | None
-    reply_to_telegram_message_id: int | None
-    forward_from_display_name: str | None
 
 
 def is_cashout_panel_message_text(text: str | None) -> bool:
@@ -74,18 +71,6 @@ async def parse_inquiry_telegram_message(message: Any) -> ParsedInquiryTelegramM
     media_mime_type = None
     media_filename = None
     has_downloadable_media = False
-
-    grouped_id = getattr(message, "grouped_id", None)
-    telegram_grouped_id = int(grouped_id) if isinstance(grouped_id, int) else None
-    reply_to = getattr(message, "reply_to", None)
-    reply_to_telegram_message_id = None
-    if reply_to is not None:
-        reply_id = getattr(reply_to, "reply_to_msg_id", None)
-        if isinstance(reply_id, int):
-            reply_to_telegram_message_id = reply_id
-    forward_from_display_name = _forward_from_display_name(
-        getattr(message, "fwd_from", None)
-    )
 
     media = getattr(message, "media", None)
     if isinstance(media, MessageMediaPhoto):
@@ -129,18 +114,13 @@ async def parse_inquiry_telegram_message(message: Any) -> ParsedInquiryTelegramM
         media_mime_type=media_mime_type,
         media_filename=media_filename,
         has_downloadable_media=has_downloadable_media,
-        telegram_grouped_id=telegram_grouped_id,
-        reply_to_telegram_message_id=reply_to_telegram_message_id,
-        forward_from_display_name=forward_from_display_name,
     )
     logger.info(
         "inquiry_message_parsed",
         extra={
             "telegram_message_id": parsed.telegram_message_id,
             "telegram_chat_id": parsed.telegram_chat_id,
-            "telegram_sender_id": parsed.telegram_sender_id,
-            "sender_display_name": parsed.sender_display_name,
-            "grouped_id": parsed.telegram_grouped_id,
+            "grouped_id": getattr(message, "grouped_id", None),
             "message_type": parsed.media_type,
             "caption": parsed.caption,
             "has_photo": isinstance(media, MessageMediaPhoto),
@@ -148,8 +128,6 @@ async def parse_inquiry_telegram_message(message: Any) -> ParsedInquiryTelegramM
             "mime_type": parsed.media_mime_type,
             "file_extension": Path(media_filename or "").suffix.lower() or None,
             "has_downloadable_media": parsed.has_downloadable_media,
-            "reply_to_telegram_message_id": parsed.reply_to_telegram_message_id,
-            "forward_from_display_name": parsed.forward_from_display_name,
         },
     )
     return parsed
@@ -201,12 +179,3 @@ def _document_filename(document: object | None) -> str | None:
             if isinstance(filename, str) and filename.strip():
                 return filename.strip()
     return None
-
-
-def _forward_from_display_name(forward_header: object | None) -> str | None:
-    if forward_header is None:
-        return None
-    from_name = getattr(forward_header, "from_name", None)
-    if isinstance(from_name, str) and from_name.strip():
-        return from_name.strip()
-    return "Forwarded message"

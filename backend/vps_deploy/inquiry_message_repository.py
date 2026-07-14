@@ -181,7 +181,6 @@ class InquiryMessageRepository(BaseRepository[InquiryMessage]):
                 ),
                 InquiryMessage.media_type != InquiryMediaType.NONE,
                 InquiryMessage.media_mime_type.is_not(None),
-                InquiryMessage.is_deleted.is_(False),
             )
             .order_by(
                 InquiryMessage.message_date.desc(),
@@ -218,23 +217,12 @@ class InquiryMessageRepository(BaseRepository[InquiryMessage]):
         existing.media_type = incoming.media_type
         existing.media_mime_type = incoming.media_mime_type
         existing.media_filename = incoming.media_filename
-        existing.telegram_grouped_id = incoming.telegram_grouped_id
-        existing.reply_to_telegram_message_id = incoming.reply_to_telegram_message_id
-        existing.forward_from_display_name = incoming.forward_from_display_name
-        if incoming.is_deleted:
-            existing.is_deleted = True
         if incoming.media_storage_key is not None:
             existing.media_storage_key = incoming.media_storage_key
         if incoming.media_size_bytes is not None:
             existing.media_size_bytes = incoming.media_size_bytes
         if incoming.media_download_status != InquiryMediaDownloadStatus.NOT_APPLICABLE:
             existing.media_download_status = incoming.media_download_status
-        if incoming.media_hash is not None:
-            existing.media_hash = incoming.media_hash
-        if incoming.media_error is not None:
-            existing.media_error = incoming.media_error
-        elif incoming.media_download_status == InquiryMediaDownloadStatus.READY:
-            existing.media_error = None
         if incoming.sent_by_teleledger_user_id is not None:
             existing.sent_by_teleledger_user_id = incoming.sent_by_teleledger_user_id
         if incoming.idempotency_key is not None:

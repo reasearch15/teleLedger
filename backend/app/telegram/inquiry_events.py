@@ -4,7 +4,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.core.logging import get_logger
-from app.telegram.inquiry_ingestion import ingest_inquiry_telegram_message
+from app.telegram.inquiry_ingestion import (
+    ingest_inquiry_telegram_message,
+    mark_inquiry_message_deleted,
+)
 from app.telegram.inquiry_message_parser import InquiryMessageNotVisibleError
 
 logger = get_logger(__name__)
@@ -17,8 +20,8 @@ def create_inquiry_message_handlers(
     *,
     ingest_message: InquiryIngest | None = None,
     report: TerminalReporter = print,
-) -> tuple[Callable[[Any], Any], Callable[[Any], Any]]:
-    """Build handlers for cashout-group Telegram messages and edits."""
+) -> tuple[Callable[[Any], Any], Callable[[Any], Any], Callable[[Any], Any]]:
+    """Build handlers for cashout-group Telegram messages, edits, and deletes."""
 
     async def _ingest(message: Any) -> None:
         handler = ingest_message or _default_ingest
@@ -77,7 +80,29 @@ def create_inquiry_message_handlers(
                 },
             )
 
-    return handle_new_message, handle_edited_message
+    async def handle_deleted_messages(event: Any) -> None:
+        chat_id = getattr(event, "chat_id", None)
+        deleted_ids = getattr(event, "deleted_ids", None) or []
+        if chat_id is None:
+            return
+        for message_id in deleted_ids:
+            try:
+                deleted = await mark_inquiry_message_deleted(
+                    telegram_chat_id=int(chat_id),
+                    telegram_message_id=int(message_id),
+                )
+                if deleted:
+                    report(f"Inquiry message {message_id}: deleted")
+            except Exception:
+                logger.exception(
+                    "inquiry_message_delete_failed",
+                    extra={
+                        "telegram_message_id": message_id,
+                        "telegram_chat_id": chat_id,
+                    },
+                )
+
+    return handle_new_message, handle_edited_message, handle_deleted_messages
 
 
 async def _default_ingest(message: Any) -> None:

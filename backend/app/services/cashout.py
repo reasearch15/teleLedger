@@ -437,3 +437,12 @@ async def _delete_cancelled_cashout_telegram_message(cashout: CashoutRequest) ->
             "telegram_chat_id": cashout_group_id,
         },
     )
+    from app.telegram.inquiry_ingestion import mark_inquiry_message_deleted
+    from app.telegram.peer_ids import normalize_telegram_chat_id
+
+    normalized_chat_id = normalize_telegram_chat_id(cashout_group_id)
+    if normalized_chat_id is not None:
+        await mark_inquiry_message_deleted(
+            telegram_chat_id=normalized_chat_id,
+            telegram_message_id=message_id,
+        )

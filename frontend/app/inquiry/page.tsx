@@ -54,7 +54,7 @@ function displaySender(message: InquiryMessage): {
   isOutbound: boolean;
   sentByUsername: string | null;
 } {
-  if (message.message_source === "inquiry" || message.direction === "outbound") {
+  if (message.message_source === "inquiry") {
     return {
       name: "TeleLedger",
       username: null,
@@ -65,7 +65,7 @@ function displaySender(message: InquiryMessage): {
   return {
     name: message.sender_display_name ?? "Unknown sender",
     username: message.sender_username,
-    isOutbound: false,
+    isOutbound: message.direction === "outbound",
     sentByUsername: null,
   };
 }
@@ -133,6 +133,11 @@ function InquiryMediaPreview({ message }: { message: InquiryMessage }) {
     return (
       <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-6 text-center text-xs font-semibold text-slate-500">
         Image unavailable
+        {message.media_error ? (
+          <p className="mt-2 text-[11px] font-normal text-slate-400">
+            {message.media_error}
+          </p>
+        ) : null}
       </div>
     );
   }
@@ -348,7 +353,25 @@ export default function InquiryPage() {
 
               <div className="space-y-3">
                 {block.messages.map((message) => (
-                  <div key={message.id} className="space-y-2">
+                  <div
+                    key={message.id}
+                    className={`space-y-2 ${message.is_deleted ? "opacity-60" : ""}`}
+                  >
+                    {message.forward_from_display_name ? (
+                      <p className="text-xs font-semibold text-slate-500">
+                        Forwarded from {message.forward_from_display_name}
+                      </p>
+                    ) : null}
+                    {message.reply_to_telegram_message_id ? (
+                      <p className="text-xs font-semibold text-slate-500">
+                        Replying to message #{message.reply_to_telegram_message_id}
+                      </p>
+                    ) : null}
+                    {message.is_deleted ? (
+                      <p className="text-xs font-semibold text-red-600">
+                        This message was deleted in Telegram.
+                      </p>
+                    ) : null}
                     {message.text ? (
                       <p className="whitespace-pre-wrap break-words text-sm text-slate-800">
                         {message.text}
@@ -360,6 +383,11 @@ export default function InquiryPage() {
                       </p>
                     ) : null}
                     {message.has_media ? <InquiryMediaPreview message={message} /> : null}
+                    {message.telegram_grouped_id ? (
+                      <p className="text-[11px] font-semibold text-slate-400">
+                        Album item (group {message.telegram_grouped_id})
+                      </p>
+                    ) : null}
                     {message.caption ? (
                       <p className="whitespace-pre-wrap break-words text-sm text-slate-700">
                         {message.caption}
