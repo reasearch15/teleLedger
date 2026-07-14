@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import io
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.pool import StaticPool
+from starlette.datastructures import UploadFile
+from telethon.tl.types import MessageMediaPhoto  # type: ignore[import-untyped]
 
 from app.core.config import get_settings
 from app.db.base import Base
@@ -24,6 +28,8 @@ from app.models.inquiry_message import (
     InquiryMessage,
     InquiryMessageSource,
 )
+from app.models.user import User, UserRole
+from app.services.inquiry import InquiryService
 from app.telegram import inquiry_ingestion
 from app.telegram.inquiry_events import create_inquiry_message_handlers
 from app.telegram.inquiry_media import (
@@ -451,3 +457,265 @@ async def test_normal_edit_still_updates_existing_row() -> None:
     assert stored.text == "updated text"
     assert stored.edited_at is not None
     assert stored.edited_at.replace(tzinfo=UTC) == now
+
+
+def _staff_user() -> User:
+    now = datetime(2026, 7, 14, tzinfo=UTC)
+    return User(
+        id=42,
+        username="sarah",
+        password_hash="not-used",
+        role=UserRole.STAFF,
+        is_active=True,
+        staff_color="#2563EB",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _telegram_text_message(
+    *,
+    message_id: int = 501,
+    text: str = "Hello from inquiry",
+    chat_id: int = -5467746352,
+) -> object:
+    now = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+
+    class SentMessage:
+        pass
+
+    message = SentMessage()
+    message.id = message_id
+    message.chat_id = chat_id
+    message.sender_id = 42
+    message.date = now
+    message.edit_date = None
+    message.message = text
+    message.raw_text = text
+    message.out = True
+    message.media = None
+    message.get_sender = AsyncMock(
+        return_value=type(
+            "Sender",
+            (),
+            {"first_name": "Sarah", "last_name": None, "username": "sarah"},
+        )()
+    )
+    return message
+
+
+def _telegram_photo_message(
+    *,
+    message_id: int = 502,
+    caption: str = "Photo caption",
+    chat_id: int = -5467746352,
+) -> object:
+    now = datetime(2026, 7, 14, 12, 1, tzinfo=UTC)
+    photo_media = MessageMediaPhoto(
+        photo=type("Photo", (), {"id": 1, "access_hash": 2, "file_reference": b""})(),
+        ttl_seconds=None,
+        spoiler=False,
+    )
+
+    class SentPhoto:
+        pass
+
+    message = SentPhoto()
+    message.id = message_id
+    message.chat_id = chat_id
+    message.sender_id = 42
+    message.date = now
+    message.edit_date = None
+    message.message = caption
+    message.raw_text = caption
+    message.out = True
+    message.media = photo_media
+    message.get_sender = AsyncMock(
+        return_value=type(
+            "Sender",
+            (),
+            {"first_name": "Sarah", "last_name": None, "username": "sarah"},
+        )()
+    )
+    return message
+
+
+def _mock_telegram_client(
+    *,
+    sent_message: object,
+    send_message: AsyncMock | None = None,
+    send_file: AsyncMock | None = None,
+) -> MagicMock:
+    client = MagicMock()
+    client.connect = AsyncMock()
+    client.disconnect = AsyncMock()
+    client.is_user_authorized = AsyncMock(return_value=True)
+    client.get_entity = AsyncMock(return_value=object())
+    client.send_message = send_message or AsyncMock(return_value=sent_message)
+    client.send_file = send_file or AsyncMock(return_value=sent_message)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_text_inquiry_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "telegram_cashout_group_id", -5467746352)
+    monkeypatch.setattr(inquiry_ingestion, "SessionFactory", TestSessionFactory)
+    monkeypatch.setattr(
+        "app.services.inquiry.create_telegram_client",
+        lambda _settings: _mock_telegram_client(
+            sent_message=_telegram_text_message(),
+        ),
+    )
+    monkeypatch.setattr(
+        "app.websocket.cross_process.notify_live_event",
+        AsyncMock(return_value=None),
+    )
+
+    async with TestSessionFactory() as session:
+        service = InquiryService(session, settings=settings)
+        stored = await service.send_message(
+            actor=_staff_user(),
+            text="Hello from inquiry",
+            idempotency_key=uuid4(),
+        )
+
+    assert stored.telegram_message_id == 501
+    assert stored.text == "Hello from inquiry"
+    assert stored.message_source == InquiryMessageSource.INQUIRY
+    assert stored.sent_by_teleledger_user_id == 42
+    assert stored.direction == InquiryDirection.OUTBOUND
+
+
+@pytest.mark.asyncio
+async def test_image_inquiry_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "telegram_cashout_group_id", -5467746352)
+    monkeypatch.setattr(inquiry_ingestion, "SessionFactory", TestSessionFactory)
+    send_file = AsyncMock(return_value=_telegram_photo_message())
+    client = _mock_telegram_client(
+        sent_message=_telegram_photo_message(),
+        send_file=send_file,
+    )
+    monkeypatch.setattr(
+        "app.services.inquiry.create_telegram_client",
+        lambda _settings: client,
+    )
+    monkeypatch.setattr(
+        "app.websocket.cross_process.notify_live_event",
+        AsyncMock(return_value=None),
+    )
+
+    image = UploadFile(
+        filename="proof.jpg",
+        file=io.BytesIO(b"\xff\xd8\xff\xe0fake-jpeg"),
+        headers={"content-type": "image/jpeg"},
+    )
+    async with TestSessionFactory() as session:
+        service = InquiryService(session, settings=settings)
+        stored = await service.send_message(
+            actor=_staff_user(),
+            text="Photo caption",
+            idempotency_key=uuid4(),
+            image=image,
+        )
+
+    send_file.assert_awaited_once()
+    assert stored.telegram_message_id == 502
+    assert stored.caption == "Photo caption"
+    assert stored.media_type == InquiryMediaType.PHOTO
+    assert stored.message_source == InquiryMessageSource.INQUIRY
+
+
+@pytest.mark.asyncio
+async def test_returned_telegram_message_persisted_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "telegram_cashout_group_id", -5467746352)
+    monkeypatch.setattr(inquiry_ingestion, "SessionFactory", TestSessionFactory)
+    send_message = AsyncMock(return_value=_telegram_text_message(message_id=777))
+    monkeypatch.setattr(
+        "app.services.inquiry.create_telegram_client",
+        lambda _settings: _mock_telegram_client(
+            sent_message=_telegram_text_message(message_id=777),
+            send_message=send_message,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.websocket.cross_process.notify_live_event",
+        AsyncMock(return_value=None),
+    )
+
+    idempotency_key = uuid4()
+    async with TestSessionFactory() as session:
+        service = InquiryService(session, settings=settings)
+        first = await service.send_message(
+            actor=_staff_user(),
+            text="Persist once",
+            idempotency_key=idempotency_key,
+        )
+    async with TestSessionFactory() as session:
+        service = InquiryService(session, settings=settings)
+        second = await service.send_message(
+            actor=_staff_user(),
+            text="Persist once",
+            idempotency_key=idempotency_key,
+        )
+
+    send_message.assert_awaited_once()
+    assert first.id == second.id
+    assert first.telegram_message_id == 777
+
+    async with TestSessionFactory() as session:
+        count = await session.scalar(
+            select(func.count()).select_from(InquiryMessage)
+        )
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_listener_echo_does_not_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "telegram_cashout_group_id", -5467746352)
+    monkeypatch.setattr(inquiry_ingestion, "SessionFactory", TestSessionFactory)
+    monkeypatch.setattr(
+        "app.websocket.cross_process.notify_live_event",
+        AsyncMock(return_value=None),
+    )
+
+    sent = _telegram_text_message(message_id=888, text="Echo me")
+    idempotency_key = str(uuid4())
+    first = await inquiry_ingestion.ingest_inquiry_telegram_message(
+        sent,
+        client=None,
+        forced_source=InquiryMessageSource.INQUIRY,
+        sent_by_teleledger_user_id=42,
+        idempotency_key=idempotency_key,
+    )
+    second = await inquiry_ingestion.ingest_inquiry_telegram_message(
+        sent,
+        client=None,
+    )
+
+    assert first.inserted is True
+    assert second.inserted is False
+
+    async with TestSessionFactory() as session:
+        rows = (
+            await session.execute(
+                select(InquiryMessage).where(
+                    InquiryMessage.telegram_message_id == 888
+                )
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].message_source == InquiryMessageSource.INQUIRY
+    assert rows[0].sent_by_teleledger_user_id == 42
+    assert rows[0].idempotency_key == idempotency_key

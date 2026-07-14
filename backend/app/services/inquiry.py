@@ -9,14 +9,6 @@ from uuid import UUID
 from fastapi import UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from telethon.tl.functions.messages import (  # type: ignore[import-untyped]
-    SendMediaRequest,
-    SendMessageRequest,
-)
-from telethon.tl.types import (  # type: ignore[import-untyped]
-    DocumentAttributeFilename,
-    InputMediaUploadedDocument,
-)
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
@@ -138,10 +130,9 @@ class InquiryService(ApplicationService):
             if not await client.is_user_authorized():
                 raise InquiryValidationError("Telegram session is not authorized")
             entity = await client.get_entity(chat_id)
-            peer = await client.get_input_entity(entity)
             sent_message = await self._send_via_telegram(
                 client,
-                peer,
+                entity,
                 text=cleaned_text,
                 image=image,
             )
@@ -218,21 +209,17 @@ class InquiryService(ApplicationService):
     async def _send_via_telegram(
         self,
         client,
-        peer,
+        entity,
         *,
         text: str | None,
         image: UploadFile | None,
     ):
         if image is None:
-            request = SendMessageRequest(
-                peer=peer,
+            return await client.send_message(
+                entity,
                 message=text or "",
-                no_webpage=True,
-                random_id=client.rnd_id(),
+                link_preview=False,
             )
-            result = await client(request)
-            message_id = _extract_message_id(result)
-            return await client.get_messages(peer, ids=message_id)
 
         content = await image.read()
         if not content:
@@ -250,32 +237,11 @@ class InquiryService(ApplicationService):
             temp_path = Path(handle.name)
 
         try:
-            uploaded = await client.upload_file(str(temp_path))
-            attributes = []
-            if image.filename:
-                attributes.append(DocumentAttributeFilename(file_name=image.filename))
-            media = InputMediaUploadedDocument(
-                file=uploaded,
-                mime_type=mime_type,
-                attributes=attributes,
+            return await client.send_file(
+                entity,
+                file=str(temp_path),
+                caption=text or "",
+                force_document=False,
             )
-            request = SendMediaRequest(
-                peer=peer,
-                media=media,
-                message=text or "",
-                random_id=client.rnd_id(),
-            )
-            result = await client(request)
-            message_id = _extract_message_id(result)
-            return await client.get_messages(peer, ids=message_id)
         finally:
             temp_path.unlink(missing_ok=True)
-
-
-def _extract_message_id(result: object) -> int:
-    updates = getattr(result, "updates", None) or []
-    for update in updates:
-        message = getattr(update, "message", None)
-        if message is not None and getattr(message, "id", None) is not None:
-            return int(message.id)
-    raise InquiryValidationError("Telegram did not return a message ID")
