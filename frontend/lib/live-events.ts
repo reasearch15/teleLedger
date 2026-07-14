@@ -13,6 +13,9 @@ export const LIVE_EVENTS = {
   CASHOUT_COMPLETED: "cashout_completed",
   CASHOUT_CANCELLED: "cashout_cancelled",
   CASHOUT_NOTES_UPDATED: "cashout_notes_updated",
+  INQUIRY_MESSAGE_CREATED: "inquiry_message_created",
+  INQUIRY_MESSAGE_UPDATED: "inquiry_message_updated",
+  INQUIRY_MEDIA_READY: "inquiry_media_ready",
   SETTLEMENT_CREATED: "settlement_created",
   SETTLEMENT_DONE: "settlement_done",
   LEDGER_CHANGED: "ledger_changed",
@@ -25,6 +28,7 @@ export type LiveEvent = {
   event: LiveEventType;
   payment_id?: number;
   cashout_id?: number;
+  inquiry_message_id?: number;
   settlement_id?: number;
   user_id?: number;
   coadmin_id?: number;
@@ -62,6 +66,12 @@ export const CASHOUT_PAGE_EVENTS: LiveEventType[] = [
   LIVE_EVENTS.CASHOUT_COMPLETED,
   LIVE_EVENTS.CASHOUT_CANCELLED,
   LIVE_EVENTS.CASHOUT_NOTES_UPDATED,
+];
+
+export const INQUIRY_PAGE_EVENTS: LiveEventType[] = [
+  LIVE_EVENTS.INQUIRY_MESSAGE_CREATED,
+  LIVE_EVENTS.INQUIRY_MESSAGE_UPDATED,
+  LIVE_EVENTS.INQUIRY_MEDIA_READY,
 ];
 
 export const LEDGER_PAGE_EVENTS: LiveEventType[] = [

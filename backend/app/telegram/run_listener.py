@@ -17,6 +17,8 @@ from app.telegram.cashout_reconciliation import (
 )
 from app.telegram.client import create_telegram_client
 from app.telegram.events import create_new_message_handler, create_reaction_handler
+from app.telegram.inquiry_events import create_inquiry_message_handlers
+from app.telegram.inquiry_ingestion import ingest_inquiry_telegram_message
 from app.telegram.identity import telegram_display_name, telegram_entity_id
 from app.telegram.ingestion import ingest_telegram_message
 from app.telegram.peer_ids import normalize_telegram_chat_id
@@ -193,7 +195,19 @@ async def _run_listener_session(
             ),
             report=report,
         )
+        async def ingest_cashout_group_message(message: object) -> None:
+            await ingest_inquiry_telegram_message(message, client=client)
+
+        inquiry_new_handler, inquiry_edit_handler = create_inquiry_message_handlers(
+            ingest_message=ingest_cashout_group_message,
+            report=report,
+        )
         client.add_event_handler(handler, events.NewMessage(chats=payment_group_input))
+        client.add_event_handler(inquiry_new_handler, events.NewMessage(chats=cashout_group_input))
+        client.add_event_handler(
+            inquiry_edit_handler,
+            events.MessageEdited(chats=cashout_group_input),
+        )
         client.add_event_handler(reaction_handler, events.Raw())
         report("Listening for message reactions.")
         logger.info(

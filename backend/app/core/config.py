@@ -110,6 +110,22 @@ class Settings(BaseSettings):
         le=200,
         validation_alias="CASHOUT_RECONCILIATION_BATCH_SIZE",
     )
+    inquiry_media_dir: str = Field(
+        default="var/inquiry_media",
+        validation_alias="INQUIRY_MEDIA_DIR",
+    )
+    inquiry_media_max_bytes: int = Field(
+        default=10_485_760,
+        gt=0,
+        le=52_428_800,
+        validation_alias="INQUIRY_MEDIA_MAX_BYTES",
+    )
+    inquiry_page_size_default: int = Field(
+        default=40,
+        gt=0,
+        le=100,
+        validation_alias="INQUIRY_PAGE_SIZE_DEFAULT",
+    )
 
     @field_validator("cors_origins", mode="before")
     @classmethod

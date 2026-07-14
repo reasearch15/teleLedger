@@ -21,6 +21,7 @@ const navigation = [
   { href: "/payments", label: "Payments" },
   { href: "/payment-history", label: "Payment History" },
   { href: "/cashout", label: "Cashout" },
+  { href: "/inquiry", label: "Inquiry" },
 ];
 
 const adminNavigation = [

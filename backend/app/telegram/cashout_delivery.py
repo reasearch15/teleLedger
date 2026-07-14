@@ -23,6 +23,7 @@ from app.models.cashout import (
     CashoutTelegramStatus,
 )
 from app.models.user import User
+from app.telegram.inquiry_ingestion import register_cashout_panel_message
 from app.websocket.events import LiveEventType, event_broker
 
 logger = get_logger(__name__)
@@ -202,12 +203,14 @@ async def _record_success(
     telegram_chat_id: int | None = None,
 ) -> None:
     now = datetime.now(UTC)
+    already_sent = False
     async with SessionFactory() as session, session.begin():
         repository = CashoutRepository(session)
         cashout = await repository.get_by_id_for_update(delivery.cashout_id)
         if cashout is None:
             return
         if cashout.telegram_status == CashoutTelegramStatus.SENT:
+            already_sent = True
             if message_id is not None and cashout.telegram_message_id is None:
                 cashout.telegram_message_id = message_id
                 if telegram_chat_id is not None:
@@ -235,42 +238,44 @@ async def _record_success(
                 )
             elif telegram_chat_id is not None and cashout.telegram_chat_id is None:
                 cashout.telegram_chat_id = telegram_chat_id
-            return
-        previous = {
-            "telegram_status": cashout.telegram_status.value,
-            "status": cashout.status.value,
-        }
-        cashout.telegram_status = CashoutTelegramStatus.SENT
-        cashout.telegram_message_id = message_id
-        cashout.telegram_chat_id = telegram_chat_id
-        cashout.telegram_sent_at = now
-        cashout.telegram_next_attempt_at = None
-        cashout.telegram_last_error = None
-        if cashout.status in (
-            CashoutStatus.PENDING,
-            CashoutStatus.FAILED_TO_SEND,
-        ):
-            cashout.status = CashoutStatus.SENT
-        await repository.add_audit(
-            CashoutRequestAudit(
-                cashout_request_id=cashout.id,
-                action=CashoutAuditAction.TELEGRAM_SENT,
-                actor_user_id=None,
-                previous_value=previous,
-                new_value={
-                    "telegram_status": cashout.telegram_status.value,
-                    "status": cashout.status.value,
-                    "telegram_message_id": message_id,
-                    "telegram_chat_id": telegram_chat_id,
-                },
+        else:
+            previous = {
+                "telegram_status": cashout.telegram_status.value,
+                "status": cashout.status.value,
+            }
+            cashout.telegram_status = CashoutTelegramStatus.SENT
+            cashout.telegram_message_id = message_id
+            cashout.telegram_chat_id = telegram_chat_id
+            cashout.telegram_sent_at = now
+            cashout.telegram_next_attempt_at = None
+            cashout.telegram_last_error = None
+            if cashout.status in (
+                CashoutStatus.PENDING,
+                CashoutStatus.FAILED_TO_SEND,
+            ):
+                cashout.status = CashoutStatus.SENT
+            await repository.add_audit(
+                CashoutRequestAudit(
+                    cashout_request_id=cashout.id,
+                    action=CashoutAuditAction.TELEGRAM_SENT,
+                    actor_user_id=None,
+                    previous_value=previous,
+                    new_value={
+                        "telegram_status": cashout.telegram_status.value,
+                        "status": cashout.status.value,
+                        "telegram_message_id": message_id,
+                        "telegram_chat_id": telegram_chat_id,
+                    },
+                )
             )
+
+    if not already_sent:
+        await event_broker.publish(
+            LiveEventType.CASHOUT_SENT,
+            cashout_id=delivery.cashout_id,
+            broadcast=True,
         )
-    await event_broker.publish(
-        LiveEventType.CASHOUT_SENT,
-        cashout_id=delivery.cashout_id,
-        broadcast=True,
-    )
-    if message_id is None:
+    if message_id is None and not already_sent:
         logger.warning(
             "cashout_telegram_message_id_missing",
             extra={
@@ -278,15 +283,22 @@ async def _record_success(
                 "cashout_attempt": delivery.attempt,
             },
         )
-    logger.info(
-        "cashout_telegram_send_succeeded",
-        extra={
-            "cashout_request_id": delivery.cashout_id,
-            "cashout_attempt": delivery.attempt,
-            "telegram_message_id": message_id,
-            "telegram_chat_id": telegram_chat_id,
-        },
-    )
+    if not already_sent:
+        logger.info(
+            "cashout_telegram_send_succeeded",
+            extra={
+                "cashout_request_id": delivery.cashout_id,
+                "cashout_attempt": delivery.attempt,
+                "telegram_message_id": message_id,
+                "telegram_chat_id": telegram_chat_id,
+            },
+        )
+    if message_id is not None and telegram_chat_id is not None:
+        await register_cashout_panel_message(
+            telegram_chat_id=telegram_chat_id,
+            telegram_message_id=message_id,
+            text=format_cashout_message(delivery),
+        )
 
 
 async def _record_failure(

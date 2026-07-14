@@ -100,6 +100,47 @@ export type CashoutStatus =
 
 export type CashoutTelegramStatus = "pending" | "sent" | "failed_to_send";
 
+export type InquiryMessage = {
+  id: number;
+  telegram_chat_id: number;
+  telegram_message_id: number;
+  telegram_sender_id: number | null;
+  sender_display_name: string | null;
+  sender_username: string | null;
+  text: string | null;
+  caption: string | null;
+  message_date: string;
+  edited_at: string | null;
+  direction: "inbound" | "outbound";
+  message_source: "telegram_external" | "inquiry" | "cashout_panel";
+  media_type: "none" | "photo" | "document";
+  media_mime_type: string | null;
+  media_filename: string | null;
+  media_size_bytes: number | null;
+  media_download_status:
+    | "not_applicable"
+    | "pending"
+    | "ready"
+    | "failed";
+  has_media: boolean;
+  sent_by_teleledger_user_id: number | null;
+  sent_by_username: string | null;
+  starts_new_sender_block: boolean;
+  is_edited: boolean;
+};
+
+export type InquiryMessagePage = {
+  items: InquiryMessage[];
+  pagination: {
+    hasMore: boolean;
+    nextCursor: string | null;
+  };
+};
+
+export type SendInquiryResult = {
+  message: InquiryMessage;
+};
+
 export type CashoutStaff = {
   id: number;
   username: string;

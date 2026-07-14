@@ -7,6 +7,13 @@ from app.models.cashout import (
     CashoutStatus,
     CashoutTelegramStatus,
 )
+from app.models.inquiry_message import (
+    InquiryDirection,
+    InquiryMediaDownloadStatus,
+    InquiryMediaType,
+    InquiryMessage,
+    InquiryMessageSource,
+)
 from app.models.ledger_adjustment import LedgerAdjustment, LedgerAdjustmentType
 from app.models.payment_audit import PaymentAuditAction, PaymentAuditLog
 from app.models.payment_dismissal import PaymentEventCoadminDismissal
@@ -27,6 +34,11 @@ __all__ = [
     "CashoutRequestAudit",
     "CashoutStatus",
     "CashoutTelegramStatus",
+    "InquiryDirection",
+    "InquiryMediaDownloadStatus",
+    "InquiryMediaType",
+    "InquiryMessage",
+    "InquiryMessageSource",
     "LedgerAdjustment",
     "LedgerAdjustmentType",
     "PaymentAuditAction",
