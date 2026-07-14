@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import UploadFile
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from telethon.tl.functions.messages import (  # type: ignore[import-untyped]
     SendMediaRequest,
     SendMessageRequest,
@@ -53,8 +54,8 @@ class InquiryNotFoundError(Exception):
 class InquiryService(ApplicationService):
     """Inquiry chat listing, grouping, media access, and outbound send."""
 
-    def __init__(self, session, settings: Settings | None = None) -> None:
-        super().__init__(session)
+    def __init__(self, session: AsyncSession, settings: Settings | None = None) -> None:
+        self._session = session
         self._settings = settings or get_settings()
         self._repository = InquiryMessageRepository(session)
 
