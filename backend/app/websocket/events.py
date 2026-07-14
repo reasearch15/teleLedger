@@ -13,6 +13,15 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
+def event_name_from_payload(payload: str) -> str | None:
+    """Best-effort extraction for live-event diagnostics."""
+    try:
+        event = json.loads(payload).get("event")
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return None
+    return event if isinstance(event, str) else None
+
+
 class LiveEventType(StrEnum):
     """Canonical live-update event names consumed by dashboards."""
 
@@ -69,7 +78,7 @@ class EventBroker:
             await notify_live_event(payload)
             logger.info(
                 "live_event_broadcast",
-                extra={"sse_event": str(event)},
+                extra={"sse_event": str(event), **data},
             )
 
     def ingest(self, payload: str) -> None:

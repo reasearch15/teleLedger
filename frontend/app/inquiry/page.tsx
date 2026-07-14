@@ -12,7 +12,10 @@ import {
 
 import { AppShell } from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
-import { useLiveUpdates } from "@/components/live-updates-provider";
+import {
+  useLiveConnectionStatus,
+  useLiveUpdates,
+} from "@/components/live-updates-provider";
 import { friendlyError } from "@/lib/api-client";
 import { INQUIRY_PAGE_EVENTS } from "@/lib/live-events";
 import {
@@ -32,6 +35,8 @@ type SenderBlock = {
   latestAt: string;
   messages: InquiryMessage[];
 };
+
+const FALLBACK_REFRESH_MS = 12_000;
 
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
@@ -184,6 +189,7 @@ function InquiryMediaPreview({ message }: { message: InquiryMessage }) {
 
 export default function InquiryPage() {
   const { user } = useAuth();
+  const liveConnectionStatus = useLiveConnectionStatus();
   const [messages, setMessages] = useState<InquiryMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -201,6 +207,7 @@ export default function InquiryPage() {
   const messagesRef = useRef<InquiryMessage[]>([]);
   const shouldScrollToBottom = useRef(false);
   const prependMetrics = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const wasHidden = useRef(false);
 
   const blocks = useMemo(() => buildSenderBlocks(messages), [messages]);
 
@@ -274,6 +281,41 @@ export default function InquiryPage() {
 
   useLiveUpdates(INQUIRY_PAGE_EVENTS, () => void loadLatest("refresh"), Boolean(user?.id));
 
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        wasHidden.current = true;
+        return;
+      }
+      if (wasHidden.current) {
+        wasHidden.current = false;
+        void loadLatest("refresh");
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [loadLatest, user?.id]);
+
+  useEffect(() => {
+    if (
+      !user?.id ||
+      liveConnectionStatus === "connected" ||
+      liveConnectionStatus === "connecting"
+    ) {
+      return;
+    }
+    void loadLatest("refresh");
+    const timer = window.setInterval(() => {
+      void loadLatest("refresh");
+    }, FALLBACK_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [liveConnectionStatus, loadLatest, user?.id]);
+
   const loadOlder = async () => {
     if ((!nextCursor && messages.length === 0) || loadingMore || !hasMore) return;
     const element = scrollRef.current;
@@ -334,6 +376,13 @@ export default function InquiryPage() {
     }
   };
 
+  const liveStatusText =
+    liveConnectionStatus === "connected"
+      ? "Live updates connected"
+      : liveConnectionStatus === "offline"
+        ? "Offline — fallback refresh active"
+        : "Reconnecting…";
+
   return (
     <AppShell
       title="Inquiry"
@@ -344,7 +393,7 @@ export default function InquiryPage() {
           <div>
             <p className="text-sm font-bold text-slate-900">Cashout group chat</p>
             <p className="text-xs text-slate-500">
-              {refreshing ? "Refreshing…" : "Live updates enabled"}
+              {refreshing ? "Refreshing…" : liveStatusText}
             </p>
           </div>
           <button

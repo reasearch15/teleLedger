@@ -89,6 +89,14 @@ async def ingest_inquiry_telegram_message(
         message_id = stored.id
 
     media_ready = stored.media_download_status == InquiryMediaDownloadStatus.READY
+    visible = stored.message_source != InquiryMessageSource.CASHOUT_PANEL
+    if visible:
+        await event_broker.publish(
+            LiveEventType.INQUIRY_MESSAGE_CREATED if inserted else LiveEventType.INQUIRY_MESSAGE_UPDATED,
+            inquiry_message_id=message_id,
+            broadcast=True,
+        )
+
     if (
         client is not None
         and parsed.has_downloadable_media
@@ -106,19 +114,17 @@ async def ingest_inquiry_telegram_message(
             settings=settings,
         )
 
-    visible = stored.message_source != InquiryMessageSource.CASHOUT_PANEL
-    if visible:
+    if (
+        visible
+        and media_ready
+        and stored.media_type != InquiryMediaType.NONE
+        and stored.media_download_status == InquiryMediaDownloadStatus.READY
+    ):
         await event_broker.publish(
-            LiveEventType.INQUIRY_MESSAGE_CREATED if inserted else LiveEventType.INQUIRY_MESSAGE_UPDATED,
+            LiveEventType.INQUIRY_MEDIA_READY,
             inquiry_message_id=message_id,
             broadcast=True,
         )
-        if media_ready and stored.media_type != InquiryMediaType.NONE:
-            await event_broker.publish(
-                LiveEventType.INQUIRY_MEDIA_READY,
-                inquiry_message_id=message_id,
-                broadcast=True,
-            )
 
     return InquiryIngestionResult(
         message_id=message_id,

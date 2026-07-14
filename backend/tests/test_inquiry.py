@@ -336,6 +336,45 @@ async def test_successful_photo_download_sets_ready(
 
 
 @pytest.mark.asyncio
+async def test_inquiry_created_event_publishes_after_commit_before_media_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    published: list[tuple[object, dict[str, object]]] = []
+
+    async def publish_spy(event: object, **data: object) -> None:
+        published.append((event, data))
+        if event == inquiry_ingestion.LiveEventType.INQUIRY_MESSAGE_CREATED:
+            assert client.download_media.await_count == 0
+            async with TestSessionFactory() as session:
+                stored = (
+                    await session.execute(
+                        select(InquiryMessage).where(
+                            InquiryMessage.telegram_message_id == 990
+                        )
+                    )
+                ).scalar_one()
+            assert stored.media_download_status == InquiryMediaDownloadStatus.PENDING
+
+    client = AsyncMock()
+    client.download_media = AsyncMock(
+        side_effect=lambda _message, file: Path(file).write_bytes(b"abc")
+    )
+    monkeypatch.setattr(inquiry_ingestion.event_broker, "publish", publish_spy)
+
+    result = await inquiry_ingestion.ingest_inquiry_telegram_message(
+        _telegram_photo_message(message_id=990),
+        client=client,
+    )
+
+    assert result.inserted is True
+    assert [event for event, _data in published] == [
+        inquiry_ingestion.LiveEventType.INQUIRY_MESSAGE_CREATED,
+        inquiry_ingestion.LiveEventType.INQUIRY_MEDIA_READY,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_failed_photo_download_sets_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

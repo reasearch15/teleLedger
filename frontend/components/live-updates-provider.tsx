@@ -24,7 +24,8 @@ export type LiveConnectionStatus =
   | "idle"
   | "connecting"
   | "connected"
-  | "reconnecting";
+  | "reconnecting"
+  | "offline";
 
 type Subscription = {
   id: number;
@@ -127,9 +128,23 @@ export function LiveUpdatesProvider({
     let reconnectAttempt = 0;
     let closed = false;
 
+    const clearReconnectTimer = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+
     const connect = () => {
       if (closed) return;
-      setConnectionStatus(reconnectAttempt === 0 ? "connecting" : "reconnecting");
+      clearReconnectTimer();
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        setConnectionStatus("offline");
+        return;
+      }
+      setConnectionStatus(
+        reconnectAttempt === 0 ? "connecting" : "reconnecting",
+      );
       source = new EventSource(`${environment.apiUrl}/api/events`, {
         withCredentials: true,
       });
@@ -150,7 +165,11 @@ export function LiveUpdatesProvider({
         source?.close();
         source = null;
         if (closed) return;
-        setConnectionStatus("reconnecting");
+        setConnectionStatus(
+          typeof navigator !== "undefined" && !navigator.onLine
+            ? "offline"
+            : "reconnecting",
+        );
         const delay = Math.min(
           MAX_RECONNECT_DELAY_MS,
           1000 * 2 ** reconnectAttempt,
@@ -160,14 +179,30 @@ export function LiveUpdatesProvider({
       };
     };
 
+    const handleOnline = () => {
+      if (closed || source) return;
+      reconnectAttempt = 0;
+      connect();
+    };
+
+    const handleOffline = () => {
+      if (closed) return;
+      source?.close();
+      source = null;
+      clearReconnectTimer();
+      setConnectionStatus("offline");
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
     connect();
 
     return () => {
       closed = true;
       source?.close();
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-      }
+      clearReconnectTimer();
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
       setConnectionStatus("idle");
     };
   }, [dispatchEvent, enabled]);

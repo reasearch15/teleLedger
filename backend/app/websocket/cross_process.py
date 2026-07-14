@@ -9,6 +9,7 @@ from sqlalchemy import text
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.session import engine
+from app.websocket.events import event_name_from_payload
 
 logger = get_logger(__name__)
 LIVE_EVENTS_CHANNEL = "teleledger_live_events"
@@ -44,7 +45,10 @@ async def notify_live_event(payload: str) -> None:
             await connection.commit()
         logger.info(
             "live_event_notify_sent",
-            extra={"payload_bytes": payload_bytes},
+            extra={
+                "payload_bytes": payload_bytes,
+                "sse_event": event_name_from_payload(payload),
+            },
         )
     except Exception:
         logger.exception("live_event_notify_failed")
