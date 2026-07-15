@@ -108,6 +108,11 @@ const ledgerBefore: LedgerResponse = {
     settled_amount: "0.00",
     net: "700.00",
   },
+  calculation_type: "open_balance",
+  timezone: "Asia/Kathmandu",
+  period_start: null,
+  period_end: null,
+  includes_settled: false,
 };
 
 const ledgerAfter: LedgerResponse = {
@@ -237,7 +242,7 @@ describe("AdminLedgerPage", () => {
     render(<AdminLedgerPage />);
 
     await screen.findAllByText("Alex");
-    const staffPanel = screen.getByText("Staff Balances").closest("section");
+    const staffPanel = screen.getByText("Staff Current Open Balance").closest("section");
     expect(staffPanel).not.toBeNull();
     const buttons = within(staffPanel as HTMLElement).getAllByRole("button", {
       name: "Settle / Withdraw",
@@ -253,7 +258,7 @@ describe("AdminLedgerPage", () => {
     render(<AdminLedgerPage />);
 
     await screen.findAllByText("Sarah");
-    const staffPanel = screen.getByText("Staff Balances").closest("section");
+    const staffPanel = screen.getByText("Staff Current Open Balance").closest("section");
     expect(staffPanel).not.toBeNull();
     fireEvent.click(
       within(staffPanel as HTMLElement).getAllByRole("button", {
@@ -272,7 +277,9 @@ describe("AdminLedgerPage", () => {
     render(<AdminLedgerPage />);
 
     await screen.findAllByText("default_coadmin");
-    const coadminPanel = screen.getByText("Coadmin Summary").closest("section");
+    const coadminPanel = screen
+      .getByText("Coadmin Current Open Balance")
+      .closest("section");
     expect(coadminPanel).not.toBeNull();
     fireEvent.click(
       within(coadminPanel as HTMLElement).getAllByRole("button", {

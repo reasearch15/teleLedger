@@ -52,7 +52,7 @@ export function LedgerFilterPanel() {
   return (
     <Panel
       title="Filter Panel"
-      description="Set the reporting window and narrow staff/history views by coadmin."
+      description="Set the Nepal Time (Asia/Kathmandu) reporting window and narrow staff/history views by coadmin."
       error={error}
     >
       {loading ? <PanelLoading message="Loading filters..." /> : null}

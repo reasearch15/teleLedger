@@ -49,6 +49,11 @@ class LedgerResponse(BaseModel):
     items: list[LedgerItemResponse]
     coadmin_summaries: list[CoadminLedgerSummaryResponse] = Field(default_factory=list)
     summary: LedgerSummaryResponse
+    calculation_type: str
+    timezone: str
+    period_start: datetime | None
+    period_end: datetime | None
+    includes_settled: bool
 
 
 class CreateSettlementRequest(BaseModel):

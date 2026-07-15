@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,10 @@ from app.services.base import ApplicationService
 from app.websocket.events import LiveEventType, event_broker
 
 ZERO = Decimal("0.00")
+BUSINESS_TIMEZONE = "Asia/Kathmandu"
+BUSINESS_ZONE = ZoneInfo(BUSINESS_TIMEZONE)
+CALCULATION_OPEN_BALANCE = "open_balance"
+CALCULATION_SHIFT_ACTIVITY = "shift_activity"
 
 
 class LedgerAuthorizationError(Exception):
@@ -49,6 +54,11 @@ class CoadminNotFoundError(Exception):
 class LedgerDateRange:
     start: datetime | None
     end_exclusive: datetime | None
+    calculation_type: str = CALCULATION_OPEN_BALANCE
+    timezone: str = BUSINESS_TIMEZONE
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    includes_settled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +110,11 @@ class LedgerReport:
     items: list[LedgerItem]
     coadmin_summaries: list[CoadminLedgerSummary]
     summary: LedgerSummary
+    calculation_type: str
+    timezone: str
+    period_start: datetime | None
+    period_end: datetime | None
+    includes_settled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +167,11 @@ class LedgerService(ApplicationService):
         actor: User,
     ) -> LedgerReport:
         self._require_admin(actor)
-        date_range = self._date_range(date_from, date_to)
+        date_range = self._date_range(
+            date_from,
+            date_to,
+            shift_activity=date_from is not None or date_to is not None,
+        )
         return await self._ledger_report(date_range)
 
     async def settle_staff(
@@ -786,6 +805,11 @@ class LedgerService(ApplicationService):
                 settled_amount=sum((item.settled_amount for item in items), ZERO),
                 net=sum((item.net for item in items), ZERO),
             ),
+            calculation_type=date_range.calculation_type,
+            timezone=date_range.timezone,
+            period_start=date_range.period_start,
+            period_end=date_range.period_end,
+            includes_settled=date_range.includes_settled,
         )
 
     async def _ledger_item_for_staff(
@@ -854,8 +878,9 @@ class LedgerService(ApplicationService):
         conditions = [
             PaymentEvent.status == PaymentStatus.DONE,
             PaymentEvent.completed_by_staff_id.is_not(None),
-            PaymentEvent.settlement_id.is_(None),
         ]
+        if not date_range.includes_settled:
+            conditions.append(PaymentEvent.settlement_id.is_(None))
         if staff_id is not None:
             conditions.append(PaymentEvent.completed_by_staff_id == staff_id)
         self._apply_completed_at_filter(conditions, PaymentEvent.completed_at, date_range)
@@ -881,8 +906,9 @@ class LedgerService(ApplicationService):
     ) -> dict[int, tuple[Decimal, int]]:
         conditions = [
             CashoutRequest.status == CashoutStatus.COMPLETED,
-            CashoutRequest.settlement_id.is_(None),
         ]
+        if not date_range.includes_settled:
+            conditions.append(CashoutRequest.settlement_id.is_(None))
         if staff_id is not None:
             conditions.append(CashoutRequest.created_by_staff_id == staff_id)
         self._apply_completed_at_filter(conditions, CashoutRequest.completed_at, date_range)
@@ -909,8 +935,9 @@ class LedgerService(ApplicationService):
         conditions = [
             LedgerAdjustment.type == LedgerAdjustmentType.TOTAL_IN_ADJUSTMENT,
             LedgerAdjustment.staff_id.is_not(None),
-            LedgerAdjustment.settlement_id.is_(None),
         ]
+        if not date_range.includes_settled:
+            conditions.append(LedgerAdjustment.settlement_id.is_(None))
         if staff_id is not None:
             conditions.append(LedgerAdjustment.staff_id == staff_id)
         self._apply_completed_at_filter(conditions, LedgerAdjustment.created_at, date_range)
@@ -1168,16 +1195,45 @@ class LedgerService(ApplicationService):
         await self._session.flush()
 
     @staticmethod
-    def _date_range(date_from: date | None, date_to: date | None) -> LedgerDateRange:
+    def _date_range(
+        date_from: date | None,
+        date_to: date | None,
+        *,
+        shift_activity: bool = False,
+    ) -> LedgerDateRange:
         if date_from is not None and date_to is not None and date_from > date_to:
             raise LedgerStateConflictError("date_from must not be after date_to")
-        start = datetime.combine(date_from, time.min, tzinfo=UTC) if date_from is not None else None
-        end_exclusive = (
-            datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=UTC)
+        period_start = (
+            datetime.combine(date_from, time.min, tzinfo=BUSINESS_ZONE)
+            if date_from is not None
+            else None
+        )
+        period_end = (
+            datetime.combine(
+                date_to + timedelta(days=1),
+                time.min,
+                tzinfo=BUSINESS_ZONE,
+            )
             if date_to is not None
             else None
         )
-        return LedgerDateRange(start=start, end_exclusive=end_exclusive)
+        start = period_start.astimezone(UTC) if period_start is not None else None
+        end_exclusive = (
+            period_end.astimezone(UTC) if period_end is not None
+            else None
+        )
+        return LedgerDateRange(
+            start=start,
+            end_exclusive=end_exclusive,
+            calculation_type=(
+                CALCULATION_SHIFT_ACTIVITY
+                if shift_activity
+                else CALCULATION_OPEN_BALANCE
+            ),
+            period_start=period_start,
+            period_end=period_end,
+            includes_settled=shift_activity,
+        )
 
     @staticmethod
     def _parse_history_cursor(cursor: str | None) -> LedgerHistoryCursor | None:

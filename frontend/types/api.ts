@@ -249,6 +249,11 @@ export type LedgerResponse = {
   items: LedgerItem[];
   coadmin_summaries: CoadminLedgerSummary[];
   summary: LedgerSummary;
+  calculation_type: "open_balance" | "shift_activity";
+  timezone: string;
+  period_start: string | null;
+  period_end: string | null;
+  includes_settled: boolean;
 };
 
 export type LedgerAdjustment = {

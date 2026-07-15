@@ -6,7 +6,7 @@ import { useLiveUpdates } from "@/components/live-updates-provider";
 import { friendlyError } from "@/lib/api-client";
 import { LEDGER_PAGE_EVENTS } from "@/lib/live-events";
 import { createCoadminSettlement, getLedger } from "@/services/ledger";
-import type { CoadminLedgerSummary } from "@/types/api";
+import type { CoadminLedgerSummary, LedgerResponse } from "@/types/api";
 
 import {
   EmptyTableRow,
@@ -29,6 +29,10 @@ type PendingSettlement = {
 export function CoadminSummaryPanel() {
   const filters = useLedgerFilters();
   const [items, setItems] = useState<CoadminLedgerSummary[]>([]);
+  const [ledgerMeta, setLedgerMeta] = useState<Pick<
+    LedgerResponse,
+    "calculation_type" | "timezone" | "includes_settled"
+  > | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionId, setActionId] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -41,6 +45,11 @@ export function CoadminSummaryPanel() {
     try {
       const ledger = await getLedger(filters);
       setItems(ledger.coadmin_summaries);
+      setLedgerMeta({
+        calculation_type: ledger.calculation_type,
+        timezone: ledger.timezone,
+        includes_settled: ledger.includes_settled,
+      });
     } catch (loadError) {
       setError(friendlyError(loadError));
     } finally {
@@ -53,6 +62,8 @@ export function CoadminSummaryPanel() {
   }, [refresh]);
 
   useLiveUpdates(LEDGER_PAGE_EVENTS, refresh, true);
+
+  const isShiftActivity = ledgerMeta?.calculation_type === "shift_activity";
 
   const confirmSettlement = async () => {
     if (!pendingSettlement) return;
@@ -71,8 +82,12 @@ export function CoadminSummaryPanel() {
 
   return (
     <Panel
-      title="Coadmin Summary"
-      description="Open balances grouped by coadmin team."
+      title={isShiftActivity ? "Coadmin Daily Activity" : "Coadmin Current Open Balance"}
+      description={
+        isShiftActivity
+          ? `Completed staff activity grouped by coadmin for the selected Nepal Time (${ledgerMeta?.timezone ?? "Asia/Kathmandu"}) window.`
+          : "Unsettled open balances grouped by coadmin team."
+      }
       error={error}
     >
       <TableShell>
@@ -103,6 +118,7 @@ export function CoadminSummaryPanel() {
                 key={item.coadmin_id ?? "default"}
                 item={item}
                 busy={actionId === item.coadmin_id}
+                readOnly={isShiftActivity}
                 onSettle={() => {
                   if (item.coadmin_id == null) return;
                   setPendingSettlement({
@@ -126,6 +142,7 @@ export function CoadminSummaryPanel() {
             key={item.coadmin_id ?? "default"}
             item={item}
             busy={actionId === item.coadmin_id}
+            readOnly={isShiftActivity}
             onSettle={() => {
               if (item.coadmin_id == null) return;
               setPendingSettlement({
@@ -174,13 +191,15 @@ export function CoadminSummaryPanel() {
 const CoadminLedgerRow = memo(function CoadminLedgerRow({
   item,
   busy,
+  readOnly,
   onSettle,
 }: {
   item: CoadminLedgerSummary;
   busy: boolean;
+  readOnly: boolean;
   onSettle: () => void;
 }) {
-  const disabled = Number(item.net) <= 0 || item.coadmin_id == null;
+  const disabled = readOnly || Number(item.net) <= 0 || item.coadmin_id == null;
   return (
     <tr>
       <td className="px-5 py-3 font-semibold text-slate-950">
@@ -213,13 +232,15 @@ const CoadminLedgerRow = memo(function CoadminLedgerRow({
 const CoadminMobileCard = memo(function CoadminMobileCard({
   item,
   busy,
+  readOnly,
   onSettle,
 }: {
   item: CoadminLedgerSummary;
   busy: boolean;
+  readOnly: boolean;
   onSettle: () => void;
 }) {
-  const disabled = Number(item.net) <= 0 || item.coadmin_id == null;
+  const disabled = readOnly || Number(item.net) <= 0 || item.coadmin_id == null;
   return (
     <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
       <dl className="grid gap-2.5">

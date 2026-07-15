@@ -10,7 +10,7 @@ import {
   createTotalInAdjustment,
   getLedger,
 } from "@/services/ledger";
-import type { LedgerItem } from "@/types/api";
+import type { LedgerItem, LedgerResponse } from "@/types/api";
 
 import {
   EmptyTableRow,
@@ -39,6 +39,10 @@ type PendingAdjustment = {
 export function StaffBalancesPanel() {
   const filters = useLedgerFilters();
   const [items, setItems] = useState<LedgerItem[]>([]);
+  const [ledgerMeta, setLedgerMeta] = useState<Pick<
+    LedgerResponse,
+    "calculation_type" | "timezone" | "includes_settled"
+  > | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionId, setActionId] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -55,6 +59,11 @@ export function StaffBalancesPanel() {
     try {
       const ledger = await getLedger(filters);
       setItems(ledger.items);
+      setLedgerMeta({
+        calculation_type: ledger.calculation_type,
+        timezone: ledger.timezone,
+        includes_settled: ledger.includes_settled,
+      });
     } catch (loadError) {
       setError(friendlyError(loadError));
     } finally {
@@ -72,6 +81,8 @@ export function StaffBalancesPanel() {
     if (!filters.coadminId) return items;
     return items.filter((item) => item.coadmin_id === filters.coadminId);
   }, [filters.coadminId, items]);
+
+  const isShiftActivity = ledgerMeta?.calculation_type === "shift_activity";
 
   const confirmSettlement = async () => {
     if (!pendingSettlement) return;
@@ -119,8 +130,12 @@ export function StaffBalancesPanel() {
 
   return (
     <Panel
-      title="Staff Balances"
-      description="Open balances by staff account. Staff calculations are unchanged."
+      title={isShiftActivity ? "Staff Daily Activity" : "Staff Current Open Balance"}
+      description={
+        isShiftActivity
+          ? `Completed activity for the selected Nepal Time (${ledgerMeta?.timezone ?? "Asia/Kathmandu"}) window. Settled transactions are included.`
+          : "Unsettled completed payments, adjustments, and cashouts by staff account."
+      }
       error={error}
     >
       <TableShell>
@@ -151,6 +166,7 @@ export function StaffBalancesPanel() {
                 key={item.staff_id}
                 item={item}
                 busy={actionId === item.staff_id}
+                readOnly={isShiftActivity}
                 onSettle={() =>
                   setPendingSettlement({
                     staffId: item.staff_id,
@@ -174,6 +190,7 @@ export function StaffBalancesPanel() {
             key={item.staff_id}
             item={item}
             busy={actionId === item.staff_id}
+            readOnly={isShiftActivity}
             onSettle={() =>
               setPendingSettlement({
                 staffId: item.staff_id,
@@ -281,15 +298,17 @@ export function StaffBalancesPanel() {
 const StaffLedgerRow = memo(function StaffLedgerRow({
   item,
   busy,
+  readOnly,
   onSettle,
   onEditTotalIn,
 }: {
   item: LedgerItem;
   busy: boolean;
+  readOnly: boolean;
   onSettle: () => void;
   onEditTotalIn: () => void;
 }) {
-  const disabled = Number(item.net) <= 0;
+  const disabled = readOnly || Number(item.net) <= 0;
   return (
     <tr>
       <td className="px-5 py-3 font-semibold">
@@ -305,9 +324,9 @@ const StaffLedgerRow = memo(function StaffLedgerRow({
           <span>{formatMoney(item.total_in)}</span>
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || readOnly}
             onClick={onEditTotalIn}
-            className="rounded-lg border border-slate-300 px-2 py-1 text-xs font-bold text-slate-700"
+            className="rounded-lg border border-slate-300 px-2 py-1 text-xs font-bold text-slate-700 disabled:cursor-not-allowed disabled:text-slate-400"
           >
             Edit
           </button>
@@ -338,15 +357,17 @@ const StaffLedgerRow = memo(function StaffLedgerRow({
 const StaffMobileCard = memo(function StaffMobileCard({
   item,
   busy,
+  readOnly,
   onSettle,
   onEditTotalIn,
 }: {
   item: LedgerItem;
   busy: boolean;
+  readOnly: boolean;
   onSettle: () => void;
   onEditTotalIn: () => void;
 }) {
-  const disabled = Number(item.net) <= 0;
+  const disabled = readOnly || Number(item.net) <= 0;
   return (
     <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
       <dl className="grid gap-2.5">
@@ -376,7 +397,7 @@ const StaffMobileCard = memo(function StaffMobileCard({
         </button>
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || readOnly}
           onClick={onEditTotalIn}
           className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm font-bold text-slate-700 disabled:cursor-not-allowed disabled:text-slate-400"
         >

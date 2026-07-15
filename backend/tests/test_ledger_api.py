@@ -110,6 +110,7 @@ async def seed_done_payment(
     staff_id: int | None = 42,
     amount: str = "100.00",
     completed_at: datetime = datetime(2026, 7, 1, 12, tzinfo=UTC),
+    created_at: datetime | None = None,
 ) -> None:
     async with TestSessionFactory() as session:
         session.add(
@@ -138,6 +139,7 @@ async def seed_done_payment(
                 completed_by_staff_id=staff_id,
                 completed_at=completed_at,
                 parser_confidence=100,
+                created_at=created_at or completed_at,
             )
         )
         await session.commit()
@@ -150,6 +152,7 @@ async def seed_cashout(
     status: CashoutStatus = CashoutStatus.COMPLETED,
     completed_at: datetime = datetime(2026, 7, 2, 12, tzinfo=UTC),
     staff_id: int | None = 42,
+    created_at: datetime | None = None,
 ) -> None:
     async with TestSessionFactory() as session:
         session.add(
@@ -164,7 +167,33 @@ async def seed_cashout(
                 telegram_status=CashoutTelegramStatus.SENT,
                 telegram_random_id=10_000 + cashout_id,
                 created_by_staff_id=staff_id,
+                created_at=created_at or completed_at,
                 completed_at=completed_at if status == CashoutStatus.COMPLETED else None,
+            )
+        )
+        await session.commit()
+
+
+async def seed_adjustment(
+    adjustment_id: int,
+    *,
+    staff_id: int | None = 42,
+    amount_delta: str = "10.00",
+    created_at: datetime = datetime(2026, 7, 1, 12, tzinfo=UTC),
+) -> None:
+    delta = Decimal(amount_delta)
+    async with TestSessionFactory() as session:
+        session.add(
+            LedgerAdjustment(
+                id=adjustment_id,
+                staff_id=staff_id,
+                type=LedgerAdjustmentType.TOTAL_IN_ADJUSTMENT,
+                amount_delta=delta,
+                previous_total_in=Decimal("0.00"),
+                new_total_in=delta,
+                reason="Seeded adjustment",
+                created_by_admin_id=1,
+                created_at=created_at,
             )
         )
         await session.commit()
@@ -612,8 +641,82 @@ async def test_date_filters_and_history_pagination() -> None:
         )
 
     item = ledger.json()["items"][0]
-    assert item["total_in"] == "0.00"
-    assert item["total_out"] == "0.00"
-    assert item["net"] == "0.00"
+    body = ledger.json()
+    assert body["calculation_type"] == "shift_activity"
+    assert body["timezone"] == "Asia/Kathmandu"
+    assert body["includes_settled"] is True
+    assert item["total_in"] == "100.10"
+    assert item["total_out"] == "25.05"
+    assert item["net"] == "75.05"
     assert first_page.json()["has_more"] is False
     assert second_page.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_date_filtered_ledger_uses_nepal_day_boundaries_and_completed_at() -> None:
+    await seed_done_payment(
+        1,
+        amount="10.00",
+        created_at=datetime(2026, 7, 15, 12, tzinfo=UTC),
+        completed_at=datetime(2026, 7, 14, 18, 15, tzinfo=UTC),
+    )
+    await seed_done_payment(
+        2,
+        amount="99.00",
+        completed_at=datetime(2026, 7, 14, 18, 14, 59, tzinfo=UTC),
+    )
+    await seed_done_payment(
+        3,
+        amount="20.00",
+        created_at=datetime(2026, 7, 14, 12, tzinfo=UTC),
+        completed_at=datetime(2026, 7, 15, 18, 14, 59, tzinfo=UTC),
+    )
+    await seed_done_payment(
+        4,
+        amount="88.00",
+        completed_at=datetime(2026, 7, 15, 18, 15, tzinfo=UTC),
+    )
+    await seed_cashout(
+        1,
+        amount="5.00",
+        completed_at=datetime(2026, 7, 15, 1, tzinfo=UTC),
+    )
+    await seed_cashout(
+        2,
+        amount="77.00",
+        status=CashoutStatus.CANCELLED,
+        completed_at=datetime(2026, 7, 15, 1, tzinfo=UTC),
+    )
+    await seed_cashout(
+        3,
+        amount="66.00",
+        status=CashoutStatus.PENDING,
+        completed_at=datetime(2026, 7, 15, 1, tzinfo=UTC),
+    )
+    await seed_adjustment(
+        1,
+        amount_delta="3.00",
+        created_at=datetime(2026, 7, 15, 2, tzinfo=UTC),
+    )
+    await seed_adjustment(
+        2,
+        amount_delta="-2.00",
+        created_at=datetime(2026, 7, 15, 3, tzinfo=UTC),
+    )
+
+    async with api_client_for(ADMIN) as client:
+        response = await client.get(
+            "/api/admin/ledger",
+            params={"date_from": "2026-07-15", "date_to": "2026-07-15"},
+        )
+
+    body = response.json()
+    item = body["items"][0]
+    assert body["calculation_type"] == "shift_activity"
+    assert body["period_start"] == "2026-07-15T00:00:00+05:45"
+    assert body["period_end"] == "2026-07-16T00:00:00+05:45"
+    assert item["total_in"] == "31.00"
+    assert item["total_out"] == "5.00"
+    assert item["net"] == "26.00"
+    assert item["payments_count"] == 2
+    assert item["cashouts_count"] == 1

@@ -309,6 +309,11 @@ def _serialize_ledger(report: LedgerReport) -> LedgerResponse:
             settled_amount=report.summary.settled_amount,
             net=report.summary.net,
         ),
+        calculation_type=report.calculation_type,
+        timezone=report.timezone,
+        period_start=report.period_start,
+        period_end=report.period_end,
+        includes_settled=report.includes_settled,
     )
 
 
