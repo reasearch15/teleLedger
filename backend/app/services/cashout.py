@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -26,6 +27,19 @@ from app.services.base import ApplicationService
 from app.websocket.events import LiveEventType, event_broker
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class CashoutTelegramDeletionTarget:
+    cashout_request_id: int
+    telegram_chat_id: int | None
+    telegram_message_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class CashoutTelegramDeletionResult:
+    status: str
+    error: str | None = None
 
 
 class CashoutNotFoundError(Exception):
@@ -218,29 +232,53 @@ class CashoutService(ApplicationService):
 
     async def cancel(self, cashout_id: int, actor: User) -> CashoutRequest:
         self._require_admin(actor)
+        cancellation_status = "cancelled"
         async with self._session.begin():
             cashout = await self._get_locked(cashout_id)
-            if cashout.status in (CashoutStatus.COMPLETED, CashoutStatus.CANCELLED):
+            if cashout.status == CashoutStatus.COMPLETED:
                 raise CashoutStateConflictError(
                     "This cashout is already completed or cancelled."
                 )
-            previous_status = cashout.status
-            cashout.status = CashoutStatus.CANCELLED
-            cashout.cancelled_at = datetime.now(UTC)
-            cashout.telegram_next_attempt_at = None
-            await self._record_audit(
-                cashout,
-                action=CashoutAuditAction.CANCELLED,
-                actor=actor,
-                previous_value={"status": previous_status.value},
-                new_value={"status": cashout.status.value},
+            delete_target = CashoutTelegramDeletionTarget(
+                cashout_request_id=cashout.id,
+                telegram_chat_id=cashout.telegram_chat_id,
+                telegram_message_id=cashout.telegram_message_id,
             )
+            if cashout.status == CashoutStatus.CANCELLED:
+                cancellation_status = "already_cancelled"
+            else:
+                previous_status = cashout.status
+                cashout.status = CashoutStatus.CANCELLED
+                cashout.cancelled_at = datetime.now(UTC)
+                cashout.telegram_next_attempt_at = None
+                await self._record_audit(
+                    cashout,
+                    action=CashoutAuditAction.CANCELLED,
+                    actor=actor,
+                    previous_value={"status": previous_status.value},
+                    new_value={"status": cashout.status.value},
+                )
             await self._session.refresh(cashout)
-        await event_broker.publish(
-            LiveEventType.CASHOUT_CANCELLED,
-            cashout_id=cashout.id,
+        if cancellation_status == "cancelled":
+            await event_broker.publish(
+                LiveEventType.CASHOUT_CANCELLED,
+                cashout_id=cashout.id,
+            )
+        delete_result = await _delete_cancelled_cashout_telegram_message(
+            delete_target,
+            cancellation_status=cancellation_status,
         )
-        await _delete_cancelled_cashout_telegram_message(cashout)
+        logger.info(
+            "cashout_cancellation_processed",
+            extra={
+                "cashout_request_id": delete_target.cashout_request_id,
+                "telegram_chat_id": delete_target.telegram_chat_id,
+                "telegram_message_id": delete_target.telegram_message_id,
+                "cancellation_status": cancellation_status,
+                "telegram_delete_status": delete_result.status,
+                "error": delete_result.error,
+            },
+        )
         return cashout
 
     async def retry_telegram(
@@ -358,18 +396,25 @@ class CashoutService(ApplicationService):
         return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1) or 1
 
 
-async def _delete_cancelled_cashout_telegram_message(cashout: CashoutRequest) -> None:
-    message_id = cashout.telegram_message_id
-    cashout_group_id: int | None = None
+async def _delete_cancelled_cashout_telegram_message(
+    target: CashoutTelegramDeletionTarget,
+    *,
+    cancellation_status: str,
+) -> CashoutTelegramDeletionResult:
+    message_id = target.telegram_message_id
+    chat_id = target.telegram_chat_id
     if message_id is None:
         logger.info(
             "cashout_telegram_delete_missing",
             extra={
-                "cashout_request_id": cashout.id,
+                "cashout_request_id": target.cashout_request_id,
+                "telegram_chat_id": chat_id,
+                "cancellation_status": cancellation_status,
+                "telegram_delete_status": "no_linked_message",
                 "reason_ignored": "no_telegram_message_id",
             },
         )
-        return
+        return CashoutTelegramDeletionResult("no_linked_message")
 
     try:
         from telethon.tl import types  # type: ignore[import-untyped]
@@ -378,71 +423,96 @@ async def _delete_cancelled_cashout_telegram_message(cashout: CashoutRequest) ->
         from app.telegram.client import create_telegram_client
 
         settings = get_settings()
-        cashout_group_id = settings.telegram_cashout_group_id
-        if cashout_group_id is None:
+        delete_chat_id = chat_id if chat_id is not None else settings.telegram_cashout_group_id
+        if delete_chat_id is None:
+            error = "missing_cashout_group_id"
             logger.warning(
                 "cashout_telegram_delete_failed",
                 extra={
-                    "cashout_request_id": cashout.id,
+                    "cashout_request_id": target.cashout_request_id,
                     "telegram_message_id": message_id,
-                    "reason_ignored": "missing_cashout_group_id",
+                    "telegram_chat_id": chat_id,
+                    "cancellation_status": cancellation_status,
+                    "telegram_delete_status": "failed",
+                    "reason_ignored": error,
+                    "error": error,
                 },
             )
-            return
+            return CashoutTelegramDeletionResult("failed", error)
 
         client = create_telegram_client(settings)
         await client.connect()
         try:
             if not await client.is_user_authorized():
+                error = "telegram_session_unauthorized"
                 logger.warning(
                     "cashout_telegram_delete_failed",
                     extra={
-                        "cashout_request_id": cashout.id,
+                        "cashout_request_id": target.cashout_request_id,
                         "telegram_message_id": message_id,
-                        "telegram_chat_id": cashout_group_id,
-                        "reason_ignored": "telegram_session_unauthorized",
+                        "telegram_chat_id": delete_chat_id,
+                        "cancellation_status": cancellation_status,
+                        "telegram_delete_status": "failed",
+                        "reason_ignored": error,
+                        "error": error,
                     },
                 )
-                return
-            message = await client.get_messages(cashout_group_id, ids=message_id)
+                return CashoutTelegramDeletionResult("failed", error)
+            message = await client.get_messages(delete_chat_id, ids=message_id)
             if message is None or isinstance(message, types.MessageEmpty):
                 logger.info(
                     "cashout_telegram_delete_missing",
                     extra={
-                        "cashout_request_id": cashout.id,
+                        "cashout_request_id": target.cashout_request_id,
                         "telegram_message_id": message_id,
-                        "telegram_chat_id": cashout_group_id,
+                        "telegram_chat_id": delete_chat_id,
+                        "cancellation_status": cancellation_status,
+                        "telegram_delete_status": "already_missing",
                     },
                 )
-                return
-            await client.delete_messages(cashout_group_id, [message_id], revoke=True)
+                await _mark_cancelled_cashout_inquiry_deleted(delete_chat_id, message_id)
+                return CashoutTelegramDeletionResult("already_missing")
+            await client.delete_messages(delete_chat_id, [message_id], revoke=True)
         finally:
             await client.disconnect()
-    except Exception:
+    except Exception as error:
         logger.exception(
             "cashout_telegram_delete_failed",
             extra={
-                "cashout_request_id": cashout.id,
+                "cashout_request_id": target.cashout_request_id,
                 "telegram_message_id": message_id,
-                "telegram_chat_id": cashout_group_id,
+                "telegram_chat_id": chat_id,
+                "cancellation_status": cancellation_status,
+                "telegram_delete_status": "failed",
+                "error": str(error),
             },
         )
-        return
+        return CashoutTelegramDeletionResult("failed", str(error))
 
     logger.info(
         "cashout_telegram_delete_succeeded",
         extra={
-            "cashout_request_id": cashout.id,
+            "cashout_request_id": target.cashout_request_id,
             "telegram_message_id": message_id,
-            "telegram_chat_id": cashout_group_id,
+            "telegram_chat_id": delete_chat_id,
+            "cancellation_status": cancellation_status,
+            "telegram_delete_status": "deleted",
         },
     )
+    await _mark_cancelled_cashout_inquiry_deleted(delete_chat_id, message_id)
+    return CashoutTelegramDeletionResult("deleted")
+
+
+async def _mark_cancelled_cashout_inquiry_deleted(
+    telegram_chat_id: int,
+    telegram_message_id: int,
+) -> None:
     from app.telegram.inquiry_ingestion import mark_inquiry_message_deleted
     from app.telegram.peer_ids import normalize_telegram_chat_id
 
-    normalized_chat_id = normalize_telegram_chat_id(cashout_group_id)
+    normalized_chat_id = normalize_telegram_chat_id(telegram_chat_id)
     if normalized_chat_id is not None:
         await mark_inquiry_message_deleted(
             telegram_chat_id=normalized_chat_id,
-            telegram_message_id=message_id,
+            telegram_message_id=telegram_message_id,
         )

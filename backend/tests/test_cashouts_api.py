@@ -28,6 +28,7 @@ from app.models.cashout import (
     CashoutTelegramStatus,
 )
 from app.models.user import User, UserRole
+from app.services import cashout as cashout_service
 
 test_engine = create_async_engine(
     "sqlite+aiosqlite://",
@@ -144,6 +145,8 @@ async def seed_cashout(
     tag: str,
     status: CashoutStatus = CashoutStatus.PENDING,
     telegram_status: CashoutTelegramStatus = CashoutTelegramStatus.PENDING,
+    telegram_chat_id: int | None = None,
+    telegram_message_id: int | None = None,
     created_at: datetime | None = None,
 ) -> None:
     timestamp = created_at or datetime(2026, 7, 6, tzinfo=UTC) + timedelta(
@@ -160,6 +163,8 @@ async def seed_cashout(
                 notes=None,
                 status=status,
                 telegram_status=telegram_status,
+                telegram_chat_id=telegram_chat_id,
+                telegram_message_id=telegram_message_id,
                 telegram_random_id=10_000 + cashout_id,
                 created_by_staff_id=staff_id,
                 created_at=timestamp,
@@ -298,6 +303,96 @@ async def test_admin_can_filter_search_complete_cancel_and_retry(
         "telegram_retry",
         "cancelled",
     ]
+
+
+@pytest.mark.asyncio
+async def test_admin_cancelling_multiple_cashouts_deletes_each_linked_message(
+    admin_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deleted_targets: list[cashout_service.CashoutTelegramDeletionTarget] = []
+
+    async def delete_spy(
+        target: cashout_service.CashoutTelegramDeletionTarget,
+        *,
+        cancellation_status: str,
+    ) -> cashout_service.CashoutTelegramDeletionResult:
+        assert cancellation_status == "cancelled"
+        deleted_targets.append(target)
+        return cashout_service.CashoutTelegramDeletionResult("deleted")
+
+    monkeypatch.setattr(
+        cashout_service,
+        "_delete_cancelled_cashout_telegram_message",
+        delete_spy,
+    )
+    for cashout_id, message_id in ((41, 9001), (42, 9002), (43, 9003)):
+        await seed_cashout(
+            cashout_id,
+            staff_id=42,
+            tag=f"BULK-{cashout_id}",
+            status=CashoutStatus.SENT,
+            telegram_status=CashoutTelegramStatus.SENT,
+            telegram_chat_id=-1001234567890,
+            telegram_message_id=message_id,
+        )
+
+    responses = [
+        await admin_client.post(f"/api/cashouts/{cashout_id}/cancel")
+        for cashout_id in (41, 42, 43)
+    ]
+
+    assert [response.status_code for response in responses] == [200, 200, 200]
+    assert [
+        (
+            target.cashout_request_id,
+            target.telegram_chat_id,
+            target.telegram_message_id,
+        )
+        for target in deleted_targets
+    ] == [
+        (41, -1001234567890, 9001),
+        (42, -1001234567890, 9002),
+        (43, -1001234567890, 9003),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cashout_cancel_is_retry_safe(
+    admin_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deletion_statuses: list[str] = []
+
+    async def delete_spy(
+        target: cashout_service.CashoutTelegramDeletionTarget,
+        *,
+        cancellation_status: str,
+    ) -> cashout_service.CashoutTelegramDeletionResult:
+        assert target.cashout_request_id == 44
+        deletion_statuses.append(cancellation_status)
+        return cashout_service.CashoutTelegramDeletionResult("already_missing")
+
+    monkeypatch.setattr(
+        cashout_service,
+        "_delete_cancelled_cashout_telegram_message",
+        delete_spy,
+    )
+    await seed_cashout(
+        44,
+        staff_id=42,
+        tag="RETRY-CANCEL",
+        status=CashoutStatus.CANCELLED,
+        telegram_status=CashoutTelegramStatus.SENT,
+        telegram_chat_id=-1001234567890,
+        telegram_message_id=9004,
+    )
+
+    response = await admin_client.post("/api/cashouts/44/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert deletion_statuses == ["already_cancelled"]
 
 
 @pytest.mark.asyncio

@@ -208,6 +208,9 @@ export default function InquiryPage() {
   const shouldScrollToBottom = useRef(false);
   const prependMetrics = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const wasHidden = useRef(false);
+  const fallbackRefreshActive =
+    Boolean(user?.id) &&
+    (liveConnectionStatus === "reconnecting" || liveConnectionStatus === "offline");
 
   const blocks = useMemo(() => buildSenderBlocks(messages), [messages]);
 
@@ -302,19 +305,13 @@ export default function InquiryPage() {
   }, [loadLatest, user?.id]);
 
   useEffect(() => {
-    if (
-      !user?.id ||
-      liveConnectionStatus === "connected" ||
-      liveConnectionStatus === "connecting"
-    ) {
-      return;
-    }
+    if (!fallbackRefreshActive) return;
     void loadLatest("refresh");
     const timer = window.setInterval(() => {
       void loadLatest("refresh");
     }, FALLBACK_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [liveConnectionStatus, loadLatest, user?.id]);
+  }, [fallbackRefreshActive, loadLatest]);
 
   const loadOlder = async () => {
     if ((!nextCursor && messages.length === 0) || loadingMore || !hasMore) return;
