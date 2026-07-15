@@ -12,7 +12,11 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import close_database, warm_database_pool
 from app.websocket.cross_process import run_live_event_listener
-from app.websocket.events import event_broker, event_name_from_payload
+from app.websocket.events import (
+    event_broker,
+    event_log_extra_from_payload,
+    event_name_from_payload,
+)
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -21,6 +25,9 @@ logger = get_logger(__name__)
 
 async def _forward_cross_process_live_event(payload: str) -> None:
     event_broker.ingest(payload)
+    extra = event_log_extra_from_payload(payload)
+    if str(extra.get("sse_event", "")).startswith("inquiry_"):
+        logger.info("inquiry_cross_process_event_received", extra=extra)
     logger.info(
         "live_event_received_from_listener",
         extra={"sse_event": event_name_from_payload(payload)},

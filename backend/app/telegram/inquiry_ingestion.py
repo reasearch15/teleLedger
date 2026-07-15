@@ -54,7 +54,8 @@ async def ingest_inquiry_telegram_message(
     idempotency_key: str | None = None,
 ) -> InquiryIngestionResult:
     """Persist one cashout-group Telegram message for the Inquiry panel."""
-    parsed = await parse_inquiry_telegram_message(message)
+    telegram_message = _telethon_message(message)
+    parsed = await parse_inquiry_telegram_message(telegram_message)
     settings = get_settings()
     source = forced_source or await resolve_message_source(
         telegram_chat_id=parsed.telegram_chat_id,
@@ -90,11 +91,31 @@ async def ingest_inquiry_telegram_message(
 
     media_ready = stored.media_download_status == InquiryMediaDownloadStatus.READY
     visible = stored.message_source != InquiryMessageSource.CASHOUT_PANEL
+    event_payload = _inquiry_event_payload(stored)
+    media_download_attempted = False
+    logger.info(
+        "inquiry_message_committed",
+        extra={
+            **event_payload,
+            "message_source": stored.message_source.value,
+            "media_type": stored.media_type.value,
+            "media_download_status": stored.media_download_status.value,
+        },
+    )
     if visible:
+        event = (
+            LiveEventType.INQUIRY_MESSAGE_CREATED
+            if inserted
+            else LiveEventType.INQUIRY_MESSAGE_UPDATED
+        )
         await event_broker.publish(
-            LiveEventType.INQUIRY_MESSAGE_CREATED if inserted else LiveEventType.INQUIRY_MESSAGE_UPDATED,
-            inquiry_message_id=message_id,
+            event,
+            **event_payload,
             broadcast=True,
+        )
+        logger.info(
+            "inquiry_event_published",
+            extra={**event_payload, "sse_event": event.value},
         )
 
     if (
@@ -107,9 +128,10 @@ async def ingest_inquiry_telegram_message(
             InquiryMediaDownloadStatus.NOT_APPLICABLE,
         )
     ):
+        media_download_attempted = True
         media_ready = await download_inquiry_media(
             client,
-            message,
+            telegram_message,
             stored,
             settings=settings,
         )
@@ -117,13 +139,21 @@ async def ingest_inquiry_telegram_message(
     if (
         visible
         and media_ready
+        and not media_download_attempted
         and stored.media_type != InquiryMediaType.NONE
         and stored.media_download_status == InquiryMediaDownloadStatus.READY
     ):
         await event_broker.publish(
             LiveEventType.INQUIRY_MEDIA_READY,
-            inquiry_message_id=message_id,
+            **event_payload,
             broadcast=True,
+        )
+        logger.info(
+            "inquiry_event_published",
+            extra={
+                **event_payload,
+                "sse_event": LiveEventType.INQUIRY_MEDIA_READY.value,
+            },
         )
 
     return InquiryIngestionResult(
@@ -184,6 +214,8 @@ async def mark_inquiry_message_deleted(
     await event_broker.publish(
         LiveEventType.INQUIRY_MESSAGE_UPDATED,
         inquiry_message_id=message_id,
+        telegram_message_id=telegram_message_id,
+        telegram_chat_id=telegram_chat_id,
         broadcast=True,
     )
     logger.info(
@@ -302,13 +334,17 @@ async def download_inquiry_media(
     await event_broker.publish(
         LiveEventType.INQUIRY_MEDIA_READY,
         inquiry_message_id=row.id,
+        telegram_message_id=row.telegram_message_id,
+        telegram_chat_id=row.telegram_chat_id,
+        direction=row.direction.value,
         broadcast=True,
     )
     logger.info(
-        "inquiry_media_download_succeeded",
+        "inquiry_media_download_ready",
         extra={
             **log_extra,
             "media_storage_key": storage_key,
+            "media_download_status": InquiryMediaDownloadStatus.READY.value,
             "saved_file_path": str(destination),
             "media_size_bytes": size_bytes,
             "media_hash": media_hash,
@@ -316,6 +352,23 @@ async def download_inquiry_media(
         },
     )
     return True
+
+
+def _telethon_message(message: Any) -> Any:
+    """Return a Telethon Message when a live event wrapper was passed in."""
+    inner_message = getattr(message, "message", None)
+    if inner_message is not None and not isinstance(inner_message, str):
+        return inner_message
+    return message
+
+
+def _inquiry_event_payload(message: InquiryMessage) -> dict[str, object]:
+    return {
+        "inquiry_message_id": message.id,
+        "telegram_message_id": message.telegram_message_id,
+        "telegram_chat_id": message.telegram_chat_id,
+        "direction": message.direction.value,
+    }
 
 
 async def retry_pending_inquiry_media(

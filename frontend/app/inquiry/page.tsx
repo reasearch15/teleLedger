@@ -13,6 +13,7 @@ import {
 import { AppShell } from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
 import {
+  INQUIRY_LIVE_EVENT,
   useLiveConnectionStatus,
   useLiveUpdates,
 } from "@/components/live-updates-provider";
@@ -208,6 +209,7 @@ export default function InquiryPage() {
   const shouldScrollToBottom = useRef(false);
   const prependMetrics = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const wasHidden = useRef(false);
+  const liveRefreshTimer = useRef<number | null>(null);
   const fallbackRefreshActive =
     Boolean(user?.id) &&
     (liveConnectionStatus === "reconnecting" || liveConnectionStatus === "offline");
@@ -236,7 +238,16 @@ export default function InquiryPage() {
       } else {
         const currentIds = new Set(messagesRef.current.map((message) => message.id));
         const addedNewerMessage = loadedItems.some((message) => !currentIds.has(message.id));
-        setMessages((current) => mergeMessages(current, loadedItems));
+        setMessages((current) => {
+          const merged = mergeMessages(current, loadedItems);
+          console.info("inquiry_state_updated", {
+            loaded_count: loadedItems.length,
+            previous_count: current.length,
+            next_count: merged.length,
+            added_newer_message: addedNewerMessage,
+          });
+          return merged;
+        });
         if (addedNewerMessage && wasNearBottom) {
           shouldScrollToBottom.current = true;
         }
@@ -282,7 +293,44 @@ export default function InquiryPage() {
     }
   };
 
-  useLiveUpdates(INQUIRY_PAGE_EVENTS, () => void loadLatest("refresh"), Boolean(user?.id));
+  const scheduleLiveRefresh = useCallback(
+    (events: unknown[]) => {
+      console.info("inquiry_live_update_refresh", {
+        events: events.map((event) =>
+          typeof event === "object" && event !== null && "event" in event
+            ? (event as { event: unknown }).event
+            : "unknown",
+        ),
+      });
+      if (liveRefreshTimer.current) {
+        window.clearTimeout(liveRefreshTimer.current);
+      }
+      liveRefreshTimer.current = window.setTimeout(() => {
+        liveRefreshTimer.current = null;
+        void loadLatest("refresh");
+      }, 100);
+    },
+    [loadLatest],
+  );
+
+  useLiveUpdates(INQUIRY_PAGE_EVENTS, scheduleLiveRefresh, Boolean(user?.id));
+
+  useEffect(() => {
+    if (!user?.id) return;
+    const handleInquiryLiveEvent = (event: Event) => {
+      scheduleLiveRefresh([
+        event instanceof CustomEvent ? event.detail : { event: "inquiry_event" },
+      ]);
+    };
+    window.addEventListener(INQUIRY_LIVE_EVENT, handleInquiryLiveEvent);
+    return () => {
+      window.removeEventListener(INQUIRY_LIVE_EVENT, handleInquiryLiveEvent);
+      if (liveRefreshTimer.current) {
+        window.clearTimeout(liveRefreshTimer.current);
+        liveRefreshTimer.current = null;
+      }
+    };
+  }, [scheduleLiveRefresh, user?.id]);
 
   useEffect(() => {
     if (!user?.id) return;

@@ -46,6 +46,7 @@ const LiveUpdatesContext = createContext<LiveUpdatesContextValue | null>(null);
 
 const REFETCH_DEBOUNCE_MS = 300;
 const MAX_RECONNECT_DELAY_MS = 30_000;
+export const INQUIRY_LIVE_EVENT = "teleledger:inquiry-live-event";
 
 function createDebouncedCallback(
   callback: (events: LiveEvent[]) => void,
@@ -157,6 +158,18 @@ export function LiveUpdatesProvider({
       source.onmessage = (message) => {
         const event = parseLiveEvent(message.data);
         if (event) {
+          if (event.event.startsWith("inquiry_")) {
+            console.info("inquiry_event_received", {
+              event: event.event,
+              inquiry_message_id: event.inquiry_message_id,
+              telegram_message_id: event.telegram_message_id,
+              telegram_chat_id: event.telegram_chat_id,
+              direction: event.direction,
+            });
+            window.dispatchEvent(
+              new CustomEvent(INQUIRY_LIVE_EVENT, { detail: event }),
+            );
+          }
           dispatchEvent(event);
         }
       };

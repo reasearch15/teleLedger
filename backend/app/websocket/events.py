@@ -22,6 +22,28 @@ def event_name_from_payload(payload: str) -> str | None:
     return event if isinstance(event, str) else None
 
 
+def event_log_extra_from_payload(payload: str) -> dict[str, Any]:
+    """Extract non-sensitive live-event IDs for structured diagnostics."""
+    try:
+        parsed = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    extra: dict[str, Any] = {}
+    for field in (
+        "event",
+        "inquiry_message_id",
+        "telegram_message_id",
+        "telegram_chat_id",
+        "direction",
+    ):
+        value = parsed.get(field)
+        if value is not None:
+            extra["sse_event" if field == "event" else field] = value
+    return extra
+
+
 class LiveEventType(StrEnum):
     """Canonical live-update event names consumed by dashboards."""
 
@@ -83,6 +105,7 @@ class EventBroker:
 
     def ingest(self, payload: str) -> None:
         """Fan out one serialized payload to in-process SSE subscribers."""
+        subscriber_count = len(self._subscribers)
         for queue in tuple(self._subscribers):
             if queue.full():
                 try:
@@ -90,6 +113,16 @@ class EventBroker:
                 except asyncio.QueueEmpty:
                     pass
             queue.put_nowait(payload)
+        extra = event_log_extra_from_payload(payload)
+        if extra.get("sse_event") in {
+            LiveEventType.INQUIRY_MESSAGE_CREATED.value,
+            LiveEventType.INQUIRY_MESSAGE_UPDATED.value,
+            LiveEventType.INQUIRY_MEDIA_READY.value,
+        }:
+            logger.info(
+                "inquiry_event_ingested",
+                extra={**extra, "subscriber_count": subscriber_count},
+            )
 
 
 event_broker = EventBroker()
