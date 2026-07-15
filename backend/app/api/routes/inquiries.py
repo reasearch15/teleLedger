@@ -35,7 +35,7 @@ async def list_inquiry_messages(
     settings = get_settings()
     page_limit = limit or settings.inquiry_page_size_default
     try:
-        messages, pagination, usernames = await run_read_with_retry(
+        messages, pagination, usernames, aliases = await run_read_with_retry(
             lambda read_session: InquiryService(read_session).list_messages(
                 actor=current_user,
                 limit=page_limit,
@@ -62,7 +62,12 @@ async def list_inquiry_messages(
             _serialize_message(
                 message,
                 starts_new_sender_block=block_flags.get(message.id, True),
-                sent_by_username=usernames.get(message.sent_by_teleledger_user_id or -1),
+                sent_by_name=usernames.get(message.sent_by_teleledger_user_id or -1),
+                sender_alias=(
+                    aliases.get(message.telegram_sender_id)
+                    if message.telegram_sender_id is not None
+                    else None
+                ),
             )
             for message in messages
         ],
@@ -110,7 +115,11 @@ async def send_inquiry_message(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
     return SendInquiryMessageResponse(
-        message=_serialize_message(message, starts_new_sender_block=True),
+        message=_serialize_message(
+            message,
+            starts_new_sender_block=True,
+            sent_by_name=current_user.username,
+        ),
     )
 
 
@@ -158,15 +167,12 @@ def _serialize_message(
     message: InquiryMessage,
     *,
     starts_new_sender_block: bool,
-    sent_by_username: str | None = None,
+    sent_by_name: str | None = None,
+    sender_alias: str | None = None,
 ) -> InquiryMessageResponse:
     return InquiryMessageResponse(
         id=message.id,
-        telegram_chat_id=message.telegram_chat_id,
-        telegram_message_id=message.telegram_message_id,
-        telegram_sender_id=message.telegram_sender_id,
-        sender_display_name=message.sender_display_name,
-        sender_username=message.sender_username,
+        sender_alias=sender_alias,
         text=message.text,
         caption=message.caption,
         message_date=message.message_date,
@@ -180,12 +186,10 @@ def _serialize_message(
         media_download_status=message.media_download_status.value,
         media_error=message.media_error,
         has_media=message.media_type.value != "none",
-        telegram_grouped_id=message.telegram_grouped_id,
-        reply_to_telegram_message_id=message.reply_to_telegram_message_id,
-        forward_from_display_name=message.forward_from_display_name,
+        has_album=message.telegram_grouped_id is not None,
+        is_reply=message.reply_to_telegram_message_id is not None,
         is_deleted=message.is_deleted,
-        sent_by_teleledger_user_id=message.sent_by_teleledger_user_id,
-        sent_by_username=sent_by_username,
+        sent_by_name=sent_by_name,
         starts_new_sender_block=starts_new_sender_block,
         is_edited=message.edited_at is not None,
     )

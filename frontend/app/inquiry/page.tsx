@@ -30,9 +30,8 @@ import type { InquiryMessage } from "@/types/api";
 type SenderBlock = {
   key: string;
   senderName: string;
-  senderUsername: string | null;
   isOutbound: boolean;
-  sentByUsername: string | null;
+  sentByName: string | null;
   latestAt: string;
   messages: InquiryMessage[];
 };
@@ -57,23 +56,20 @@ function initialsFor(name: string): string {
 
 function displaySender(message: InquiryMessage): {
   name: string;
-  username: string | null;
   isOutbound: boolean;
-  sentByUsername: string | null;
+  sentByName: string | null;
 } {
   if (message.message_source === "inquiry") {
     return {
       name: "TeleLedger",
-      username: null,
       isOutbound: true,
-      sentByUsername: message.sent_by_username,
+      sentByName: message.sent_by_name ?? "Staff",
     };
   }
   return {
-    name: message.sender_display_name ?? "Unknown sender",
-    username: message.sender_username,
+    name: message.sender_alias ?? "Customer",
     isOutbound: message.direction === "outbound",
-    sentByUsername: null,
+    sentByName: null,
   };
 }
 
@@ -86,14 +82,13 @@ function buildSenderBlocks(messages: InquiryMessage[]): SenderBlock[] {
       message.starts_new_sender_block ||
       previous === undefined ||
       previous.key !==
-        `${sender.isOutbound ? "outbound" : "inbound"}:${sender.name}:${sender.username ?? ""}`
+        `${sender.isOutbound ? "outbound" : "inbound"}:${sender.name}`
     ) {
       blocks.push({
         key: `${message.id}`,
         senderName: sender.name,
-        senderUsername: sender.username,
         isOutbound: sender.isOutbound,
-        sentByUsername: sender.sentByUsername,
+        sentByName: sender.sentByName,
         latestAt: message.message_date,
         messages: [message],
       });
@@ -431,12 +426,12 @@ export default function InquiryPage() {
   return (
     <AppShell
       title="Inquiry"
-      description="Chat with the cashout Telegram group. Workflow messages sent through the Cashout panel stay hidden here."
+      description="Manage customer inquiry conversations. Workflow messages sent through the Cashout panel stay hidden here."
     >
       <section className="flex h-[clamp(28rem,calc(100dvh-15rem),52rem)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-4 py-3">
           <div>
-            <p className="text-sm font-bold text-slate-900">Cashout group chat</p>
+            <p className="text-sm font-bold text-slate-900">Inquiry conversation</p>
             <p className="text-xs text-slate-500">
               {refreshing ? "Refreshing…" : liveStatusText}
             </p>
@@ -504,14 +499,9 @@ export default function InquiryPage() {
                   <p className="truncate text-sm font-bold text-slate-900">
                     {block.senderName}
                   </p>
-                  {block.senderUsername ? (
-                    <p className="truncate text-xs text-slate-500">
-                      @{block.senderUsername}
-                    </p>
-                  ) : null}
-                  {block.sentByUsername ? (
+                  {block.sentByName ? (
                     <p className="truncate text-xs text-indigo-700">
-                      Sent by {block.sentByUsername}
+                      Sent by {block.sentByName}
                     </p>
                   ) : null}
                   <p className="text-xs text-slate-500">{formatTime(block.latestAt)}</p>
@@ -524,19 +514,14 @@ export default function InquiryPage() {
                     key={message.id}
                     className={`space-y-2 ${message.is_deleted ? "opacity-60" : ""}`}
                   >
-                    {message.forward_from_display_name ? (
+                    {message.is_reply ? (
                       <p className="text-xs font-semibold text-slate-500">
-                        Forwarded from {message.forward_from_display_name}
-                      </p>
-                    ) : null}
-                    {message.reply_to_telegram_message_id ? (
-                      <p className="text-xs font-semibold text-slate-500">
-                        Replying to message #{message.reply_to_telegram_message_id}
+                        Replying to an earlier message
                       </p>
                     ) : null}
                     {message.is_deleted ? (
                       <p className="text-xs font-semibold text-red-600">
-                        This message was deleted in Telegram.
+                        This message was deleted.
                       </p>
                     ) : null}
                     {message.text ? (
@@ -550,9 +535,9 @@ export default function InquiryPage() {
                       </p>
                     ) : null}
                     {message.has_media ? <InquiryMediaPreview message={message} /> : null}
-                    {message.telegram_grouped_id ? (
+                    {message.has_album ? (
                       <p className="text-[11px] font-semibold text-slate-400">
-                        Album item (group {message.telegram_grouped_id})
+                        Album item
                       </p>
                     ) : null}
                     {message.caption ? (
@@ -599,7 +584,7 @@ export default function InquiryPage() {
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 rows={3}
-                placeholder="Write a message to the cashout group…"
+                placeholder="Write an inquiry message..."
                 className="w-full resize-y rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none ring-indigo-500 focus:ring-2"
               />
               <div className="flex flex-wrap items-center gap-2">
@@ -635,7 +620,7 @@ export default function InquiryPage() {
               disabled={sending}
               className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white disabled:opacity-50"
             >
-              {sending ? "Sending…" : "Send"}
+              {sending ? "Sending..." : "Send Inquiry"}
             </button>
           </div>
         </form>

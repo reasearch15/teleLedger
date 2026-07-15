@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -13,7 +14,48 @@ from app.models.inquiry_message import (
     InquiryMediaType,
     InquiryMessage,
     InquiryMessageSource,
+    InquirySenderAlias,
 )
+
+_ALIAS_ADJECTIVES = (
+    "Amber",
+    "Blue",
+    "Bright",
+    "Calm",
+    "Copper",
+    "Crimson",
+    "Emerald",
+    "Golden",
+    "Hidden",
+    "Ivory",
+    "Misty",
+    "Quiet",
+    "Ruby",
+    "Silver",
+    "Soft",
+    "Sunny",
+    "Velvet",
+    "Warm",
+)
+_ALIAS_NOUNS = (
+    "Cedar",
+    "Falcon",
+    "Fox",
+    "Harbor",
+    "Lantern",
+    "Maple",
+    "Meadow",
+    "Moon",
+    "Owl",
+    "Panda",
+    "Pine",
+    "River",
+    "Sparrow",
+    "Stone",
+    "Summit",
+    "Willow",
+)
+_MAX_ALIAS_ATTEMPTS = len(_ALIAS_ADJECTIVES) * len(_ALIAS_NOUNS) + 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +233,53 @@ class InquiryMessageRepository(BaseRepository[InquiryMessage]):
         )
         return list((await self._session.execute(statement)).scalars().all())
 
+    async def aliases_for_messages(
+        self,
+        messages: list[InquiryMessage],
+    ) -> dict[int, str]:
+        """Return stable aliases for external sender IDs in the supplied rows."""
+        sender_ids = {
+            int(message.telegram_sender_id)
+            for message in messages
+            if message.telegram_sender_id is not None
+            and message.message_source == InquiryMessageSource.TELEGRAM_EXTERNAL
+        }
+        aliases: dict[int, str] = {}
+        for sender_id in sorted(sender_ids):
+            aliases[sender_id] = await self.ensure_sender_alias(sender_id)
+        return aliases
+
+    async def ensure_sender_alias(self, telegram_sender_id: int) -> str:
+        """Get or create the stable public alias for one external sender."""
+        existing = await self._get_sender_alias(telegram_sender_id)
+        if existing is not None:
+            return existing
+
+        for _attempt in range(_MAX_ALIAS_ATTEMPTS):
+            candidate = _random_alias()
+            try:
+                async with self._session.begin_nested():
+                    self._session.add(
+                        InquirySenderAlias(
+                            telegram_sender_id=telegram_sender_id,
+                            alias=candidate,
+                        )
+                    )
+                    await self._session.flush()
+                return candidate
+            except IntegrityError:
+                existing = await self._get_sender_alias(telegram_sender_id)
+                if existing is not None:
+                    return existing
+
+        raise RuntimeError("Unable to allocate a unique inquiry sender alias")
+
+    async def _get_sender_alias(self, telegram_sender_id: int) -> str | None:
+        statement = select(InquirySenderAlias.alias).where(
+            InquirySenderAlias.telegram_sender_id == telegram_sender_id
+        )
+        return (await self._session.execute(statement)).scalar_one_or_none()
+
     @staticmethod
     def _apply_update(
         existing: InquiryMessage,
@@ -239,3 +328,12 @@ class InquiryMessageRepository(BaseRepository[InquiryMessage]):
             existing.sent_by_teleledger_user_id = incoming.sent_by_teleledger_user_id
         if incoming.idempotency_key is not None:
             existing.idempotency_key = incoming.idempotency_key
+
+
+def _random_alias() -> str:
+    adjective = secrets.choice(_ALIAS_ADJECTIVES)
+    noun = secrets.choice(_ALIAS_NOUNS)
+    alias = f"{adjective} {noun}"
+    if secrets.randbelow(12) == 0:
+        alias = f"{alias} {secrets.randbelow(90) + 10}"
+    return alias

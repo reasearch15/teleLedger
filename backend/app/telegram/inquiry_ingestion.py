@@ -87,11 +87,17 @@ async def ingest_inquiry_telegram_message(
             preserve_source=True,
             preserve_outbound_metadata=True,
         )
+        sender_alias = (
+            await repository.ensure_sender_alias(stored.telegram_sender_id)
+            if stored.telegram_sender_id is not None
+            and stored.message_source == InquiryMessageSource.TELEGRAM_EXTERNAL
+            else None
+        )
         message_id = stored.id
 
     media_ready = stored.media_download_status == InquiryMediaDownloadStatus.READY
     visible = stored.message_source != InquiryMessageSource.CASHOUT_PANEL
-    event_payload = _inquiry_event_payload(stored)
+    event_payload = _inquiry_event_payload(stored, sender_alias=sender_alias)
     media_download_attempted = False
     logger.info(
         "inquiry_message_committed",
@@ -214,8 +220,6 @@ async def mark_inquiry_message_deleted(
     await event_broker.publish(
         LiveEventType.INQUIRY_MESSAGE_UPDATED,
         inquiry_message_id=message_id,
-        telegram_message_id=telegram_message_id,
-        telegram_chat_id=telegram_chat_id,
         broadcast=True,
     )
     logger.info(
@@ -334,8 +338,6 @@ async def download_inquiry_media(
     await event_broker.publish(
         LiveEventType.INQUIRY_MEDIA_READY,
         inquiry_message_id=row.id,
-        telegram_message_id=row.telegram_message_id,
-        telegram_chat_id=row.telegram_chat_id,
         direction=row.direction.value,
         broadcast=True,
     )
@@ -362,13 +364,18 @@ def _telethon_message(message: Any) -> Any:
     return message
 
 
-def _inquiry_event_payload(message: InquiryMessage) -> dict[str, object]:
-    return {
+def _inquiry_event_payload(
+    message: InquiryMessage,
+    *,
+    sender_alias: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "inquiry_message_id": message.id,
-        "telegram_message_id": message.telegram_message_id,
-        "telegram_chat_id": message.telegram_chat_id,
         "direction": message.direction.value,
     }
+    if sender_alias is not None:
+        payload["sender_alias"] = sender_alias
+    return payload
 
 
 async def retry_pending_inquiry_media(

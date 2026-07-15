@@ -29,8 +29,7 @@ export type LiveEvent = {
   payment_id?: number;
   cashout_id?: number;
   inquiry_message_id?: number;
-  telegram_message_id?: number;
-  telegram_chat_id?: number;
+  sender_alias?: string;
   direction?: string;
   settlement_id?: number;
   user_id?: number;

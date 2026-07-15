@@ -102,11 +102,7 @@ export type CashoutTelegramStatus = "pending" | "sent" | "failed_to_send";
 
 export type InquiryMessage = {
   id: number;
-  telegram_chat_id: number;
-  telegram_message_id: number;
-  telegram_sender_id: number | null;
-  sender_display_name: string | null;
-  sender_username: string | null;
+  sender_alias: string | null;
   text: string | null;
   caption: string | null;
   message_date: string;
@@ -124,12 +120,10 @@ export type InquiryMessage = {
     | "failed";
   media_error: string | null;
   has_media: boolean;
-  telegram_grouped_id: number | null;
-  reply_to_telegram_message_id: number | null;
-  forward_from_display_name: string | null;
+  has_album: boolean;
+  is_reply: boolean;
   is_deleted: boolean;
-  sent_by_teleledger_user_id: number | null;
-  sent_by_username: string | null;
+  sent_by_name: string | null;
   starts_new_sender_block: boolean;
   is_edited: boolean;
 };

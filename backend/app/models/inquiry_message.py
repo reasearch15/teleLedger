@@ -170,3 +170,31 @@ class InquiryMessage(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class InquirySenderAlias(Base):
+    """Stable public alias for one external inquiry sender."""
+
+    __tablename__ = "inquiry_sender_aliases"
+    __table_args__ = (
+        UniqueConstraint(
+            "telegram_sender_id",
+            name="uq_inquiry_sender_aliases_telegram_sender_id",
+        ),
+        UniqueConstraint(
+            "alias",
+            name="uq_inquiry_sender_aliases_alias",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+    )
+    telegram_sender_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    alias: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

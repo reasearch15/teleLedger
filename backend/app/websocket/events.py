@@ -34,8 +34,6 @@ def event_log_extra_from_payload(payload: str) -> dict[str, Any]:
     for field in (
         "event",
         "inquiry_message_id",
-        "telegram_message_id",
-        "telegram_chat_id",
         "direction",
     ):
         value = parsed.get(field)

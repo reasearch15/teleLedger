@@ -19,6 +19,13 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_session
 from app.main import app
+from app.models.inquiry_message import (
+    InquiryDirection,
+    InquiryMediaDownloadStatus,
+    InquiryMediaType,
+    InquiryMessage,
+    InquiryMessageSource,
+)
 from app.models.user import User, UserRole
 
 test_engine = create_async_engine(
@@ -96,3 +103,51 @@ async def test_list_inquiry_messages_as_staff(
     assert payload["items"] == []
     assert payload["pagination"]["hasMore"] is False
     assert payload["pagination"]["nextCursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_inquiry_api_returns_alias_without_real_identity(
+    staff_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "telegram_cashout_group_id", -1001)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
+    async with TestSessionFactory() as session, session.begin():
+        session.add(
+            InquiryMessage(
+                telegram_chat_id=-1001,
+                telegram_message_id=77,
+                telegram_sender_id=987654321,
+                sender_display_name="Real First Real Last",
+                sender_username="real_username",
+                text="Need help",
+                message_date=now,
+                received_at=now,
+                direction=InquiryDirection.INBOUND,
+                message_source=InquiryMessageSource.TELEGRAM_EXTERNAL,
+                media_type=InquiryMediaType.NONE,
+                media_download_status=InquiryMediaDownloadStatus.NOT_APPLICABLE,
+                forward_from_display_name="Forwarded Real Name",
+                reply_to_telegram_message_id=55,
+            )
+        )
+
+    response = await staff_client.get("/api/inquiries/messages")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["sender_alias"]
+    assert item["sender_alias"] not in {
+        "Real First Real Last",
+        "real_username",
+        "987654321",
+    }
+    assert item["text"] == "Need help"
+    assert item["is_reply"] is True
+    assert "telegram_chat_id" not in item
+    assert "telegram_message_id" not in item
+    assert "telegram_sender_id" not in item
+    assert "sender_display_name" not in item
+    assert "sender_username" not in item
+    assert "forward_from_display_name" not in item

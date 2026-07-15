@@ -8,11 +8,7 @@ from pydantic import BaseModel, Field
 
 class InquiryMessageResponse(BaseModel):
     id: int
-    telegram_chat_id: int
-    telegram_message_id: int
-    telegram_sender_id: int | None
-    sender_display_name: str | None
-    sender_username: str | None
+    sender_alias: str | None
     text: str | None
     caption: str | None
     message_date: datetime
@@ -26,12 +22,10 @@ class InquiryMessageResponse(BaseModel):
     media_download_status: str
     media_error: str | None
     has_media: bool
-    telegram_grouped_id: int | None
-    reply_to_telegram_message_id: int | None
-    forward_from_display_name: str | None
+    has_album: bool
+    is_reply: bool
     is_deleted: bool
-    sent_by_teleledger_user_id: int | None
-    sent_by_username: str | None
+    sent_by_name: str | None
     starts_new_sender_block: bool
     is_edited: bool
 

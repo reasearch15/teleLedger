@@ -162,8 +162,7 @@ export function LiveUpdatesProvider({
             console.info("inquiry_event_received", {
               event: event.event,
               inquiry_message_id: event.inquiry_message_id,
-              telegram_message_id: event.telegram_message_id,
-              telegram_chat_id: event.telegram_chat_id,
+              sender_alias: event.sender_alias,
               direction: event.direction,
             });
             window.dispatchEvent(

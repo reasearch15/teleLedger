@@ -13,6 +13,7 @@ from app.models.inquiry_message import (
     InquiryMediaType,
     InquiryMessage,
     InquiryMessageSource,
+    InquirySenderAlias,
 )
 from app.models.ledger_adjustment import LedgerAdjustment, LedgerAdjustmentType
 from app.models.payment_audit import PaymentAuditAction, PaymentAuditLog
@@ -39,6 +40,7 @@ __all__ = [
     "InquiryMediaType",
     "InquiryMessage",
     "InquiryMessageSource",
+    "InquirySenderAlias",
     "LedgerAdjustment",
     "LedgerAdjustmentType",
     "PaymentAuditAction",

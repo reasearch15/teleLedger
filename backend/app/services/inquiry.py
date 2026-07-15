@@ -58,7 +58,12 @@ class InquiryService(ApplicationService):
         limit: int,
         cursor: str | None,
         before_message_id: int | None = None,
-    ) -> tuple[list[InquiryMessage], dict[str, bool | str | None], dict[int, str | None]]:
+    ) -> tuple[
+        list[InquiryMessage],
+        dict[str, bool | str | None],
+        dict[int, str | None],
+        dict[int, str],
+    ]:
         self._require_viewer(actor)
         chat_id = self._cashout_chat_id()
         before_cursor = await self._cursor_from_before_message_id(
@@ -73,11 +78,14 @@ class InquiryService(ApplicationService):
             before_cursor=before_cursor,
         )
         chronological = list(reversed(page.items))
+        aliases = await self._repository.aliases_for_messages(chronological)
+        if aliases:
+            await self._session.commit()
         usernames = await self._sender_usernames(chronological)
         return chronological, {
             "hasMore": page.has_more,
             "nextCursor": page.next_cursor,
-        }, usernames
+        }, usernames, aliases
 
     async def compute_sender_block_flags(
         self,
@@ -134,7 +142,7 @@ class InquiryService(ApplicationService):
         try:
             await client.connect()
             if not await client.is_user_authorized():
-                raise InquiryValidationError("Telegram session is not authorized")
+                raise InquiryValidationError("Inquiry delivery session is not authorized")
             entity = await client.get_entity(chat_id)
             sent_message = await self._send_via_telegram(
                 client,
@@ -179,10 +187,10 @@ class InquiryService(ApplicationService):
     def _cashout_chat_id(self) -> int:
         chat_id = self._settings.telegram_cashout_group_id
         if chat_id is None:
-            raise InquiryValidationError("Cashout Telegram group is not configured")
+            raise InquiryValidationError("Inquiry delivery channel is not configured")
         normalized = normalize_telegram_chat_id(chat_id)
         if normalized is None:
-            raise InquiryValidationError("Cashout Telegram group is not configured")
+            raise InquiryValidationError("Inquiry delivery channel is not configured")
         return normalized
 
     @staticmethod

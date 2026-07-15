@@ -214,7 +214,19 @@ async def test_hidden_cashout_panel_does_not_break_sender_grouping() -> None:
             previous=previous,
             current=current,
         )
-        assert broken is False
+    assert broken is False
+
+
+@pytest.mark.asyncio
+async def test_new_sender_receives_stable_alias() -> None:
+    async with TestSessionFactory() as session, session.begin():
+        repository = InquiryMessageRepository(session)
+        first_alias = await repository.ensure_sender_alias(101)
+        second_alias = await repository.ensure_sender_alias(101)
+        other_alias = await repository.ensure_sender_alias(202)
+
+    assert first_alias == second_alias
+    assert first_alias != other_alias
 
 
 @pytest.mark.asyncio
