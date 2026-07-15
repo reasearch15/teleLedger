@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -30,6 +30,7 @@ from app.models.staff_settlement import (
 )
 from app.models.telegram_message import TelegramMessage
 from app.models.user import User, UserRole
+from app.services.ledger import LedgerService
 
 test_engine = create_async_engine(
     "sqlite+aiosqlite://",
@@ -111,6 +112,8 @@ async def seed_done_payment(
     amount: str = "100.00",
     completed_at: datetime = datetime(2026, 7, 1, 12, tzinfo=UTC),
     created_at: datetime | None = None,
+    settlement_id: int | None = None,
+    status: PaymentStatus = PaymentStatus.DONE,
 ) -> None:
     async with TestSessionFactory() as session:
         session.add(
@@ -135,9 +138,10 @@ async def seed_done_payment(
                 total_in=None,
                 total_out=None,
                 raw_text="payment",
-                status=PaymentStatus.DONE,
+                status=status,
                 completed_by_staff_id=staff_id,
-                completed_at=completed_at,
+                completed_at=completed_at if status == PaymentStatus.DONE else None,
+                settlement_id=settlement_id,
                 parser_confidence=100,
                 created_at=created_at or completed_at,
             )
@@ -153,6 +157,7 @@ async def seed_cashout(
     completed_at: datetime = datetime(2026, 7, 2, 12, tzinfo=UTC),
     staff_id: int | None = 42,
     created_at: datetime | None = None,
+    settlement_id: int | None = None,
 ) -> None:
     async with TestSessionFactory() as session:
         session.add(
@@ -169,6 +174,7 @@ async def seed_cashout(
                 created_by_staff_id=staff_id,
                 created_at=created_at or completed_at,
                 completed_at=completed_at if status == CashoutStatus.COMPLETED else None,
+                settlement_id=settlement_id,
             )
         )
         await session.commit()
@@ -180,6 +186,7 @@ async def seed_adjustment(
     staff_id: int | None = 42,
     amount_delta: str = "10.00",
     created_at: datetime = datetime(2026, 7, 1, 12, tzinfo=UTC),
+    settlement_id: int | None = None,
 ) -> None:
     delta = Decimal(amount_delta)
     async with TestSessionFactory() as session:
@@ -194,6 +201,7 @@ async def seed_adjustment(
                 reason="Seeded adjustment",
                 created_by_admin_id=1,
                 created_at=created_at,
+                settlement_id=settlement_id,
             )
         )
         await session.commit()
@@ -642,7 +650,7 @@ async def test_date_filters_and_history_pagination() -> None:
 
     item = ledger.json()["items"][0]
     body = ledger.json()
-    assert body["calculation_type"] == "shift_activity"
+    assert body["calculation_type"] == "custom_range"
     assert body["timezone"] == "Asia/Kathmandu"
     assert body["includes_settled"] is True
     assert item["total_in"] == "100.10"
@@ -712,7 +720,7 @@ async def test_date_filtered_ledger_uses_nepal_day_boundaries_and_completed_at()
 
     body = response.json()
     item = body["items"][0]
-    assert body["calculation_type"] == "shift_activity"
+    assert body["calculation_type"] == "custom_range"
     assert body["period_start"] == "2026-07-15T00:00:00+05:45"
     assert body["period_end"] == "2026-07-16T00:00:00+05:45"
     assert item["total_in"] == "31.00"
@@ -720,3 +728,109 @@ async def test_date_filtered_ledger_uses_nepal_day_boundaries_and_completed_at()
     assert item["net"] == "26.00"
     assert item["payments_count"] == 2
     assert item["cashouts_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_last_12_hours_uses_one_captured_timestamp_and_includes_settled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_now = datetime(2026, 7, 15, 18, 15, tzinfo=UTC)
+    monkeypatch.setattr(
+        LedgerService,
+        "_now_utc",
+        staticmethod(lambda: fixed_now),
+    )
+    async with TestSessionFactory() as session:
+        session.add(
+            StaffSettlement(
+                id=99,
+                staff_id=42,
+                amount=Decimal("1.00"),
+                status=StaffSettlementStatus.DONE,
+                completed_by_admin_id=1,
+                completed_at=fixed_now,
+                created_by_admin_id=1,
+            )
+        )
+        await session.commit()
+
+    await seed_done_payment(
+        1,
+        amount="10.00",
+        completed_at=fixed_now - timedelta(hours=11, minutes=59),
+    )
+    await seed_done_payment(
+        2,
+        amount="20.00",
+        completed_at=fixed_now - timedelta(hours=12),
+        settlement_id=99,
+    )
+    await seed_done_payment(
+        3,
+        amount="99.00",
+        completed_at=fixed_now - timedelta(hours=12, seconds=1),
+    )
+    await seed_done_payment(
+        4,
+        amount="88.00",
+        completed_at=fixed_now - timedelta(hours=1),
+        status=PaymentStatus.PENDING,
+    )
+    await seed_cashout(
+        1,
+        amount="5.00",
+        completed_at=fixed_now - timedelta(hours=1),
+        settlement_id=99,
+    )
+    await seed_cashout(
+        2,
+        amount="66.00",
+        created_at=fixed_now - timedelta(hours=1),
+        completed_at=fixed_now - timedelta(hours=13),
+    )
+    await seed_cashout(
+        3,
+        amount="77.00",
+        status=CashoutStatus.CANCELLED,
+        completed_at=fixed_now - timedelta(hours=1),
+    )
+    await seed_adjustment(
+        1,
+        amount_delta="-2.00",
+        created_at=fixed_now - timedelta(minutes=30),
+        settlement_id=99,
+    )
+
+    async with api_client_for(ADMIN) as client:
+        ledger = await client.get(
+            "/api/admin/ledger",
+            params={"calculation_mode": "last_12_hours"},
+        )
+        drilldown = await client.get(
+            "/api/admin/ledger/drilldown",
+            params={"calculation_mode": "last_12_hours", "staff_id": "42"},
+        )
+
+    body = ledger.json()
+    item = body["items"][0]
+    assert body["calculation_type"] == "rolling_activity"
+    assert body["rolling_hours"] == 12
+    assert body["timezone"] == "Asia/Kathmandu"
+    assert body["period_start"] == "2026-07-15T12:00:00+05:45"
+    assert body["period_end"] == "2026-07-16T00:00:00+05:45"
+    assert body["generated_at"] == "2026-07-15T18:15:00Z"
+    assert body["includes_settled"] is True
+    assert item["payment_total"] == "30.00"
+    assert item["adjustment_total"] == "-2.00"
+    assert item["total_in"] == "28.00"
+    assert item["total_out"] == "5.00"
+    assert item["net"] == "23.00"
+    assert item["payments_count"] == 2
+    assert item["cashouts_count"] == 1
+    drilldown_body = drilldown.json()
+    assert [payment["id"] for payment in drilldown_body["payments"]] == [2, 1]
+    assert drilldown_body["payments"][0]["settlement_id"] == 99
+    assert [cashout["id"] for cashout in drilldown_body["cashouts"]] == [1]
+    assert drilldown_body["cashouts"][0]["settlement_id"] == 99
+    assert [adjustment["id"] for adjustment in drilldown_body["adjustments"]] == [1]
+    assert drilldown_body["adjustments"][0]["settlement_id"] == 99

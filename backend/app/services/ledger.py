@@ -27,7 +27,12 @@ ZERO = Decimal("0.00")
 BUSINESS_TIMEZONE = "Asia/Kathmandu"
 BUSINESS_ZONE = ZoneInfo(BUSINESS_TIMEZONE)
 CALCULATION_OPEN_BALANCE = "open_balance"
-CALCULATION_SHIFT_ACTIVITY = "shift_activity"
+CALCULATION_CUSTOM_RANGE = "custom_range"
+CALCULATION_ROLLING_ACTIVITY = "rolling_activity"
+REQUEST_MODE_OPEN_BALANCE = "open_balance"
+REQUEST_MODE_LAST_12_HOURS = "last_12_hours"
+REQUEST_MODE_CUSTOM_RANGE = "custom_range"
+ROLLING_HOURS = 12
 
 
 class LedgerAuthorizationError(Exception):
@@ -59,6 +64,8 @@ class LedgerDateRange:
     period_start: datetime | None = None
     period_end: datetime | None = None
     includes_settled: bool = False
+    rolling_hours: int | None = None
+    generated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +81,8 @@ class LedgerItem:
     staff_color: str
     coadmin_id: int | None
     coadmin_username: str
+    payment_total: Decimal
+    adjustment_total: Decimal
     total_in: Decimal
     total_out: Decimal
     settled_amount: Decimal
@@ -85,6 +94,8 @@ class LedgerItem:
 
 @dataclass(frozen=True, slots=True)
 class LedgerSummary:
+    payment_total: Decimal
+    adjustment_total: Decimal
     total_in: Decimal
     total_out: Decimal
     settled_amount: Decimal
@@ -95,6 +106,8 @@ class LedgerSummary:
 class CoadminLedgerSummary:
     coadmin_id: int | None
     coadmin_username: str
+    payment_total: Decimal
+    adjustment_total: Decimal
     total_in: Decimal
     total_out: Decimal
     settled_amount: Decimal
@@ -115,6 +128,60 @@ class LedgerReport:
     period_start: datetime | None
     period_end: datetime | None
     includes_settled: bool
+    rolling_hours: int | None
+    generated_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerPaymentDrilldownItem:
+    id: int
+    staff_id: int
+    staff_username: str
+    amount: Decimal
+    status: PaymentStatus
+    completed_at: datetime | None
+    settlement_id: int | None
+    recipient_tag: str
+    payment_sender_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerCashoutDrilldownItem:
+    id: int
+    staff_id: int
+    staff_username: str
+    amount: Decimal
+    status: CashoutStatus
+    created_at: datetime
+    completed_at: datetime | None
+    settlement_id: int | None
+    player_tag: str
+    request_number: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerAdjustmentDrilldownItem:
+    id: int
+    staff_id: int
+    staff_username: str
+    amount_delta: Decimal
+    created_at: datetime
+    settlement_id: int | None
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerDrilldownReport:
+    payments: list[LedgerPaymentDrilldownItem]
+    cashouts: list[LedgerCashoutDrilldownItem]
+    adjustments: list[LedgerAdjustmentDrilldownItem]
+    calculation_type: str
+    timezone: str
+    period_start: datetime | None
+    period_end: datetime | None
+    includes_settled: bool
+    rolling_hours: int | None
+    generated_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,15 +231,48 @@ class LedgerService(ApplicationService):
         *,
         date_from: date | None,
         date_to: date | None,
+        calculation_mode: str | None = None,
         actor: User,
     ) -> LedgerReport:
         self._require_admin(actor)
-        date_range = self._date_range(
-            date_from,
-            date_to,
-            shift_activity=date_from is not None or date_to is not None,
+        date_range = self._report_date_range(
+            date_from=date_from,
+            date_to=date_to,
+            calculation_mode=calculation_mode,
         )
         return await self._ledger_report(date_range)
+
+    async def get_ledger_drilldown(
+        self,
+        *,
+        date_from: date | None,
+        date_to: date | None,
+        calculation_mode: str | None = None,
+        staff_id: int | None = None,
+        actor: User,
+    ) -> LedgerDrilldownReport:
+        self._require_admin(actor)
+        date_range = self._report_date_range(
+            date_from=date_from,
+            date_to=date_to,
+            calculation_mode=calculation_mode,
+        )
+        if date_range.calculation_type == CALCULATION_OPEN_BALANCE:
+            raise LedgerStateConflictError(
+                "Drilldown is available for historical activity modes."
+            )
+        return LedgerDrilldownReport(
+            payments=await self._payment_drilldown(date_range, staff_id),
+            cashouts=await self._cashout_drilldown(date_range, staff_id),
+            adjustments=await self._adjustment_drilldown(date_range, staff_id),
+            calculation_type=date_range.calculation_type,
+            timezone=date_range.timezone,
+            period_start=date_range.period_start,
+            period_end=date_range.period_end,
+            includes_settled=date_range.includes_settled,
+            rolling_hours=date_range.rolling_hours,
+            generated_at=date_range.generated_at,
+        )
 
     async def settle_staff(
         self,
@@ -776,7 +876,9 @@ class LedgerService(ApplicationService):
         items: list[LedgerItem] = []
         for staff_id, username, color, coadmin_id, coadmin_username in staff_rows:
             total_in, payments_count = payment_totals.get(staff_id, (ZERO, 0))
-            total_in += adjustment_totals.get(staff_id, ZERO)
+            payment_total = total_in
+            adjustment_total = adjustment_totals.get(staff_id, ZERO)
+            total_in += adjustment_total
             total_out, cashouts_count = cashout_totals.get(staff_id, (ZERO, 0))
             settlements_count = settlement_counts.get(staff_id, 0)
             items.append(
@@ -786,6 +888,8 @@ class LedgerService(ApplicationService):
                     staff_color=color,
                     coadmin_id=coadmin_id,
                     coadmin_username=coadmin_username or "default_coadmin",
+                    payment_total=payment_total,
+                    adjustment_total=adjustment_total,
                     total_in=total_in,
                     total_out=total_out,
                     settled_amount=ZERO,
@@ -800,6 +904,8 @@ class LedgerService(ApplicationService):
             items=items,
             coadmin_summaries=coadmin_summaries,
             summary=LedgerSummary(
+                payment_total=sum((item.payment_total for item in items), ZERO),
+                adjustment_total=sum((item.adjustment_total for item in items), ZERO),
                 total_in=sum((item.total_in for item in items), ZERO),
                 total_out=sum((item.total_out for item in items), ZERO),
                 settled_amount=sum((item.settled_amount for item in items), ZERO),
@@ -810,6 +916,8 @@ class LedgerService(ApplicationService):
             period_start=date_range.period_start,
             period_end=date_range.period_end,
             includes_settled=date_range.includes_settled,
+            rolling_hours=date_range.rolling_hours,
+            generated_at=date_range.generated_at,
         )
 
     async def _ledger_item_for_staff(
@@ -823,7 +931,9 @@ class LedgerService(ApplicationService):
         cashout_totals = await self._cashout_totals(date_range, staff.id)
         settlement_counts = await self._settlement_counts(date_range, staff.id)
         total_in, payments_count = payment_totals.get(staff.id, (ZERO, 0))
-        total_in += adjustment_totals.get(staff.id, ZERO)
+        payment_total = total_in
+        adjustment_total = adjustment_totals.get(staff.id, ZERO)
+        total_in += adjustment_total
         total_out, cashouts_count = cashout_totals.get(staff.id, (ZERO, 0))
         settlements_count = settlement_counts.get(staff.id, 0)
         return LedgerItem(
@@ -832,6 +942,8 @@ class LedgerService(ApplicationService):
             staff_color=staff.staff_color,
             coadmin_id=staff.coadmin_id,
             coadmin_username=coadmin_username or "default_coadmin",
+            payment_total=payment_total,
+            adjustment_total=adjustment_total,
             total_in=total_in,
             total_out=total_out,
             settled_amount=ZERO,
@@ -850,6 +962,11 @@ class LedgerService(ApplicationService):
             CoadminLedgerSummary(
                 coadmin_id=coadmin_id,
                 coadmin_username=coadmin_username,
+                payment_total=sum((item.payment_total for item in coadmin_items), ZERO),
+                adjustment_total=sum(
+                    (item.adjustment_total for item in coadmin_items),
+                    ZERO,
+                ),
                 total_in=sum((item.total_in for item in coadmin_items), ZERO),
                 total_out=sum((item.total_out for item in coadmin_items), ZERO),
                 settled_amount=sum(
@@ -954,6 +1071,145 @@ class LedgerService(ApplicationService):
             for row in (await self._session.execute(statement)).all()
             if row[0] is not None
         }
+
+    async def _payment_drilldown(
+        self,
+        date_range: LedgerDateRange,
+        staff_id: int | None,
+    ) -> list[LedgerPaymentDrilldownItem]:
+        staff = aliased(User, name="payment_drilldown_staff")
+        conditions = [
+            PaymentEvent.status == PaymentStatus.DONE,
+            PaymentEvent.completed_by_staff_id.is_not(None),
+        ]
+        if staff_id is not None:
+            conditions.append(PaymentEvent.completed_by_staff_id == staff_id)
+        self._apply_completed_at_filter(conditions, PaymentEvent.completed_at, date_range)
+        rows = (
+            await self._session.execute(
+                select(
+                    PaymentEvent.id,
+                    PaymentEvent.completed_by_staff_id,
+                    staff.username,
+                    PaymentEvent.amount,
+                    PaymentEvent.status,
+                    PaymentEvent.completed_at,
+                    PaymentEvent.settlement_id,
+                    PaymentEvent.recipient_tag,
+                    PaymentEvent.payment_sender_name,
+                )
+                .join(staff, PaymentEvent.completed_by_staff_id == staff.id)
+                .where(*conditions)
+                .order_by(PaymentEvent.completed_at.asc(), PaymentEvent.id.asc())
+            )
+        ).all()
+        return [
+            LedgerPaymentDrilldownItem(
+                id=int(row[0]),
+                staff_id=int(row[1]),
+                staff_username=row[2],
+                amount=self._money(row[3]),
+                status=row[4],
+                completed_at=row[5],
+                settlement_id=row[6],
+                recipient_tag=row[7],
+                payment_sender_name=row[8],
+            )
+            for row in rows
+            if row[1] is not None
+        ]
+
+    async def _cashout_drilldown(
+        self,
+        date_range: LedgerDateRange,
+        staff_id: int | None,
+    ) -> list[LedgerCashoutDrilldownItem]:
+        staff = aliased(User, name="cashout_drilldown_staff")
+        conditions = [
+            CashoutRequest.status == CashoutStatus.COMPLETED,
+            CashoutRequest.created_by_staff_id.is_not(None),
+        ]
+        if staff_id is not None:
+            conditions.append(CashoutRequest.created_by_staff_id == staff_id)
+        self._apply_completed_at_filter(conditions, CashoutRequest.completed_at, date_range)
+        rows = (
+            await self._session.execute(
+                select(
+                    CashoutRequest.id,
+                    CashoutRequest.created_by_staff_id,
+                    staff.username,
+                    CashoutRequest.amount,
+                    CashoutRequest.status,
+                    CashoutRequest.created_at,
+                    CashoutRequest.completed_at,
+                    CashoutRequest.settlement_id,
+                    CashoutRequest.player_tag,
+                    CashoutRequest.request_number,
+                )
+                .join(staff, CashoutRequest.created_by_staff_id == staff.id)
+                .where(*conditions)
+                .order_by(CashoutRequest.completed_at.asc(), CashoutRequest.id.asc())
+            )
+        ).all()
+        return [
+            LedgerCashoutDrilldownItem(
+                id=int(row[0]),
+                staff_id=int(row[1]),
+                staff_username=row[2],
+                amount=self._money(row[3]),
+                status=row[4],
+                created_at=row[5],
+                completed_at=row[6],
+                settlement_id=row[7],
+                player_tag=row[8],
+                request_number=row[9],
+            )
+            for row in rows
+            if row[1] is not None
+        ]
+
+    async def _adjustment_drilldown(
+        self,
+        date_range: LedgerDateRange,
+        staff_id: int | None,
+    ) -> list[LedgerAdjustmentDrilldownItem]:
+        staff = aliased(User, name="adjustment_drilldown_staff")
+        conditions = [
+            LedgerAdjustment.type == LedgerAdjustmentType.TOTAL_IN_ADJUSTMENT,
+            LedgerAdjustment.staff_id.is_not(None),
+        ]
+        if staff_id is not None:
+            conditions.append(LedgerAdjustment.staff_id == staff_id)
+        self._apply_completed_at_filter(conditions, LedgerAdjustment.created_at, date_range)
+        rows = (
+            await self._session.execute(
+                select(
+                    LedgerAdjustment.id,
+                    LedgerAdjustment.staff_id,
+                    staff.username,
+                    LedgerAdjustment.amount_delta,
+                    LedgerAdjustment.created_at,
+                    LedgerAdjustment.settlement_id,
+                    LedgerAdjustment.reason,
+                )
+                .join(staff, LedgerAdjustment.staff_id == staff.id)
+                .where(*conditions)
+                .order_by(LedgerAdjustment.created_at.asc(), LedgerAdjustment.id.asc())
+            )
+        ).all()
+        return [
+            LedgerAdjustmentDrilldownItem(
+                id=int(row[0]),
+                staff_id=int(row[1]),
+                staff_username=row[2],
+                amount_delta=self._money(row[3]),
+                created_at=row[4],
+                settlement_id=row[5],
+                reason=row[6],
+            )
+            for row in rows
+            if row[1] is not None
+        ]
 
     async def _settlement_counts(
         self,
@@ -1199,7 +1455,7 @@ class LedgerService(ApplicationService):
         date_from: date | None,
         date_to: date | None,
         *,
-        shift_activity: bool = False,
+        historical_activity: bool = False,
     ) -> LedgerDateRange:
         if date_from is not None and date_to is not None and date_from > date_to:
             raise LedgerStateConflictError("date_from must not be after date_to")
@@ -1226,14 +1482,50 @@ class LedgerService(ApplicationService):
             start=start,
             end_exclusive=end_exclusive,
             calculation_type=(
-                CALCULATION_SHIFT_ACTIVITY
-                if shift_activity
+                CALCULATION_CUSTOM_RANGE
+                if historical_activity
                 else CALCULATION_OPEN_BALANCE
             ),
             period_start=period_start,
             period_end=period_end,
-            includes_settled=shift_activity,
+            includes_settled=historical_activity,
+            generated_at=None,
         )
+
+    def _report_date_range(
+        self,
+        *,
+        date_from: date | None,
+        date_to: date | None,
+        calculation_mode: str | None,
+    ) -> LedgerDateRange:
+        mode = calculation_mode or (
+            REQUEST_MODE_CUSTOM_RANGE
+            if date_from is not None or date_to is not None
+            else REQUEST_MODE_OPEN_BALANCE
+        )
+        if mode == REQUEST_MODE_OPEN_BALANCE:
+            return self._date_range(date_from, date_to)
+        if mode == REQUEST_MODE_CUSTOM_RANGE:
+            return self._date_range(date_from, date_to, historical_activity=True)
+        if mode == REQUEST_MODE_LAST_12_HOURS:
+            generated_at = self._now_utc()
+            start = generated_at - timedelta(hours=ROLLING_HOURS)
+            return LedgerDateRange(
+                start=start,
+                end_exclusive=generated_at,
+                calculation_type=CALCULATION_ROLLING_ACTIVITY,
+                period_start=start.astimezone(BUSINESS_ZONE),
+                period_end=generated_at.astimezone(BUSINESS_ZONE),
+                includes_settled=True,
+                rolling_hours=ROLLING_HOURS,
+                generated_at=generated_at,
+            )
+        raise LedgerStateConflictError("Invalid calculation_mode.")
+
+    @staticmethod
+    def _now_utc() -> datetime:
+        return datetime.now(UTC)
 
     @staticmethod
     def _parse_history_cursor(cursor: str | None) -> LedgerHistoryCursor | None:

@@ -1,6 +1,7 @@
 "use client";
 
 import { AppShell } from "@/components/app-shell";
+import { LedgerDrilldownPanel } from "@/components/ledger/LedgerDrilldownPanel";
 import { LedgerFilterPanel } from "@/components/ledger/LedgerFilterPanel";
 import { LedgerSummaryPanel } from "@/components/ledger/LedgerSummaryPanel";
 
@@ -14,6 +15,7 @@ export default function AdminLedgerPage() {
       <div className="space-y-10">
         <LedgerFilterPanel />
         <LedgerSummaryPanel />
+        <LedgerDrilldownPanel />
       </div>
     </AppShell>
   );

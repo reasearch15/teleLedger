@@ -9,9 +9,13 @@ from app.schemas.ledger import (
     CreateLedgerAdjustmentRequest,
     CreateSettlementRequest,
     CoadminLedgerSummaryResponse,
+    LedgerAdjustmentDrilldownResponse,
     LedgerAdjustmentListResponse,
     LedgerAdjustmentResponse,
+    LedgerCashoutDrilldownResponse,
+    LedgerDrilldownResponse,
     LedgerItemResponse,
+    LedgerPaymentDrilldownResponse,
     LedgerResponse,
     LedgerSummaryResponse,
     SettlementListResponse,
@@ -21,6 +25,7 @@ from app.services.ledger import (
     LedgerAdjustmentListPage,
     LedgerAdjustmentRecord,
     LedgerAuthorizationError,
+    LedgerDrilldownReport,
     LedgerReport,
     LedgerService,
     LedgerStateConflictError,
@@ -43,17 +48,42 @@ async def get_admin_ledger(
     current_user: CurrentUser,
     date_from: date | None = None,
     date_to: date | None = None,
+    calculation_mode: str | None = None,
 ) -> LedgerResponse:
     service = LedgerService(session)
     try:
         report = await service.get_ledger(
             date_from=date_from,
             date_to=date_to,
+            calculation_mode=calculation_mode,
             actor=current_user,
         )
     except Exception as error:
         _raise_ledger_error(error)
     return _serialize_ledger(report)
+
+
+@router.get("/ledger/drilldown", response_model=LedgerDrilldownResponse)
+async def get_admin_ledger_drilldown(
+    session: DatabaseSession,
+    current_user: CurrentUser,
+    staff_id: Annotated[int | None, Query(gt=0)] = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    calculation_mode: str | None = None,
+) -> LedgerDrilldownResponse:
+    service = LedgerService(session)
+    try:
+        report = await service.get_ledger_drilldown(
+            date_from=date_from,
+            date_to=date_to,
+            calculation_mode=calculation_mode,
+            staff_id=staff_id,
+            actor=current_user,
+        )
+    except Exception as error:
+        _raise_ledger_error(error)
+    return _serialize_ledger_drilldown(report)
 
 
 @router.post(
@@ -278,6 +308,8 @@ def _serialize_ledger(report: LedgerReport) -> LedgerResponse:
                 staff_color=item.staff_color,
                 coadmin_id=item.coadmin_id,
                 coadmin_username=item.coadmin_username,
+                payment_total=item.payment_total,
+                adjustment_total=item.adjustment_total,
                 total_in=item.total_in,
                 total_out=item.total_out,
                 settled_amount=item.settled_amount,
@@ -292,6 +324,8 @@ def _serialize_ledger(report: LedgerReport) -> LedgerResponse:
             CoadminLedgerSummaryResponse(
                 coadmin_id=item.coadmin_id,
                 coadmin_username=item.coadmin_username,
+                payment_total=item.payment_total,
+                adjustment_total=item.adjustment_total,
                 total_in=item.total_in,
                 total_out=item.total_out,
                 settled_amount=item.settled_amount,
@@ -304,6 +338,8 @@ def _serialize_ledger(report: LedgerReport) -> LedgerResponse:
             for item in report.coadmin_summaries
         ],
         summary=LedgerSummaryResponse(
+            payment_total=report.summary.payment_total,
+            adjustment_total=report.summary.adjustment_total,
             total_in=report.summary.total_in,
             total_out=report.summary.total_out,
             settled_amount=report.summary.settled_amount,
@@ -314,6 +350,61 @@ def _serialize_ledger(report: LedgerReport) -> LedgerResponse:
         period_start=report.period_start,
         period_end=report.period_end,
         includes_settled=report.includes_settled,
+        rolling_hours=report.rolling_hours,
+        generated_at=report.generated_at,
+    )
+
+
+def _serialize_ledger_drilldown(report: LedgerDrilldownReport) -> LedgerDrilldownResponse:
+    return LedgerDrilldownResponse(
+        payments=[
+            LedgerPaymentDrilldownResponse(
+                id=item.id,
+                staff_id=item.staff_id,
+                staff_username=item.staff_username,
+                amount=item.amount,
+                status=item.status.value,
+                completed_at=item.completed_at,
+                settlement_id=item.settlement_id,
+                recipient_tag=item.recipient_tag,
+                payment_sender_name=item.payment_sender_name,
+            )
+            for item in report.payments
+        ],
+        cashouts=[
+            LedgerCashoutDrilldownResponse(
+                id=item.id,
+                staff_id=item.staff_id,
+                staff_username=item.staff_username,
+                amount=item.amount,
+                status=item.status.value,
+                created_at=item.created_at,
+                completed_at=item.completed_at,
+                settlement_id=item.settlement_id,
+                player_tag=item.player_tag,
+                request_number=item.request_number,
+            )
+            for item in report.cashouts
+        ],
+        adjustments=[
+            LedgerAdjustmentDrilldownResponse(
+                id=item.id,
+                staff_id=item.staff_id,
+                staff_username=item.staff_username,
+                amount_delta=item.amount_delta,
+                created_at=item.created_at,
+                settlement_id=item.settlement_id,
+                reason=item.reason,
+            )
+            for item in report.adjustments
+        ],
+        calculation_type=report.calculation_type,
+        timezone=report.timezone,
+        period_start=report.period_start,
+        period_end=report.period_end,
+        includes_settled=report.includes_settled,
+        rolling_hours=report.rolling_hours,
+        generated_at=report.generated_at,
     )
 
 

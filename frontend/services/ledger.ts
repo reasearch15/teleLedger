@@ -1,7 +1,9 @@
 import { apiRequest } from "@/lib/api-client";
 import type {
+  LedgerCalculationMode,
   LedgerAdjustment,
   LedgerAdjustmentPage,
+  LedgerDrilldownResponse,
   LedgerResponse,
   Settlement,
   SettlementPage,
@@ -14,6 +16,7 @@ export const ADJUSTMENT_PAGE_SIZE = 30;
 type DateFilters = {
   dateFrom?: string;
   dateTo?: string;
+  calculationMode?: LedgerCalculationMode;
 };
 
 type SettlementFilters = DateFilters & {
@@ -38,6 +41,9 @@ type AdjustmentFilters = DateFilters & {
 function appendDateFilters(query: URLSearchParams, filters: DateFilters): void {
   if (filters.dateFrom) query.set("date_from", filters.dateFrom);
   if (filters.dateTo) query.set("date_to", filters.dateTo);
+  if (filters.calculationMode) {
+    query.set("calculation_mode", filters.calculationMode);
+  }
 }
 
 function appendHistoryDateFilters(
@@ -52,6 +58,17 @@ export function getLedger(filters: DateFilters = {}): Promise<LedgerResponse> {
   const query = new URLSearchParams();
   appendDateFilters(query, filters);
   return apiRequest<LedgerResponse>(`/api/admin/ledger?${query.toString()}`);
+}
+
+export function getLedgerDrilldown(
+  filters: DateFilters & { staffId?: number } = {},
+): Promise<LedgerDrilldownResponse> {
+  const query = new URLSearchParams();
+  appendDateFilters(query, filters);
+  if (filters.staffId) query.set("staff_id", String(filters.staffId));
+  return apiRequest<LedgerDrilldownResponse>(
+    `/api/admin/ledger/drilldown?${query.toString()}`,
+  );
 }
 
 export function createSettlement(

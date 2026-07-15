@@ -41,7 +41,7 @@ export function StaffBalancesPanel() {
   const [items, setItems] = useState<LedgerItem[]>([]);
   const [ledgerMeta, setLedgerMeta] = useState<Pick<
     LedgerResponse,
-    "calculation_type" | "timezone" | "includes_settled"
+    "calculation_type" | "timezone" | "period_start" | "period_end" | "includes_settled"
   > | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionId, setActionId] = useState<number | null>(null);
@@ -62,6 +62,8 @@ export function StaffBalancesPanel() {
       setLedgerMeta({
         calculation_type: ledger.calculation_type,
         timezone: ledger.timezone,
+        period_start: ledger.period_start,
+        period_end: ledger.period_end,
         includes_settled: ledger.includes_settled,
       });
     } catch (loadError) {
@@ -82,7 +84,8 @@ export function StaffBalancesPanel() {
     return items.filter((item) => item.coadmin_id === filters.coadminId);
   }, [filters.coadminId, items]);
 
-  const isShiftActivity = ledgerMeta?.calculation_type === "shift_activity";
+  const isHistoricalActivity = ledgerMeta?.calculation_type !== "open_balance";
+  const isRollingActivity = ledgerMeta?.calculation_type === "rolling_activity";
 
   const confirmSettlement = async () => {
     if (!pendingSettlement) return;
@@ -130,22 +133,29 @@ export function StaffBalancesPanel() {
 
   return (
     <Panel
-      title={isShiftActivity ? "Staff Daily Activity" : "Staff Current Open Balance"}
+      title={
+        isRollingActivity
+          ? "Rolling 12-Hour Activity"
+          : isHistoricalActivity
+            ? "Staff Custom Range Activity"
+            : "Staff Current Open Balance"
+      }
       description={
-        isShiftActivity
+        isHistoricalActivity
           ? `Completed activity for the selected Nepal Time (${ledgerMeta?.timezone ?? "Asia/Kathmandu"}) window. Settled transactions are included.`
           : "Unsettled completed payments, adjustments, and cashouts by staff account."
       }
       error={error}
     >
       <TableShell>
-        <table className="w-full min-w-[1040px] text-left text-sm">
+        <table className="w-full min-w-[1120px] text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase text-slate-500">
             <tr>
               <th className="px-5 py-3">Staff</th>
               <th className="px-5 py-3">Coadmin</th>
-              <th className="px-5 py-3">Total In</th>
-              <th className="px-5 py-3">Total Out</th>
+              <th className="px-5 py-3">Payments</th>
+              <th className="px-5 py-3">Cashouts</th>
+              <th className="px-5 py-3">Adjustments</th>
               <th className="px-5 py-3">Settled</th>
               <th className="px-5 py-3">Net</th>
               <th className="px-5 py-3">Payments</th>
@@ -156,17 +166,17 @@ export function StaffBalancesPanel() {
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
-              <EmptyTableRow colSpan={10} message="Loading staff balances..." />
+              <EmptyTableRow colSpan={11} message="Loading staff balances..." />
             ) : null}
             {!loading && filteredItems.length === 0 ? (
-              <EmptyTableRow colSpan={10} message="No records found." />
+              <EmptyTableRow colSpan={11} message="No records found." />
             ) : null}
             {filteredItems.map((item) => (
               <StaffLedgerRow
                 key={item.staff_id}
                 item={item}
                 busy={actionId === item.staff_id}
-                readOnly={isShiftActivity}
+                readOnly={isHistoricalActivity}
                 onSettle={() =>
                   setPendingSettlement({
                     staffId: item.staff_id,
@@ -190,7 +200,7 @@ export function StaffBalancesPanel() {
             key={item.staff_id}
             item={item}
             busy={actionId === item.staff_id}
-            readOnly={isShiftActivity}
+            readOnly={isHistoricalActivity}
             onSettle={() =>
               setPendingSettlement({
                 staffId: item.staff_id,
@@ -321,7 +331,7 @@ const StaffLedgerRow = memo(function StaffLedgerRow({
       <td className="px-5 py-3">{item.coadmin_username}</td>
       <td className="px-5 py-3">
         <div className="flex items-center gap-2">
-          <span>{formatMoney(item.total_in)}</span>
+          <span>{formatMoney(item.payment_total)}</span>
           <button
             type="button"
             disabled={busy || readOnly}
@@ -333,6 +343,7 @@ const StaffLedgerRow = memo(function StaffLedgerRow({
         </div>
       </td>
       <td className="px-5 py-3">{formatMoney(item.total_out)}</td>
+      <td className="px-5 py-3">{formatMoney(item.adjustment_total)}</td>
       <td className="px-5 py-3">{formatMoney(item.settled_amount)}</td>
       <td className={`px-5 py-3 font-black ${netClass(item.net)}`}>
         {formatMoney(item.net)}
@@ -373,8 +384,9 @@ const StaffMobileCard = memo(function StaffMobileCard({
       <dl className="grid gap-2.5">
         <MobileRow label="Staff" value={item.staff_username} strong />
         <MobileRow label="Coadmin" value={item.coadmin_username} />
-        <MobileRow label="Total In" value={formatMoney(item.total_in)} strong />
-        <MobileRow label="Total Out" value={formatMoney(item.total_out)} />
+        <MobileRow label="Payments" value={formatMoney(item.payment_total)} strong />
+        <MobileRow label="Cashouts" value={formatMoney(item.total_out)} />
+        <MobileRow label="Adjustments" value={formatMoney(item.adjustment_total)} />
         <MobileRow label="Settled" value={formatMoney(item.settled_amount)} />
         <MobileRow
           label="Net"

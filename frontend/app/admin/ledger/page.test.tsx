@@ -14,6 +14,7 @@ import {
   createSettlement,
   createTotalInAdjustment,
   getLedger,
+  getLedgerDrilldown,
   listLedgerAdjustments,
   listSettlements,
 } from "@/services/ledger";
@@ -35,6 +36,7 @@ vi.mock("@/services/ledger", () => ({
   ADJUSTMENT_PAGE_SIZE: 30,
   SETTLEMENT_PAGE_SIZE: 30,
   getLedger: vi.fn(),
+  getLedgerDrilldown: vi.fn(),
   listSettlements: vi.fn(),
   listLedgerAdjustments: vi.fn(),
   createCoadminSettlement: vi.fn(),
@@ -53,6 +55,8 @@ const ledgerBefore: LedgerResponse = {
       staff_color: "#2563EB",
       coadmin_id: 10,
       coadmin_username: "default_coadmin",
+      payment_total: "1000.00",
+      adjustment_total: "0.00",
       total_in: "1000.00",
       total_out: "300.00",
       settled_amount: "0.00",
@@ -67,6 +71,8 @@ const ledgerBefore: LedgerResponse = {
       staff_color: "#16A34A",
       coadmin_id: 11,
       coadmin_username: "coadmin_two",
+      payment_total: "100.00",
+      adjustment_total: "0.00",
       total_in: "100.00",
       total_out: "100.00",
       settled_amount: "0.00",
@@ -80,6 +86,8 @@ const ledgerBefore: LedgerResponse = {
     {
       coadmin_id: 10,
       coadmin_username: "default_coadmin",
+      payment_total: "1000.00",
+      adjustment_total: "0.00",
       total_in: "1000.00",
       total_out: "300.00",
       settled_amount: "0.00",
@@ -92,6 +100,8 @@ const ledgerBefore: LedgerResponse = {
     {
       coadmin_id: 11,
       coadmin_username: "coadmin_two",
+      payment_total: "100.00",
+      adjustment_total: "0.00",
       total_in: "100.00",
       total_out: "100.00",
       settled_amount: "0.00",
@@ -103,6 +113,8 @@ const ledgerBefore: LedgerResponse = {
     },
   ],
   summary: {
+    payment_total: "1100.00",
+    adjustment_total: "0.00",
     total_in: "1100.00",
     total_out: "400.00",
     settled_amount: "0.00",
@@ -113,6 +125,8 @@ const ledgerBefore: LedgerResponse = {
   period_start: null,
   period_end: null,
   includes_settled: false,
+  rolling_hours: null,
+  generated_at: null,
 };
 
 const ledgerAfter: LedgerResponse = {
@@ -120,6 +134,7 @@ const ledgerAfter: LedgerResponse = {
   items: [
     {
       ...ledgerBefore.items[0],
+      payment_total: "0.00",
       total_in: "0.00",
       total_out: "0.00",
       net: "0.00",
@@ -128,6 +143,8 @@ const ledgerAfter: LedgerResponse = {
     ledgerBefore.items[1],
   ],
   summary: {
+    payment_total: "100.00",
+    adjustment_total: "0.00",
     total_in: "100.00",
     total_out: "100.00",
     settled_amount: "0.00",
@@ -136,6 +153,7 @@ const ledgerAfter: LedgerResponse = {
   coadmin_summaries: [
     {
       ...ledgerBefore.coadmin_summaries[0],
+      payment_total: "0.00",
       total_in: "0.00",
       total_out: "0.00",
       net: "0.00",
@@ -214,12 +232,25 @@ describe("AdminLedgerPage", () => {
 
   beforeEach(() => {
     vi.mocked(getLedger).mockReset();
+    vi.mocked(getLedgerDrilldown).mockReset();
     vi.mocked(listSettlements).mockReset();
     vi.mocked(listLedgerAdjustments).mockReset();
     vi.mocked(createCoadminSettlement).mockReset();
     vi.mocked(createSettlement).mockReset();
     vi.mocked(createTotalInAdjustment).mockReset();
     vi.mocked(getLedger).mockResolvedValue(ledgerBefore);
+    vi.mocked(getLedgerDrilldown).mockResolvedValue({
+      payments: [],
+      cashouts: [],
+      adjustments: [],
+      calculation_type: "rolling_activity",
+      timezone: "Asia/Kathmandu",
+      period_start: "2026-07-15T09:30:00+05:45",
+      period_end: "2026-07-15T21:30:00+05:45",
+      includes_settled: true,
+      rolling_hours: 12,
+      generated_at: "2026-07-15T15:45:00Z",
+    });
     vi.mocked(listSettlements).mockResolvedValue(history);
     vi.mocked(listLedgerAdjustments).mockResolvedValue(adjustments);
     vi.mocked(createCoadminSettlement).mockResolvedValue(history.items[0]);

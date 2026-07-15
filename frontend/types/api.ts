@@ -216,6 +216,8 @@ export type LedgerItem = {
   staff_color: string;
   coadmin_id: number | null;
   coadmin_username: string;
+  payment_total: string;
+  adjustment_total: string;
   total_in: string;
   total_out: string;
   settled_amount: string;
@@ -228,6 +230,8 @@ export type LedgerItem = {
 export type CoadminLedgerSummary = {
   coadmin_id: number | null;
   coadmin_username: string;
+  payment_total: string;
+  adjustment_total: string;
   total_in: string;
   total_out: string;
   settled_amount: string;
@@ -239,6 +243,8 @@ export type CoadminLedgerSummary = {
 };
 
 export type LedgerSummary = {
+  payment_total: string;
+  adjustment_total: string;
   total_in: string;
   total_out: string;
   settled_amount: string;
@@ -249,11 +255,66 @@ export type LedgerResponse = {
   items: LedgerItem[];
   coadmin_summaries: CoadminLedgerSummary[];
   summary: LedgerSummary;
-  calculation_type: "open_balance" | "shift_activity";
+  calculation_type: "open_balance" | "custom_range" | "rolling_activity";
   timezone: string;
   period_start: string | null;
   period_end: string | null;
   includes_settled: boolean;
+  rolling_hours: number | null;
+  generated_at: string | null;
+};
+
+export type LedgerCalculationMode =
+  | "open_balance"
+  | "last_12_hours"
+  | "custom_range";
+
+export type LedgerPaymentDrilldown = {
+  id: number;
+  staff_id: number;
+  staff_username: string;
+  amount: string;
+  status: string;
+  completed_at: string | null;
+  settlement_id: number | null;
+  recipient_tag: string;
+  payment_sender_name: string;
+};
+
+export type LedgerCashoutDrilldown = {
+  id: number;
+  staff_id: number;
+  staff_username: string;
+  amount: string;
+  status: string;
+  created_at: string;
+  completed_at: string | null;
+  settlement_id: number | null;
+  player_tag: string;
+  request_number: string | null;
+};
+
+export type LedgerAdjustmentDrilldown = {
+  id: number;
+  staff_id: number;
+  staff_username: string;
+  amount_delta: string;
+  created_at: string;
+  settlement_id: number | null;
+  reason: string;
+};
+
+export type LedgerDrilldownResponse = {
+  payments: LedgerPaymentDrilldown[];
+  cashouts: LedgerCashoutDrilldown[];
+  adjustments: LedgerAdjustmentDrilldown[];
+  calculation_type: "custom_range" | "rolling_activity";
+  timezone: string;
+  period_start: string | null;
+  period_end: string | null;
+  includes_settled: boolean;
+  rolling_hours: number | null;
+  generated_at: string | null;
 };
 
 export type LedgerAdjustment = {

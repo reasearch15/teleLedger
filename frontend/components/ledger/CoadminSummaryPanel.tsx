@@ -63,7 +63,8 @@ export function CoadminSummaryPanel() {
 
   useLiveUpdates(LEDGER_PAGE_EVENTS, refresh, true);
 
-  const isShiftActivity = ledgerMeta?.calculation_type === "shift_activity";
+  const isHistoricalActivity = ledgerMeta?.calculation_type !== "open_balance";
+  const isRollingActivity = ledgerMeta?.calculation_type === "rolling_activity";
 
   const confirmSettlement = async () => {
     if (!pendingSettlement) return;
@@ -82,21 +83,28 @@ export function CoadminSummaryPanel() {
 
   return (
     <Panel
-      title={isShiftActivity ? "Coadmin Daily Activity" : "Coadmin Current Open Balance"}
+      title={
+        isRollingActivity
+          ? "Rolling 12-Hour Activity"
+          : isHistoricalActivity
+            ? "Coadmin Custom Range Activity"
+            : "Coadmin Current Open Balance"
+      }
       description={
-        isShiftActivity
+        isHistoricalActivity
           ? `Completed staff activity grouped by coadmin for the selected Nepal Time (${ledgerMeta?.timezone ?? "Asia/Kathmandu"}) window.`
           : "Unsettled open balances grouped by coadmin team."
       }
       error={error}
     >
       <TableShell>
-        <table className="w-full min-w-[1080px] text-left text-sm">
+        <table className="w-full min-w-[1160px] text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase text-slate-500">
             <tr>
               <th className="px-5 py-3">Coadmin</th>
-              <th className="px-5 py-3">Total In</th>
-              <th className="px-5 py-3">Total Out</th>
+              <th className="px-5 py-3">Payments</th>
+              <th className="px-5 py-3">Cashouts</th>
+              <th className="px-5 py-3">Adjustments</th>
               <th className="px-5 py-3">Settled</th>
               <th className="px-5 py-3">Net</th>
               <th className="px-5 py-3">Staff</th>
@@ -108,17 +116,17 @@ export function CoadminSummaryPanel() {
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
-              <EmptyTableRow colSpan={10} message="Loading coadmin balances..." />
+              <EmptyTableRow colSpan={11} message="Loading coadmin balances..." />
             ) : null}
             {!loading && items.length === 0 ? (
-              <EmptyTableRow colSpan={10} message="No records found." />
+              <EmptyTableRow colSpan={11} message="No records found." />
             ) : null}
             {items.map((item) => (
               <CoadminLedgerRow
                 key={item.coadmin_id ?? "default"}
                 item={item}
                 busy={actionId === item.coadmin_id}
-                readOnly={isShiftActivity}
+                readOnly={isHistoricalActivity}
                 onSettle={() => {
                   if (item.coadmin_id == null) return;
                   setPendingSettlement({
@@ -142,7 +150,7 @@ export function CoadminSummaryPanel() {
             key={item.coadmin_id ?? "default"}
             item={item}
             busy={actionId === item.coadmin_id}
-            readOnly={isShiftActivity}
+            readOnly={isHistoricalActivity}
             onSettle={() => {
               if (item.coadmin_id == null) return;
               setPendingSettlement({
@@ -205,8 +213,9 @@ const CoadminLedgerRow = memo(function CoadminLedgerRow({
       <td className="px-5 py-3 font-semibold text-slate-950">
         {item.coadmin_username}
       </td>
-      <td className="px-5 py-3">{formatMoney(item.total_in)}</td>
+      <td className="px-5 py-3">{formatMoney(item.payment_total)}</td>
       <td className="px-5 py-3">{formatMoney(item.total_out)}</td>
+      <td className="px-5 py-3">{formatMoney(item.adjustment_total)}</td>
       <td className="px-5 py-3">{formatMoney(item.settled_amount)}</td>
       <td className={`px-5 py-3 font-black ${netClass(item.net)}`}>
         {formatMoney(item.net)}
@@ -245,8 +254,9 @@ const CoadminMobileCard = memo(function CoadminMobileCard({
     <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
       <dl className="grid gap-2.5">
         <MobileRow label="Coadmin" value={item.coadmin_username} strong />
-        <MobileRow label="Total In" value={formatMoney(item.total_in)} strong />
-        <MobileRow label="Total Out" value={formatMoney(item.total_out)} />
+        <MobileRow label="Payments" value={formatMoney(item.payment_total)} strong />
+        <MobileRow label="Cashouts" value={formatMoney(item.total_out)} />
+        <MobileRow label="Adjustments" value={formatMoney(item.adjustment_total)} />
         <MobileRow label="Settled" value={formatMoney(item.settled_amount)} />
         <MobileRow
           label="Net"

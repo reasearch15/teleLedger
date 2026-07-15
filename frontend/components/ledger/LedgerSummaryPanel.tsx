@@ -15,7 +15,12 @@ export function LedgerSummaryPanel() {
   const [summary, setSummary] = useState<LedgerSummary | null>(null);
   const [ledgerMeta, setLedgerMeta] = useState<Pick<
     LedgerResponse,
-    "calculation_type" | "timezone" | "period_start" | "period_end" | "includes_settled"
+    | "calculation_type"
+    | "timezone"
+    | "period_start"
+    | "period_end"
+    | "includes_settled"
+    | "rolling_hours"
   > | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -32,6 +37,7 @@ export function LedgerSummaryPanel() {
         period_start: ledger.period_start,
         period_end: ledger.period_end,
         includes_settled: ledger.includes_settled,
+        rolling_hours: ledger.rolling_hours,
       });
     } catch (loadError) {
       setError(friendlyError(loadError));
@@ -46,14 +52,26 @@ export function LedgerSummaryPanel() {
 
   useLiveUpdates(LEDGER_PAGE_EVENTS, refresh, true);
 
-  const isShiftActivity = ledgerMeta?.calculation_type === "shift_activity";
+  const isRollingActivity = ledgerMeta?.calculation_type === "rolling_activity";
+  const isHistoricalActivity =
+    ledgerMeta?.calculation_type === "custom_range" || isRollingActivity;
+  const rangeLabel =
+    ledgerMeta?.period_start && ledgerMeta.period_end
+      ? formatNepalRange(ledgerMeta.period_start, ledgerMeta.period_end)
+      : null;
 
   return (
     <Panel
-      title={isShiftActivity ? "Daily Activity" : "Current Open Balance"}
+      title={
+        isRollingActivity
+          ? "Rolling 12-Hour Activity"
+          : isHistoricalActivity
+            ? "Custom Date Range Activity"
+            : "Current Open Balance"
+      }
       description={
-        isShiftActivity
-          ? `Completed payments, adjustments, and cashouts in Nepal Time (${ledgerMeta?.timezone ?? "Asia/Kathmandu"}). Settled transactions are included.`
+        isHistoricalActivity
+          ? `${rangeLabel ?? "Selected historical range"} Nepal Time. Settled transactions are included.`
           : "Unsettled completed payments, adjustments, and cashouts."
       }
       error={error}
@@ -63,9 +81,9 @@ export function LedgerSummaryPanel() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[
-            ["Total In", summary?.total_in ?? "0.00"],
-            ["Total Out", summary?.total_out ?? "0.00"],
-            ["Settled", summary?.settled_amount ?? "0.00"],
+            ["Payments", summary?.payment_total ?? "0.00"],
+            ["Cashouts", summary?.total_out ?? "0.00"],
+            ["Adjustments", summary?.adjustment_total ?? "0.00"],
             ["Net", summary?.net ?? "0.00"],
           ].map(([label, value]) => (
             <div key={label} className="rounded-lg border border-slate-200 p-4">
@@ -83,4 +101,15 @@ export function LedgerSummaryPanel() {
       )}
     </Panel>
   );
+}
+
+function formatNepalRange(start: string, end: string): string {
+  const formatter = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "Asia/Kathmandu",
+  });
+  return `${formatter.format(new Date(start))} - ${formatter.format(new Date(end))}`;
 }

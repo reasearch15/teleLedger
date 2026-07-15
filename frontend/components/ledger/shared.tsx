@@ -2,10 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import type { LedgerCalculationMode } from "@/types/api";
+
 export type LedgerFilters = {
   dateFrom?: string;
   dateTo?: string;
   coadminId?: number;
+  calculationMode?: LedgerCalculationMode;
 };
 
 const FILTER_EVENT = "ledgerFiltersChanged";
@@ -14,10 +17,20 @@ export function readLedgerFilters(): LedgerFilters {
   if (typeof window === "undefined") return {};
   const params = new URLSearchParams(window.location.search);
   const coadminId = Number(params.get("coadminId") ?? "");
+  const rawMode = params.get("calculationMode");
+  const calculationMode: LedgerCalculationMode =
+    rawMode === "last_12_hours" || rawMode === "custom_range"
+      ? rawMode
+      : rawMode === "open_balance"
+        ? "open_balance"
+        : params.get("dateFrom") || params.get("dateTo")
+          ? "custom_range"
+          : "open_balance";
   return {
     dateFrom: params.get("dateFrom") || undefined,
     dateTo: params.get("dateTo") || undefined,
     coadminId: Number.isFinite(coadminId) && coadminId > 0 ? coadminId : undefined,
+    calculationMode,
   };
 }
 
@@ -27,6 +40,11 @@ export function writeLedgerFilters(filters: LedgerFilters): void {
   else params.delete("dateFrom");
   if (filters.dateTo) params.set("dateTo", filters.dateTo);
   else params.delete("dateTo");
+  if (filters.calculationMode && filters.calculationMode !== "open_balance") {
+    params.set("calculationMode", filters.calculationMode);
+  } else {
+    params.delete("calculationMode");
+  }
   if (filters.coadminId) params.set("coadminId", String(filters.coadminId));
   else params.delete("coadminId");
   const query = params.toString();

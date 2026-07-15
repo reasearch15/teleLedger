@@ -16,6 +16,8 @@ class LedgerItemResponse(BaseModel):
     staff_color: str
     coadmin_id: int | None
     coadmin_username: str
+    payment_total: Decimal
+    adjustment_total: Decimal
     total_in: Decimal
     total_out: Decimal
     settled_amount: Decimal
@@ -26,6 +28,8 @@ class LedgerItemResponse(BaseModel):
 
 
 class LedgerSummaryResponse(BaseModel):
+    payment_total: Decimal
+    adjustment_total: Decimal
     total_in: Decimal
     total_out: Decimal
     settled_amount: Decimal
@@ -35,6 +39,8 @@ class LedgerSummaryResponse(BaseModel):
 class CoadminLedgerSummaryResponse(BaseModel):
     coadmin_id: int | None
     coadmin_username: str
+    payment_total: Decimal
+    adjustment_total: Decimal
     total_in: Decimal
     total_out: Decimal
     settled_amount: Decimal
@@ -54,6 +60,56 @@ class LedgerResponse(BaseModel):
     period_start: datetime | None
     period_end: datetime | None
     includes_settled: bool
+    rolling_hours: int | None = None
+    generated_at: datetime | None = None
+
+
+class LedgerPaymentDrilldownResponse(BaseModel):
+    id: int
+    staff_id: int
+    staff_username: str
+    amount: Decimal
+    status: str
+    completed_at: datetime | None
+    settlement_id: int | None
+    recipient_tag: str
+    payment_sender_name: str
+
+
+class LedgerCashoutDrilldownResponse(BaseModel):
+    id: int
+    staff_id: int
+    staff_username: str
+    amount: Decimal
+    status: str
+    created_at: datetime
+    completed_at: datetime | None
+    settlement_id: int | None
+    player_tag: str
+    request_number: str | None
+
+
+class LedgerAdjustmentDrilldownResponse(BaseModel):
+    id: int
+    staff_id: int
+    staff_username: str
+    amount_delta: Decimal
+    created_at: datetime
+    settlement_id: int | None
+    reason: str
+
+
+class LedgerDrilldownResponse(BaseModel):
+    payments: list[LedgerPaymentDrilldownResponse]
+    cashouts: list[LedgerCashoutDrilldownResponse]
+    adjustments: list[LedgerAdjustmentDrilldownResponse]
+    calculation_type: str
+    timezone: str
+    period_start: datetime | None
+    period_end: datetime | None
+    includes_settled: bool
+    rolling_hours: int | None = None
+    generated_at: datetime | None = None
 
 
 class CreateSettlementRequest(BaseModel):
