@@ -18,6 +18,10 @@ class TelegramMessageRepository(BaseRepository[TelegramMessage]):
         await self._session.flush()
         return message
 
+    async def flush(self, message: TelegramMessage) -> None:
+        """Flush changes to an existing raw Telegram message."""
+        await self._session.flush()
+
     async def add_if_absent(
         self,
         message: TelegramMessage,

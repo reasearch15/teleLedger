@@ -5,9 +5,9 @@ from collections.abc import Callable
 
 from telethon import events  # type: ignore[import-untyped]
 
+import app.telegram.listener_health as listener_health
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
-import app.telegram.listener_health as listener_health
 from app.telegram.backfill import backfill_new_messages
 from app.telegram.cashout_delivery import run_cashout_delivery_worker
 from app.telegram.cashout_reactions import complete_recent_cashout_reactions
@@ -17,14 +17,14 @@ from app.telegram.cashout_reconciliation import (
 )
 from app.telegram.client import create_telegram_client
 from app.telegram.events import create_new_message_handler, create_reaction_handler
+from app.telegram.identity import telegram_display_name, telegram_entity_id
+from app.telegram.ingestion import ingest_telegram_message
 from app.telegram.inquiry_backfill import backfill_new_inquiry_messages
 from app.telegram.inquiry_events import create_inquiry_message_handlers
 from app.telegram.inquiry_ingestion import (
     ingest_inquiry_telegram_message,
     retry_pending_inquiry_media,
 )
-from app.telegram.identity import telegram_display_name, telegram_entity_id
-from app.telegram.ingestion import ingest_telegram_message
 from app.telegram.peer_ids import normalize_telegram_chat_id
 from app.telegram.reaction_matching import parse_completion_reactions
 
@@ -136,6 +136,11 @@ async def _run_listener_session(
     """Connect once, register handlers, and block until disconnected."""
     client = create_telegram_client(settings)
     handler = create_new_message_handler(ingest_telegram_message, report)
+    edit_handler = create_new_message_handler(
+        ingest_telegram_message,
+        report,
+        event_type="message_edited",
+    )
     delivery_task: asyncio.Task[None] | None = None
     reconciliation_task: asyncio.Task[None] | None = None
     allowed_reactions = settings.cashout_completion_reaction_allowlist
@@ -224,6 +229,10 @@ async def _run_listener_session(
             )
         )
         client.add_event_handler(handler, events.NewMessage(chats=payment_group_input))
+        client.add_event_handler(
+            edit_handler,
+            events.MessageEdited(chats=payment_group_input),
+        )
         client.add_event_handler(inquiry_new_handler, events.NewMessage(chats=cashout_group_input))
         client.add_event_handler(
             inquiry_edit_handler,

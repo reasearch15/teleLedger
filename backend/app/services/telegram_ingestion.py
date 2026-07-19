@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.db.repositories.payment_audit import PaymentAuditRepository
 from app.db.repositories.payment_event import PaymentEventRepository
 from app.db.repositories.telegram_message import TelegramMessageRepository
@@ -15,6 +16,8 @@ from app.parser.payment import parse_payment_message
 from app.schemas.payment import ParsedPayment
 from app.schemas.telegram import IncomingTelegramMessage
 from app.services.base import ApplicationService
+
+logger = get_logger(__name__)
 
 
 class TelegramIngestionOutcome(StrEnum):
@@ -66,6 +69,7 @@ class TelegramIngestionService(ApplicationService):
                     received_at=incoming.received_at,
                 )
             )
+            raw_message_refreshed = False
 
             existing_payment = (
                 await self._payment_repository.get_one_by_telegram_message_id(message.id)
@@ -84,10 +88,38 @@ class TelegramIngestionService(ApplicationService):
                     reason_skipped="raw message and payment_event already exist",
                 )
 
-            # Parse the persisted body so historical rows can repair themselves even
-            # if a later Telegram event presents different text for the same ID.
+            if not created and message.raw_text != incoming.raw_text:
+                message.sender_id = incoming.sender_id
+                message.sender_name = incoming.sender_name
+                message.raw_text = incoming.raw_text
+                message.received_at = incoming.received_at
+                await self._message_repository.flush(message)
+                raw_message_refreshed = True
+                logger.info(
+                    "telegram_raw_message_refreshed",
+                    extra={
+                        "telegram_message_row_id": message.id,
+                        "telegram_message_id": incoming.telegram_message_id,
+                        "telegram_chat_id": incoming.telegram_chat_id,
+                    },
+                )
+
+            # Parse the persisted body. Existing non-payment rows can now repair
+            # themselves when a later Telegram edit or backfill sees payment text.
             parsed = parse_payment_message(message.raw_text)
             if parsed is None:
+                if "you received" in message.raw_text.lower():
+                    logger.warning(
+                        "telegram_payment_like_message_rejected",
+                        extra={
+                            "telegram_message_row_id": message.id,
+                            "telegram_message_id": incoming.telegram_message_id,
+                            "telegram_chat_id": incoming.telegram_chat_id,
+                            "reason": "parser did not match",
+                            "raw_message_inserted": created,
+                            "raw_message_refreshed": raw_message_refreshed,
+                        },
+                    )
                 return TelegramIngestionResult(
                     outcome=TelegramIngestionOutcome.IGNORED,
                     telegram_message_id=message.id,

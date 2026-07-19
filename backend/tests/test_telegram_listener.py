@@ -155,6 +155,33 @@ async def test_duplicate_event_does_not_create_duplicate_rows(
 
 
 @pytest.mark.asyncio
+async def test_edited_payment_repairs_existing_non_payment_row(
+    caplog: LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.telegram.events")
+    reports: list[str] = []
+    new_handler = create_new_message_handler(ingest_message, reports.append)
+    edit_handler = create_new_message_handler(
+        ingest_message,
+        reports.append,
+        event_type="message_edited",
+    )
+
+    await new_handler(MockTelethonEvent(105, "Preparing payment notification..."))
+    await edit_handler(MockTelethonEvent(105, PAYMENT_MESSAGE))
+
+    assert await row_counts() == (1, 1)
+    assert "telegram_payment_parsed" in caplog.messages
+    async with TestSessionFactory() as session:
+        raw_message = await session.scalar(select(TelegramMessage))
+        payment = await session.scalar(select(PaymentEvent))
+        assert raw_message is not None
+        assert raw_message.raw_text == PAYMENT_MESSAGE
+        assert payment is not None
+        assert payment.telegram_message_id == raw_message.id
+
+
+@pytest.mark.asyncio
 async def test_non_text_event_is_not_stored(caplog: LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO, logger="app.telegram.events")
     reports: list[str] = []

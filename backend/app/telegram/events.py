@@ -5,10 +5,10 @@ from typing import Protocol
 
 from telethon import utils  # type: ignore[import-untyped]
 
+import app.telegram.listener_health as listener_health
 from app.core.logging import get_logger
 from app.schemas.telegram import IncomingTelegramMessage
 from app.services.telegram_ingestion import TelegramIngestionResult
-import app.telegram.listener_health as listener_health
 from app.telegram.cashout_reactions import (
     CashoutReactionCompletionResult,
     complete_cashout_from_reaction,
@@ -63,6 +63,8 @@ def _message_preview(raw_text: str, limit: int = 90) -> str:
 def create_new_message_handler(
     ingest_message: IngestMessage,
     report: TerminalReporter = print,
+    *,
+    event_type: str = "new_message",
 ) -> EventHandler:
     """Build a Telethon handler around an injected ingestion use case."""
 
@@ -86,6 +88,7 @@ def create_new_message_handler(
             extra={
                 "telegram_message_id": event.id,
                 "telegram_chat_id": event.chat_id,
+                "telegram_event_type": event_type,
             },
         )
 
@@ -112,6 +115,7 @@ def create_new_message_handler(
                 "telegram_message_id": incoming.telegram_message_id,
                 "telegram_chat_id": incoming.telegram_chat_id,
                 "outcome": result.outcome.value,
+                "telegram_event_type": event_type,
                 "existing_raw_message": result.existing_raw_message,
                 "existing_payment_event": result.existing_payment_event,
                 "parser_matched": result.parser_matched,
