@@ -69,7 +69,6 @@ def test_normal_chat_is_ignored() -> None:
     "message",
     [
         "You received $36.28 from Krista R.",
-        VALID_PAYMENT_MESSAGE.replace("Total Out: 1881.66$", ""),
         VALID_PAYMENT_MESSAGE.replace("03:08 PM", "25:99 PM"),
         VALID_PAYMENT_MESSAGE.replace("$36.28", "$not-a-number"),
     ],
@@ -155,3 +154,56 @@ def test_total_in_and_out_extraction() -> None:
     assert parsed is not None
     assert parsed.total_in == Decimal("5709.59")
     assert parsed.total_out == Decimal("1881.66")
+
+
+def test_old_format_without_totals_still_parses_required_fields() -> None:
+    message = """Hi Stephen_Mckinney_21,
+
+You received $36.28 from Krista R.
+
+03:08 PM - 29 Jun 2026"""
+
+    parsed = parse_payment_message(message)
+
+    assert parsed is not None
+    assert parsed.recipient_tag == "Stephen_Mckinney_21"
+    assert parsed.amount == Decimal("36.28")
+    assert parsed.payment_sender_name == "Krista R"
+    assert parsed.payment_datetime == datetime(2026, 6, 29, 15, 8)
+    assert parsed.total_in is None
+    assert parsed.total_out is None
+
+
+def test_informational_lines_between_required_fields_and_totals_are_ignored() -> None:
+    message = """🟢 Hi $Demaul_Goins,
+
+You received $10.0 from Emily S.
+
+08:09 AM - 18 Jul 2026
+Reference: provider-generated metadata
+➕ Total In : 517.7$
+➖ Total Out: 0$"""
+
+    parsed = parse_payment_message(message)
+
+    assert parsed is not None
+    assert parsed.recipient_tag == "Demaul_Goins"
+    assert parsed.amount == Decimal("10.0")
+    assert parsed.total_in == Decimal("517.7")
+    assert parsed.total_out == Decimal("0")
+
+
+def test_total_lines_accept_leading_or_trailing_currency_symbol() -> None:
+    message = """🟢 Hi $Demaul_Goins,
+
+You received $10.0 from Emily S.
+
+08:09 AM - 18 Jul 2026
+➕ Total In : $517.7
+➖ Total Out: $0"""
+
+    parsed = parse_payment_message(message)
+
+    assert parsed is not None
+    assert parsed.total_in == Decimal("517.7")
+    assert parsed.total_out == Decimal("0")

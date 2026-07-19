@@ -20,8 +20,8 @@ class ParsedPayment(BaseModel):
     amount: Money
     payment_sender_name: str = Field(min_length=1, max_length=255)
     payment_datetime: datetime
-    total_in: OptionalTotal
-    total_out: OptionalTotal
+    total_in: OptionalTotal | None = None
+    total_out: OptionalTotal | None = None
 
 
 class PaymentActionRequest(BaseModel):
