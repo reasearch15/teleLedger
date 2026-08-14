@@ -5,7 +5,9 @@ import type { FormEvent } from "react";
 import { useCallback, useEffect, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
+import { useLiveUpdates } from "@/components/live-updates-provider";
 import { friendlyError } from "@/lib/api-client";
+import { VENMO_CONFIRMATION_EVENTS } from "@/lib/live-events";
 import {
   createVenmoConfirmation,
   listVenmoConfirmations,
@@ -17,6 +19,20 @@ const statusLabels: Record<string, string> = {
   confirmed: "Confirmed",
   not_received: "Not received",
   cancelled: "Cancelled",
+};
+
+const cardClasses: Record<string, string> = {
+  confirmed: "border-emerald-300 bg-emerald-50 shadow-sm hover:border-emerald-400",
+  not_received: "border-amber-300 bg-amber-50 shadow-sm hover:border-amber-400",
+  pending: "border-slate-200 bg-white shadow-sm hover:border-indigo-300",
+  cancelled: "border-slate-200 bg-slate-50 shadow-sm hover:border-slate-300",
+};
+
+const badgeClasses: Record<string, string> = {
+  confirmed: "border-emerald-600 bg-emerald-600 text-white",
+  not_received: "border-amber-500 bg-amber-100 text-amber-900",
+  pending: "border-slate-300 bg-white text-slate-700",
+  cancelled: "border-slate-300 bg-slate-100 text-slate-700",
 };
 
 function formatDate(value: string | null): string {
@@ -56,6 +72,7 @@ export default function VenmoConfirmationsPage() {
     }, 0);
     return () => window.clearTimeout(timeoutId);
   }, [refresh]);
+  useLiveUpdates(VENMO_CONFIRMATION_EVENTS, refresh, true);
 
   useEffect(() => {
     if (!previewUrl) return;
@@ -208,14 +225,21 @@ export default function VenmoConfirmationsPage() {
           <Link
             key={request.id}
             href={`/venmo-confirmations/${request.id}`}
-            className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm transition hover:border-indigo-300"
+            className={`rounded-lg border p-4 transition ${
+              cardClasses[request.status] ?? cardClasses.pending
+            }`}
           >
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">
                   Request #{request.id}
                 </p>
-                <h2 className="mt-1 text-lg font-black text-slate-950">
+                <h2
+                  className={`mt-1 text-lg font-black ${
+                    request.status === "confirmed" ? "text-emerald-900" : "text-slate-950"
+                  }`}
+                >
+                  {request.status === "confirmed" ? "✅ " : ""}
                   {statusLabels[request.status]}
                 </h2>
                 <p className="mt-1 text-sm text-slate-600">
@@ -223,7 +247,12 @@ export default function VenmoConfirmationsPage() {
                   {request.coadmin_username ?? request.coadmin_id}
                 </p>
               </div>
-              <span className="rounded-full border border-slate-300 px-2.5 py-1 text-xs font-black text-slate-700">
+              <span
+                className={`rounded-full border px-2.5 py-1 text-xs font-black ${
+                  badgeClasses[request.status] ?? badgeClasses.pending
+                }`}
+              >
+                {request.status === "confirmed" ? "✓ " : ""}
                 {statusLabels[request.status]}
               </span>
             </div>

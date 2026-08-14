@@ -213,7 +213,9 @@ class TelegramBotApiGateway:
             "message_id": message_id,
             "caption": caption,
         }
-        payload["reply_markup"] = self._reply_markup(buttons) if buttons else None
+        payload["reply_markup"] = (
+            self._reply_markup(buttons) if buttons else self._empty_reply_markup()
+        )
         await self._post("editMessageCaption", payload)
 
     async def get_updates(

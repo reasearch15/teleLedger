@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import VenmoConfirmationsPage from "@/app/venmo-confirmations/page";
+import { useLiveUpdates } from "@/components/live-updates-provider";
 import {
   createVenmoConfirmation,
   listVenmoConfirmations,
@@ -10,6 +11,10 @@ import type { VenmoConfirmationListResponse } from "@/types/api";
 
 vi.mock("@/components/app-shell", () => ({
   AppShell: ({ children }: { children: React.ReactNode }) => <main>{children}</main>,
+}));
+
+vi.mock("@/components/live-updates-provider", () => ({
+  useLiveUpdates: vi.fn(),
 }));
 
 vi.mock("next/link", () => ({
@@ -60,6 +65,7 @@ describe("VenmoConfirmationsPage", () => {
   beforeEach(() => {
     global.URL.createObjectURL = vi.fn(() => "blob:preview");
     global.URL.revokeObjectURL = vi.fn();
+    vi.mocked(useLiveUpdates).mockReset();
     vi.mocked(createVenmoConfirmation).mockReset();
     vi.mocked(listVenmoConfirmations).mockReset();
     vi.mocked(listVenmoConfirmations).mockResolvedValue(listResponse);
@@ -75,6 +81,40 @@ describe("VenmoConfirmationsPage", () => {
     );
     expect(screen.getByText(/Staff: sarah/)).toBeInTheDocument();
     expect(screen.getByText("Reference ABC")).toBeInTheDocument();
+    expect(useLiveUpdates).toHaveBeenCalledWith(
+      ["venmo_confirmation_updated"],
+      expect.any(Function),
+      true,
+    );
+  });
+
+  it("renders confirmed and not-received cards with distinct status styling", async () => {
+    vi.mocked(listVenmoConfirmations).mockResolvedValueOnce({
+      items: [
+        {
+          ...listResponse.items[0],
+          id: 78,
+          status: "confirmed",
+          confirmed_at: "2026-07-15T16:00:00Z",
+        },
+        {
+          ...listResponse.items[0],
+          id: 79,
+          status: "not_received",
+          confirmed_at: null,
+        },
+      ],
+    });
+
+    render(<VenmoConfirmationsPage />);
+
+    const confirmed = await screen.findByRole("link", { name: /Request #78/ });
+    const notReceived = await screen.findByRole("link", { name: /Request #79/ });
+    expect(confirmed).toHaveClass("bg-emerald-50");
+    expect(confirmed).toHaveTextContent("✅ Confirmed");
+    expect(confirmed).toHaveTextContent("✓ Confirmed");
+    expect(notReceived).toHaveClass("bg-amber-50");
+    expect(notReceived).toHaveTextContent("Not received");
   });
 
   it("shows loading and error states safely", async () => {

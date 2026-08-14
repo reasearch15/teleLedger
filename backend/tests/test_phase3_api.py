@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -29,8 +32,10 @@ from app.models.venmo_confirmation import (
     VenmoConfirmationRequest,
     VenmoConfirmationStatus,
 )
+from app.telegram import venmo_confirmation_reconciliation
 from app.telegram.cashout_bot.api import (
     TelegramBotApiError,
+    TelegramBotApiGateway,
     TelegramBotFailureClass,
     TelegramBotUpdate,
 )
@@ -38,6 +43,9 @@ from app.telegram.cashout_bot.updates import handle_cashout_bot_update
 from app.telegram.venmo_confirmation import (
     VenmoConfirmationCallbackAction,
     encode_venmo_confirmation_callback,
+)
+from app.telegram.venmo_confirmation_reconciliation import (
+    reconcile_venmo_confirmation_telegram_state,
 )
 
 test_engine = create_async_engine(
@@ -88,6 +96,11 @@ async def reset_database(
     tmp_path: Path,
 ) -> AsyncIterator[None]:
     monkeypatch.setenv("INQUIRY_MEDIA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        venmo_confirmation_reconciliation,
+        "SessionFactory",
+        TestSessionFactory,
+    )
     get_settings.cache_clear()
     async with test_engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -254,6 +267,7 @@ class FakeConfirmationGateway:
     answers: list[dict[str, object]] = []
     edits: list[dict[str, object]] = []
     fail_send = False
+    fail_edit = False
 
     async def __aenter__(self) -> FakeConfirmationGateway:
         return self
@@ -306,6 +320,8 @@ class FakeConfirmationGateway:
         caption: str,
         buttons: list[list[tuple[str, str]]] | None = None,
     ) -> None:
+        if self.fail_edit:
+            raise RuntimeError("caption edit failed")
         self.edits.append(
             {
                 "chat_id": chat_id,
@@ -321,6 +337,7 @@ def reset_fake_gateway() -> None:
     FakeConfirmationGateway.answers = []
     FakeConfirmationGateway.edits = []
     FakeConfirmationGateway.fail_send = False
+    FakeConfirmationGateway.fail_edit = False
 
 
 @pytest.mark.asyncio
@@ -513,7 +530,147 @@ async def test_venmo_telegram_confirm_callback_marks_request_confirmed(
     assert request.status == VenmoConfirmationStatus.CONFIRMED
     assert attempt.status == VenmoConfirmationAttemptStatus.CONFIRMED
     assert FakeConfirmationGateway.edits[-1]["buttons"] is None
-    assert "Confirmed" in str(FakeConfirmationGateway.edits[-1]["caption"])
+    caption = str(FakeConfirmationGateway.edits[-1]["caption"])
+    assert "✅✅ CONFIRMATION COMPLETED ✅✅" in caption
+    assert "🟢 CONFIRMED" in caption
+    assert "✅ EVIDENCE CONFIRMED" in caption
+    assert "Confirmed By: receiver" in caption
+
+
+@pytest.mark.asyncio
+async def test_gateway_edit_caption_removes_confirmation_buttons_with_empty_markup() -> None:
+    observed_payload: dict[str, object] | None = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal observed_payload
+        assert request.url.path.endswith("/editMessageCaption")
+        observed_payload = json.loads(request.content.decode())
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = TelegramBotApiGateway(token="123:test-token", client=client)
+        await gateway.edit_message_caption(
+            chat_id=-100123,
+            message_id=777,
+            caption="terminal",
+            buttons=None,
+        )
+
+    assert observed_payload is not None
+    assert observed_payload["reply_markup"] == {"inline_keyboard": []}
+
+
+@pytest.mark.asyncio
+async def test_duplicate_venmo_confirm_repairs_stale_message_without_duplicate_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await seed_venmo(tmp_path)
+    reset_fake_gateway()
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-100123")
+    get_settings.cache_clear()
+    gateway = FakeConfirmationGateway()
+    update = TelegramBotUpdate(
+        update_id=1,
+        payload={
+            "callback_query": {
+                "id": "callback-duplicate",
+                "data": encode_venmo_confirmation_callback(
+                    501,
+                    VenmoConfirmationCallbackAction.CONFIRM,
+                ),
+                "from": {"id": 700, "username": "receiver"},
+                "message": {
+                    "message_id": 777,
+                    "chat": {"id": -100123, "type": "supergroup"},
+                },
+            }
+        },
+    )
+
+    await handle_cashout_bot_update(
+        update,
+        gateway=gateway,
+        session_factory=TestSessionFactory,
+        report=lambda _: None,
+    )
+    await handle_cashout_bot_update(
+        update,
+        gateway=gateway,
+        session_factory=TestSessionFactory,
+        report=lambda _: None,
+    )
+
+    async with TestSessionFactory() as session:
+        events = list(
+            await session.scalars(
+                select(VenmoConfirmationEvent).where(
+                    VenmoConfirmationEvent.request_id == 100,
+                    VenmoConfirmationEvent.event_type == VenmoConfirmationEventType.CONFIRMED,
+                )
+            )
+        )
+    assert len(events) == 1
+    assert FakeConfirmationGateway.edits[-1]["buttons"] is None
+    assert "✅✅ CONFIRMATION COMPLETED ✅✅" in str(
+        FakeConfirmationGateway.edits[-1]["caption"]
+    )
+    assert FakeConfirmationGateway.answers[-1]["text"] == "Already confirmed."
+
+
+@pytest.mark.asyncio
+async def test_venmo_confirm_edit_failure_preserves_confirmed_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await seed_venmo(tmp_path)
+    reset_fake_gateway()
+    FakeConfirmationGateway.fail_edit = True
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-100123")
+    get_settings.cache_clear()
+    gateway = FakeConfirmationGateway()
+
+    await handle_cashout_bot_update(
+        TelegramBotUpdate(
+            update_id=1,
+            payload={
+                "callback_query": {
+                    "id": "callback-edit-fails",
+                    "data": encode_venmo_confirmation_callback(
+                        501,
+                        VenmoConfirmationCallbackAction.CONFIRM,
+                    ),
+                    "from": {"id": 700, "username": "receiver"},
+                    "message": {
+                        "message_id": 777,
+                        "chat": {"id": -100123, "type": "supergroup"},
+                    },
+                }
+            },
+        ),
+        gateway=gateway,
+        session_factory=TestSessionFactory,
+        report=lambda _: None,
+    )
+
+    async with TestSessionFactory() as session:
+        request = await session.get(VenmoConfirmationRequest, 100)
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+        confirmed_events = list(
+            await session.scalars(
+                select(VenmoConfirmationEvent).where(
+                    VenmoConfirmationEvent.request_id == 100,
+                    VenmoConfirmationEvent.event_type == VenmoConfirmationEventType.CONFIRMED,
+                )
+            )
+        )
+    assert request is not None
+    assert attempt is not None
+    assert request.status == VenmoConfirmationStatus.CONFIRMED
+    assert attempt.status == VenmoConfirmationAttemptStatus.CONFIRMED
+    assert attempt.last_error == "terminal_sync_failed: caption edit failed"
+    assert len(confirmed_events) == 1
+    assert FakeConfirmationGateway.answers[-1]["text"] == "Confirmation marked confirmed."
 
 
 @pytest.mark.asyncio
@@ -564,7 +721,121 @@ async def test_venmo_telegram_not_received_callback_records_inquiry(
     assert attempt is not None
     assert request.status == VenmoConfirmationStatus.NOT_RECEIVED
     assert attempt.status == VenmoConfirmationAttemptStatus.NOT_RECEIVED
-    assert "Not received" in str(FakeConfirmationGateway.edits[-1]["caption"])
+    caption = str(FakeConfirmationGateway.edits[-1]["caption"])
+    assert "⚠️ CONFIRMATION NOT RECEIVED" in caption
+    assert "🟡 FOLLOW-UP REQUIRED" in caption
+    assert "The evidence was marked Not Received." in caption
+
+
+@pytest.mark.asyncio
+async def test_duplicate_venmo_not_received_repairs_stale_message_without_duplicate_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await seed_venmo(tmp_path)
+    async with TestSessionFactory() as session:
+        existing = await session.get(VenmoConfirmationInquiry, 601)
+        assert existing is not None
+        await session.delete(existing)
+        await session.commit()
+    reset_fake_gateway()
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-100123")
+    get_settings.cache_clear()
+    gateway = FakeConfirmationGateway()
+    update = TelegramBotUpdate(
+        update_id=1,
+        payload={
+            "callback_query": {
+                "id": "callback-not-received-duplicate",
+                "data": encode_venmo_confirmation_callback(
+                    501,
+                    VenmoConfirmationCallbackAction.NOT_RECEIVED,
+                ),
+                "from": {"id": 700, "username": "receiver"},
+                "message": {
+                    "message_id": 777,
+                    "chat": {"id": -100123, "type": "supergroup"},
+                },
+            }
+        },
+    )
+
+    await handle_cashout_bot_update(
+        update,
+        gateway=gateway,
+        session_factory=TestSessionFactory,
+        report=lambda _: None,
+    )
+    await handle_cashout_bot_update(
+        update,
+        gateway=gateway,
+        session_factory=TestSessionFactory,
+        report=lambda _: None,
+    )
+
+    async with TestSessionFactory() as session:
+        events = list(
+            await session.scalars(
+                select(VenmoConfirmationEvent).where(
+                    VenmoConfirmationEvent.request_id == 100,
+                    VenmoConfirmationEvent.event_type == VenmoConfirmationEventType.NOT_RECEIVED,
+                )
+            )
+        )
+        inquiries = list(
+            await session.scalars(
+                select(VenmoConfirmationInquiry).where(
+                    VenmoConfirmationInquiry.request_id == 100,
+                )
+            )
+        )
+    assert len(events) == 1
+    assert len(inquiries) == 1
+    assert FakeConfirmationGateway.edits[-1]["buttons"] is None
+    assert "⚠️ CONFIRMATION NOT RECEIVED" in str(FakeConfirmationGateway.edits[-1]["caption"])
+    assert FakeConfirmationGateway.answers[-1]["text"] == "Confirmation was already resolved."
+
+
+@pytest.mark.asyncio
+async def test_venmo_reconciliation_repairs_confirmed_terminal_message(
+    tmp_path: Path,
+) -> None:
+    await seed_venmo(tmp_path)
+    reset_fake_gateway()
+    async with TestSessionFactory() as session, session.begin():
+        request = await session.get(VenmoConfirmationRequest, 100)
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+        assert request is not None
+        assert attempt is not None
+        request.status = VenmoConfirmationStatus.CONFIRMED
+        request.confirmed_at = datetime(2026, 7, 15, 16, 0, tzinfo=UTC)
+        request.confirmed_by_display_name = "receiver"
+        attempt.status = VenmoConfirmationAttemptStatus.CONFIRMED
+        attempt.last_error = "terminal_sync_failed: stale"
+
+    result = await reconcile_venmo_confirmation_telegram_state(
+        request_id=100,
+        gateway=FakeConfirmationGateway(),
+    )
+
+    async with TestSessionFactory() as session:
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+    assert result.status == "confirmed"
+    assert result.sync_result == "edited_terminal"
+    assert attempt is not None
+    assert attempt.last_error is None
+    assert FakeConfirmationGateway.edits[-1]["buttons"] is None
+    assert FakeConfirmationGateway.edits[-1]["caption"] == (
+        "✅✅ CONFIRMATION COMPLETED ✅✅\n"
+        "🟢 CONFIRMED\n"
+        "\n"
+        "Request ID: #100\n"
+        "\n"
+        "✅ EVIDENCE CONFIRMED\n"
+        "\n"
+        "Confirmed By: receiver\n"
+        "Confirmed At: 2026-07-15 16:00 UTC"
+    )
 
 
 @pytest.mark.asyncio

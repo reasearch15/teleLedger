@@ -5,8 +5,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
+import { useLiveUpdates } from "@/components/live-updates-provider";
 import { friendlyError } from "@/lib/api-client";
 import { environment } from "@/lib/env";
+import { VENMO_CONFIRMATION_EVENTS } from "@/lib/live-events";
 import {
   confirmVenmoAttempt,
   dismissVenmoInquiry,
@@ -31,6 +33,20 @@ const statusLabels: Record<string, string> = {
   open: "Open",
   dismissed: "Dismissed",
   resent: "Resent",
+};
+
+const statusPanelClasses: Record<string, string> = {
+  confirmed: "border-emerald-300 bg-emerald-50",
+  not_received: "border-amber-300 bg-amber-50",
+  pending: "border-slate-200 bg-white",
+  cancelled: "border-slate-200 bg-slate-50",
+};
+
+const statusTextClasses: Record<string, string> = {
+  confirmed: "text-emerald-900",
+  not_received: "text-amber-900",
+  pending: "text-slate-950",
+  cancelled: "text-slate-700",
 };
 
 function formatDate(value: string | null): string {
@@ -78,6 +94,7 @@ export default function VenmoConfirmationDetailPage() {
     }, 0);
     return () => window.clearTimeout(timeoutId);
   }, [refresh]);
+  useLiveUpdates(VENMO_CONFIRMATION_EVENTS, refresh, Number.isFinite(requestId));
 
   const mediaUrl = useMemo(() => {
     if (!detail?.media) return null;
@@ -170,15 +187,29 @@ export default function VenmoConfirmationDetailPage() {
       ) : null}
       {detail ? (
         <div className="grid gap-6">
-          <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+          <section
+            className={`rounded-lg border p-5 shadow-sm ${
+              statusPanelClasses[detail.status] ?? statusPanelClasses.pending
+            }`}
+          >
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">
                   Current status
                 </p>
-                <h2 className="mt-1 text-2xl font-black text-slate-950">
+                <h2
+                  className={`mt-1 text-2xl font-black ${
+                    statusTextClasses[detail.status] ?? statusTextClasses.pending
+                  }`}
+                >
+                  {detail.status === "confirmed" ? "✅ " : ""}
                   {statusLabels[detail.status]}
                 </h2>
+                {detail.status === "confirmed" ? (
+                  <p className="mt-2 inline-flex rounded-full bg-emerald-600 px-3 py-1 text-xs font-black uppercase tracking-[0.12em] text-white">
+                    ✓ Confirmed
+                  </p>
+                ) : null}
               </div>
               <button
                 type="button"

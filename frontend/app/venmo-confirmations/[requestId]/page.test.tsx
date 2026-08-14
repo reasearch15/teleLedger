@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import VenmoConfirmationDetailPage from "@/app/venmo-confirmations/[requestId]/page";
+import { useLiveUpdates } from "@/components/live-updates-provider";
 import {
   confirmVenmoAttempt,
   dismissVenmoInquiry,
@@ -35,6 +36,10 @@ vi.mock("@/components/auth-provider", () => ({
       last_login_at: null,
     },
   }),
+}));
+
+vi.mock("@/components/live-updates-provider", () => ({
+  useLiveUpdates: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -122,6 +127,7 @@ describe("VenmoConfirmationDetailPage", () => {
 
   beforeEach(() => {
     mockState.role = "staff";
+    vi.mocked(useLiveUpdates).mockReset();
     vi.mocked(getVenmoConfirmation).mockReset();
     vi.mocked(confirmVenmoAttempt).mockReset();
     vi.mocked(markVenmoAttemptNotReceived).mockReset();
@@ -201,6 +207,27 @@ describe("VenmoConfirmationDetailPage", () => {
     expect(screen.getByText("#1")).toBeInTheDocument();
     expect(screen.getByText(/Inquiry #12/)).toBeInTheDocument();
     expect(screen.getByText("attempt posted")).toBeInTheDocument();
+    expect(useLiveUpdates).toHaveBeenCalledWith(
+      ["venmo_confirmation_updated"],
+      expect.any(Function),
+      true,
+    );
+  });
+
+  it("renders confirmed detail state as a strong green success state", async () => {
+    vi.mocked(getVenmoConfirmation).mockResolvedValueOnce({
+      ...detail,
+      status: "confirmed",
+      confirmed_at: "2026-07-15T15:55:00Z",
+      confirmed_by_display_name: "receiver",
+    });
+
+    render(<VenmoConfirmationDetailPage />);
+
+    const heading = await screen.findByRole("heading", { name: "✅ Confirmed" });
+    expect(heading).toHaveClass("text-emerald-900");
+    expect(screen.getByText("✓ Confirmed")).toHaveClass("bg-emerald-600");
+    expect(screen.getByText("receiver")).toBeInTheDocument();
   });
 
   it("keeps Venmo mutation buttons safe during duplicate clicks", async () => {

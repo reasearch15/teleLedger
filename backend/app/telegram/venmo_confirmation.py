@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 
 
@@ -76,3 +77,40 @@ def venmo_confirmation_resolved_caption(
 ) -> str:
     suffix = f" by {display_name}" if display_name else ""
     return f"Confirmation request #{request_id}\n{status_label}{suffix}"
+
+
+def format_venmo_confirmation_confirmed_caption(
+    *,
+    request_id: int,
+    confirmed_by: str | None,
+    confirmed_at: datetime | None,
+) -> str:
+    lines = [
+        "✅✅ CONFIRMATION COMPLETED ✅✅",
+        "🟢 CONFIRMED",
+        "",
+        f"Request ID: #{request_id}",
+        "",
+        "✅ EVIDENCE CONFIRMED",
+    ]
+    if confirmed_by:
+        lines.extend(["", f"Confirmed By: {confirmed_by}"])
+    if confirmed_at is not None:
+        lines.append(f"Confirmed At: {confirmed_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    return "\n".join(lines)
+
+
+def format_venmo_confirmation_not_received_caption(
+    *,
+    request_id: int,
+) -> str:
+    return "\n".join(
+        [
+            "⚠️ CONFIRMATION NOT RECEIVED",
+            "🟡 FOLLOW-UP REQUIRED",
+            "",
+            f"Request ID: #{request_id}",
+            "",
+            "The evidence was marked Not Received.",
+        ]
+    )

@@ -21,6 +21,7 @@ from app.telegram.cashout_bot.api import (
 )
 from app.telegram.peer_ids import normalize_telegram_chat_id
 from app.telegram.venmo_confirmation import decode_venmo_confirmation_callback
+from app.websocket.events import LiveEventType, event_broker
 
 logger = get_logger(__name__)
 TerminalReporter = Callable[[str], None]
@@ -153,6 +154,16 @@ async def _handle_callback(
                 gateway=gateway,
             )
             await session.commit()
+        if result.request_id is not None and result.status in {
+            "confirmed",
+            "not_received",
+            "already_resolved",
+        }:
+            await event_broker.publish(
+                LiveEventType.VENMO_CONFIRMATION_UPDATED,
+                venmo_confirmation_request_id=result.request_id,
+                broadcast=True,
+            )
         logger.info(
             "venmo_confirmation_callback_routed",
             extra={

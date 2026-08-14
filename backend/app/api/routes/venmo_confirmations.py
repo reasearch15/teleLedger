@@ -39,6 +39,7 @@ from app.telegram.cashout_bot.api import TelegramBotApiError, TelegramBotApiGate
 from app.telegram.inquiry_media import ALLOWED_IMAGE_MIME_TYPES
 from app.telegram.peer_ids import normalize_telegram_chat_id
 from app.telegram.venmo_confirmation import venmo_confirmation_buttons, venmo_confirmation_caption
+from app.websocket.events import LiveEventType, event_broker
 
 router = APIRouter(prefix="/api/venmo-confirmations", tags=["venmo-confirmations"])
 
@@ -213,6 +214,7 @@ async def confirm_venmo_attempt(
             display_name=current_user.username,
         )
         await session.commit()
+        await _publish_venmo_confirmation_update(attempt.request_id)
         return await get_venmo_confirmation(attempt.request_id, session, current_user)
     except Exception as error:
         _raise_venmo_error(error)
@@ -235,6 +237,7 @@ async def mark_venmo_attempt_not_received(
             raise VenmoConfirmationNotFoundError("Venmo confirmation attempt was not found.")
         await service.mark_attempt_not_received(attempt_id=attempt_id, coadmin_id=coadmin_id)
         await session.commit()
+        await _publish_venmo_confirmation_update(attempt.request_id)
         return await get_venmo_confirmation(attempt.request_id, session, current_user)
     except Exception as error:
         _raise_venmo_error(error)
@@ -625,3 +628,11 @@ def _raise_venmo_error(error: Exception) -> None:
     if isinstance(error, VenmoConfirmationStateConflictError):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     raise error
+
+
+async def _publish_venmo_confirmation_update(request_id: int) -> None:
+    await event_broker.publish(
+        LiveEventType.VENMO_CONFIRMATION_UPDATED,
+        venmo_confirmation_request_id=request_id,
+        broadcast=True,
+    )

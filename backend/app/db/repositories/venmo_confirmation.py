@@ -173,6 +173,21 @@ class VenmoConfirmationRepository(BaseRepository[VenmoConfirmationRequest]):
         )
         return list((await self._session.scalars(statement)).all())
 
+    async def latest_attempt_for_request(
+        self,
+        request_id: int,
+    ) -> VenmoConfirmationAttempt | None:
+        statement = (
+            select(VenmoConfirmationAttempt)
+            .where(VenmoConfirmationAttempt.request_id == request_id)
+            .order_by(
+                VenmoConfirmationAttempt.attempt_number.desc(),
+                VenmoConfirmationAttempt.id.desc(),
+            )
+            .limit(1)
+        )
+        return (await self._session.execute(statement)).scalar_one_or_none()
+
     async def list_inquiries(self, request_id: int) -> list[VenmoConfirmationInquiry]:
         statement = (
             select(VenmoConfirmationInquiry)
