@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -26,6 +27,17 @@ from app.models.venmo_confirmation import (
     VenmoConfirmationEventType,
     VenmoConfirmationInquiry,
     VenmoConfirmationRequest,
+    VenmoConfirmationStatus,
+)
+from app.telegram.cashout_bot.api import (
+    TelegramBotApiError,
+    TelegramBotFailureClass,
+    TelegramBotUpdate,
+)
+from app.telegram.cashout_bot.updates import handle_cashout_bot_update
+from app.telegram.venmo_confirmation import (
+    VenmoConfirmationCallbackAction,
+    encode_venmo_confirmation_callback,
 )
 
 test_engine = create_async_engine(
@@ -237,6 +249,80 @@ def upload_stayed_inside_media_root(
     )
 
 
+class FakeConfirmationGateway:
+    sent: list[dict[str, object]] = []
+    answers: list[dict[str, object]] = []
+    edits: list[dict[str, object]] = []
+    fail_send = False
+
+    async def __aenter__(self) -> FakeConfirmationGateway:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    async def send_photo(
+        self,
+        *,
+        chat_id: int,
+        photo_path: Path,
+        caption: str,
+        buttons: list[list[tuple[str, str]]],
+        mime_type: str,
+        filename: str | None = None,
+    ) -> int | None:
+        if self.fail_send:
+            raise TelegramBotApiError(
+                "temporary send failure",
+                failure_class=TelegramBotFailureClass.RETRYABLE,
+            )
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "photo_path": photo_path,
+                "photo_exists": await asyncio.to_thread(photo_path.exists),
+                "caption": caption,
+                "buttons": buttons,
+                "mime_type": mime_type,
+                "filename": filename,
+            }
+        )
+        return 9000 + len(self.sent)
+
+    async def answer_callback_query(
+        self,
+        *,
+        query_id: str,
+        text: str,
+        alert: bool = False,
+    ) -> None:
+        self.answers.append({"query_id": query_id, "text": text, "alert": alert})
+
+    async def edit_message_caption(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        caption: str,
+        buttons: list[list[tuple[str, str]]] | None = None,
+    ) -> None:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "caption": caption,
+                "buttons": buttons,
+            }
+        )
+
+
+def reset_fake_gateway() -> None:
+    FakeConfirmationGateway.sent = []
+    FakeConfirmationGateway.answers = []
+    FakeConfirmationGateway.edits = []
+    FakeConfirmationGateway.fail_send = False
+
+
 @pytest.mark.asyncio
 async def test_notification_list_count_and_read_are_scoped() -> None:
     await seed_notification()
@@ -289,6 +375,196 @@ async def test_venmo_and_media_access_are_coadmin_scoped(tmp_path: Path) -> None
         media = await client.get("/api/venmo-confirmations/media/1")
         assert media.status_code == 200
         assert media.content == b"fake-image"
+
+
+@pytest.mark.asyncio
+async def test_staff_can_create_generic_confirmation_with_image_and_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_fake_gateway()
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-1001234567890")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.api.routes.venmo_confirmations.TelegramBotApiGateway",
+        FakeConfirmationGateway,
+    )
+
+    async with api_client_for(STAFF) as client:
+        response = await client.post(
+            "/api/venmo-confirmations",
+            data={"payment_note": "PayPal ref ABC"},
+            files={"file": ("dog.png", PNG_BYTES, "image/png")},
+        )
+        listed = await client.get("/api/venmo-confirmations")
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["payment_note"] == "PayPal ref ABC"
+    assert body["media"]["original_filename"] == "dog.png"
+    assert body["attempts"][0]["status"] == "posted"
+    assert body["attempts"][0]["telegram_message_id"] == 9001
+    assert body["events"][0]["event_type"] == "request_created"
+    assert "attempt_posted" in [event["event_type"] for event in body["events"]]
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["id"] == body["id"]
+    assert FakeConfirmationGateway.sent
+    sent = FakeConfirmationGateway.sent[0]
+    assert sent["mime_type"] == "image/png"
+    assert sent["photo_exists"] is True
+    assert "Confirmation request #" in str(sent["caption"])
+    labels = [label for row in sent["buttons"] for label, _ in row]
+    assert labels == ["Confirm", "Not Received"]
+
+
+@pytest.mark.asyncio
+async def test_coadmin_can_create_confirmation_without_payment_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_fake_gateway()
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-1001234567890")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.api.routes.venmo_confirmations.TelegramBotApiGateway",
+        FakeConfirmationGateway,
+    )
+
+    async with api_client_for(COADMIN) as client:
+        response = await client.post(
+            "/api/venmo-confirmations",
+            files={"file": ("arbitrary-test-image.png", PNG_BYTES, "image/png")},
+        )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["requested_by_staff_id"] is None
+    assert body["payment_note"] is None
+    assert body["media"]["original_filename"] == "arbitrary-test-image.png"
+
+
+@pytest.mark.asyncio
+async def test_telegram_failure_leaves_durable_confirmation_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_fake_gateway()
+    FakeConfirmationGateway.fail_send = True
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-1001234567890")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.api.routes.venmo_confirmations.TelegramBotApiGateway",
+        FakeConfirmationGateway,
+    )
+
+    async with api_client_for(STAFF) as client:
+        response = await client.post(
+            "/api/venmo-confirmations",
+            files={"file": ("receipt.png", PNG_BYTES, "image/png")},
+        )
+        listed = await client.get("/api/venmo-confirmations")
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["attempts"][0]["status"] == "failed_to_send"
+    assert body["attempts"][0]["last_error"] == "temporary send failure"
+    assert body["events"][-1]["event_type"] == "failure"
+    assert listed.json()["items"][0]["id"] == body["id"]
+
+
+@pytest.mark.asyncio
+async def test_venmo_telegram_confirm_callback_marks_request_confirmed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await seed_venmo(tmp_path)
+    reset_fake_gateway()
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-100123")
+    get_settings.cache_clear()
+    gateway = FakeConfirmationGateway()
+
+    update = TelegramBotUpdate(
+        update_id=1,
+        payload={
+            "callback_query": {
+                "id": "callback-1",
+                "data": encode_venmo_confirmation_callback(
+                    501,
+                    VenmoConfirmationCallbackAction.CONFIRM,
+                ),
+                "from": {"id": 700, "username": "receiver"},
+                "message": {
+                    "message_id": 777,
+                    "chat": {"id": -100123, "type": "supergroup"},
+                },
+            }
+        },
+    )
+
+    await handle_cashout_bot_update(
+        update,
+        gateway=gateway,
+        session_factory=TestSessionFactory,
+        report=lambda _: None,
+    )
+
+    async with TestSessionFactory() as session:
+        request = await session.get(VenmoConfirmationRequest, 100)
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+    assert request is not None
+    assert attempt is not None
+    assert request.status == VenmoConfirmationStatus.CONFIRMED
+    assert attempt.status == VenmoConfirmationAttemptStatus.CONFIRMED
+    assert FakeConfirmationGateway.edits[-1]["buttons"] is None
+    assert "Confirmed" in str(FakeConfirmationGateway.edits[-1]["caption"])
+
+
+@pytest.mark.asyncio
+async def test_venmo_telegram_not_received_callback_records_inquiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await seed_venmo(tmp_path)
+    async with TestSessionFactory() as session:
+        existing = await session.get(VenmoConfirmationInquiry, 601)
+        assert existing is not None
+        await session.delete(existing)
+        await session.commit()
+    reset_fake_gateway()
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-100123")
+    get_settings.cache_clear()
+    gateway = FakeConfirmationGateway()
+
+    update = TelegramBotUpdate(
+        update_id=1,
+        payload={
+            "callback_query": {
+                "id": "callback-2",
+                "data": encode_venmo_confirmation_callback(
+                    501,
+                    VenmoConfirmationCallbackAction.NOT_RECEIVED,
+                ),
+                "from": {"id": 700, "username": "receiver"},
+                "message": {
+                    "message_id": 777,
+                    "chat": {"id": -100123, "type": "supergroup"},
+                },
+            }
+        },
+    )
+
+    await handle_cashout_bot_update(
+        update,
+        gateway=gateway,
+        session_factory=TestSessionFactory,
+        report=lambda _: None,
+    )
+
+    async with TestSessionFactory() as session:
+        request = await session.get(VenmoConfirmationRequest, 100)
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+    assert request is not None
+    assert attempt is not None
+    assert request.status == VenmoConfirmationStatus.NOT_RECEIVED
+    assert attempt.status == VenmoConfirmationAttemptStatus.NOT_RECEIVED
+    assert "Not received" in str(FakeConfirmationGateway.edits[-1]["caption"])
 
 
 @pytest.mark.asyncio

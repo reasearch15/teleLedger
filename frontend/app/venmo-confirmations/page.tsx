@@ -1,11 +1,15 @@
 "use client";
 
 import Link from "next/link";
+import type { FormEvent } from "react";
 import { useCallback, useEffect, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { friendlyError } from "@/lib/api-client";
-import { listVenmoConfirmations } from "@/services/venmo-confirmations";
+import {
+  createVenmoConfirmation,
+  listVenmoConfirmations,
+} from "@/services/venmo-confirmations";
 import type { VenmoConfirmationSummary } from "@/types/api";
 
 const statusLabels: Record<string, string> = {
@@ -27,6 +31,12 @@ export default function VenmoConfirmationsPage() {
   const [items, setItems] = useState<VenmoConfirmationSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [paymentNote, setPaymentNote] = useState("");
+  const [createStatus, setCreateStatus] = useState("");
+  const [createError, setCreateError] = useState("");
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -47,6 +57,52 @@ export default function VenmoConfirmationsPage() {
     return () => window.clearTimeout(timeoutId);
   }, [refresh]);
 
+  useEffect(() => {
+    if (!previewUrl) return;
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
+
+  async function submitConfirmation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedFile) {
+      setCreateError("Choose an evidence image before submitting.");
+      return;
+    }
+    setCreating(true);
+    setCreateError("");
+    setCreateStatus("");
+    try {
+      const created = await createVenmoConfirmation(selectedFile, paymentNote);
+      setItems((current) => [
+        {
+          id: created.id,
+          coadmin_id: created.coadmin_id,
+          requested_by_staff_id: created.requested_by_staff_id,
+          requested_by_username: created.requested_by_username,
+          coadmin_username: created.coadmin_username,
+          screenshot_media_asset_id: created.screenshot_media_asset_id,
+          status: created.status,
+          payment_note: created.payment_note,
+          metadata: created.metadata,
+          confirmed_at: created.confirmed_at,
+          confirmed_by_display_name: created.confirmed_by_display_name,
+          created_at: created.created_at,
+          updated_at: created.updated_at,
+          media: created.media,
+        },
+        ...current.filter((item) => item.id !== created.id),
+      ]);
+      setCreateStatus(`Confirmation request #${created.id} created.`);
+      setSelectedFile(null);
+      setPreviewUrl("");
+      setPaymentNote("");
+    } catch (createRequestError) {
+      setCreateError(friendlyError(createRequestError));
+    } finally {
+      setCreating(false);
+    }
+  }
+
   return (
     <AppShell
       title="Venmo Confirmations"
@@ -64,15 +120,84 @@ export default function VenmoConfirmationsPage() {
         <p className="text-sm text-slate-600">
           {loading ? "Loading..." : `${items.length} requests`}
         </p>
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          disabled={loading}
-          className="text-sm font-bold text-indigo-600 disabled:opacity-50"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          <a href="#new-confirmation" className="text-sm font-bold text-indigo-600">
+            New Confirmation
+          </a>
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            disabled={loading}
+            className="text-sm font-bold text-indigo-600 disabled:opacity-50"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
+      <section
+        id="new-confirmation"
+        className="mb-5 rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-black text-slate-950">New Confirmation</h2>
+          </div>
+        </div>
+        <form className="mt-4 grid gap-4" onSubmit={(event) => void submitConfirmation(event)}>
+          <label className="grid gap-2 text-sm font-bold text-slate-700">
+            Evidence image
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              disabled={creating}
+              onChange={(event) => {
+                setCreateError("");
+                setCreateStatus("");
+                const file = event.target.files?.[0] ?? null;
+                setSelectedFile(file);
+                setPreviewUrl(file ? URL.createObjectURL(file) : "");
+              }}
+              className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-50 file:px-3 file:py-1.5 file:text-sm file:font-bold file:text-indigo-700"
+            />
+          </label>
+          {previewUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={previewUrl}
+              alt="Selected confirmation evidence preview"
+              className="max-h-56 w-fit max-w-full rounded-lg border border-slate-200 object-contain"
+            />
+          ) : null}
+          <label className="grid gap-2 text-sm font-bold text-slate-700">
+            Note / context
+            <textarea
+              value={paymentNote}
+              disabled={creating}
+              onChange={(event) => setPaymentNote(event.target.value)}
+              rows={3}
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-800"
+              placeholder="Optional reference, player, amount, or context"
+            />
+          </label>
+          {createError ? (
+            <p role="alert" className="text-sm font-bold text-red-700">
+              {createError}
+            </p>
+          ) : null}
+          {createStatus ? (
+            <p className="text-sm font-bold text-emerald-700">{createStatus}</p>
+          ) : null}
+          <div>
+            <button
+              type="submit"
+              disabled={creating}
+              className="rounded-lg bg-slate-950 px-4 py-2 text-sm font-black text-white disabled:opacity-50"
+            >
+              {creating ? "Sending..." : "Submit & Send"}
+            </button>
+          </div>
+        </form>
+      </section>
       <section className="grid gap-3">
         {!loading && items.length === 0 ? (
           <div className="rounded-lg border border-dashed border-slate-300 bg-white p-8 text-center text-sm font-semibold text-slate-600">

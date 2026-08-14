@@ -2,7 +2,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import VenmoConfirmationsPage from "@/app/venmo-confirmations/page";
-import { listVenmoConfirmations } from "@/services/venmo-confirmations";
+import {
+  createVenmoConfirmation,
+  listVenmoConfirmations,
+} from "@/services/venmo-confirmations";
 import type { VenmoConfirmationListResponse } from "@/types/api";
 
 vi.mock("@/components/app-shell", () => ({
@@ -26,6 +29,7 @@ vi.mock("next/link", () => ({
 }));
 
 vi.mock("@/services/venmo-confirmations", () => ({
+  createVenmoConfirmation: vi.fn(),
   listVenmoConfirmations: vi.fn(),
 }));
 
@@ -54,6 +58,9 @@ describe("VenmoConfirmationsPage", () => {
   afterEach(() => cleanup());
 
   beforeEach(() => {
+    global.URL.createObjectURL = vi.fn(() => "blob:preview");
+    global.URL.revokeObjectURL = vi.fn();
+    vi.mocked(createVenmoConfirmation).mockReset();
     vi.mocked(listVenmoConfirmations).mockReset();
     vi.mocked(listVenmoConfirmations).mockResolvedValue(listResponse);
   });
@@ -85,5 +92,50 @@ describe("VenmoConfirmationsPage", () => {
     await waitFor(() =>
       expect(screen.getByText("No Venmo confirmation requests found.")).toBeInTheDocument(),
     );
+    expect(screen.getByRole("link", { name: "New Confirmation" })).toHaveAttribute(
+      "href",
+      "#new-confirmation",
+    );
+  });
+
+  it("shows New Confirmation on an empty list and submits image evidence", async () => {
+    vi.mocked(listVenmoConfirmations).mockResolvedValueOnce({ items: [] });
+    vi.mocked(createVenmoConfirmation).mockResolvedValue({
+      ...listResponse.items[0],
+      id: 88,
+      payment_note: "Any provider evidence",
+      media: {
+        id: 9,
+        original_filename: "dog.png",
+        mime_type: "image/png",
+        size_bytes: 16,
+        created_at: "2026-07-15T15:45:00Z",
+        preview_url: "/api/venmo-confirmations/media/9",
+      },
+      attempts: [],
+      inquiries: [],
+      events: [],
+    });
+
+    render(<VenmoConfirmationsPage />);
+
+    expect(await screen.findByText("No Venmo confirmation requests found.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "New Confirmation" })).toBeInTheDocument();
+
+    const file = new File(["png"], "dog.png", { type: "image/png" });
+    fireEvent.change(screen.getByLabelText("Evidence image"), {
+      target: { files: [file] },
+    });
+    fireEvent.change(screen.getByLabelText("Note / context"), {
+      target: { value: "Any provider evidence" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Submit & Send" }));
+
+    await waitFor(() => expect(createVenmoConfirmation).toHaveBeenCalledWith(
+      file,
+      "Any provider evidence",
+    ));
+    expect(await screen.findByText("Confirmation request #88 created.")).toBeInTheDocument();
+    expect(await screen.findByText("Request #88")).toBeInTheDocument();
   });
 });

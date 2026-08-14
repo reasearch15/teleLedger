@@ -8,6 +8,21 @@ export function listVenmoConfirmations(): Promise<VenmoConfirmationListResponse>
   return apiRequest<VenmoConfirmationListResponse>("/api/venmo-confirmations");
 }
 
+export function createVenmoConfirmation(
+  file: File,
+  paymentNote?: string,
+): Promise<VenmoConfirmationDetail> {
+  const form = new FormData();
+  form.append("file", file);
+  if (paymentNote?.trim()) {
+    form.append("payment_note", paymentNote.trim());
+  }
+  return apiRequest<VenmoConfirmationDetail>("/api/venmo-confirmations", {
+    method: "POST",
+    body: form,
+  });
+}
+
 export function getVenmoConfirmation(
   requestId: number,
 ): Promise<VenmoConfirmationDetail> {

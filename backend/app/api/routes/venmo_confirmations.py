@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
 from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
@@ -35,7 +35,10 @@ from app.services.venmo_confirmation import (
     VenmoConfirmationService,
     VenmoConfirmationStateConflictError,
 )
+from app.telegram.cashout_bot.api import TelegramBotApiError, TelegramBotApiGateway
 from app.telegram.inquiry_media import ALLOWED_IMAGE_MIME_TYPES
+from app.telegram.peer_ids import normalize_telegram_chat_id
+from app.telegram.venmo_confirmation import venmo_confirmation_buttons, venmo_confirmation_caption
 
 router = APIRouter(prefix="/api/venmo-confirmations", tags=["venmo-confirmations"])
 
@@ -122,6 +125,50 @@ class VenmoRequestDetailResponse(VenmoRequestSummaryResponse):
 
 class VenmoRequestListResponse(BaseModel):
     items: list[VenmoRequestSummaryResponse]
+
+
+@router.post("", response_model=VenmoRequestDetailResponse, status_code=status.HTTP_201_CREATED)
+async def create_venmo_confirmation(
+    session: DatabaseSession,
+    current_user: CurrentUser,
+    file: Annotated[UploadFile, File()],
+    payment_note: Annotated[str | None, Form()] = None,
+) -> VenmoRequestDetailResponse:
+    service = VenmoConfirmationService(session)
+    try:
+        coadmin_id = service._actor_coadmin_id(current_user)  # noqa: SLF001
+        upload = await _prepare_payment_screenshot_upload(
+            file,
+            coadmin_id=coadmin_id,
+            request_id=None,
+        )
+        await asyncio.to_thread(_write_upload, upload.storage_key, upload.content)
+        media = await service.create_media_asset(
+            coadmin_id=coadmin_id,
+            storage_key=upload.storage_key,
+            original_filename=upload.original_filename,
+            mime_type=upload.mime_type,
+            size_bytes=len(upload.content),
+            checksum_sha256=hashlib.sha256(upload.content).hexdigest(),
+            actor=current_user,
+        )
+        request = await service.create_request(
+            actor=current_user,
+            screenshot_media_asset_id=media.id,
+            payment_note=payment_note,
+        )
+        attempt = await service.create_attempt(request_id=request.id, coadmin_id=request.coadmin_id)
+        await _send_confirmation_attempt(
+            service=service,
+            request=request,
+            media=media,
+            attempt=attempt,
+            event_type=VenmoConfirmationEventType.ATTEMPT_POSTED,
+        )
+        await session.commit()
+        return await get_venmo_confirmation(request.id, session, current_user)
+    except Exception as error:
+        _raise_venmo_error(error)
 
 
 @router.get("", response_model=VenmoRequestListResponse)
@@ -226,11 +273,22 @@ async def resend_venmo_confirmation(
             request_id=request.id,
             coadmin_id=request.coadmin_id,
         )
+        media = await service.get_media_for_actor(
+            request.screenshot_media_asset_id,
+            actor=current_user,
+        )
         await service._record_event(  # noqa: SLF001
             request_id=request.id,
             attempt_id=attempt.id,
             event_type=VenmoConfirmationEventType.RESEND_REQUESTED,
             actor=current_user,
+        )
+        await _send_confirmation_attempt(
+            service=service,
+            request=request,
+            media=media,
+            attempt=attempt,
+            event_type=VenmoConfirmationEventType.RESEND_POSTED,
         )
         await session.commit()
         return await get_venmo_confirmation(request.id, session, current_user)
@@ -444,7 +502,7 @@ async def _prepare_payment_screenshot_upload(
     file: UploadFile,
     *,
     coadmin_id: int,
-    request_id: int,
+    request_id: int | None,
 ) -> _PreparedUpload:
     settings = get_settings()
     max_bytes = settings.inquiry_media_max_bytes
@@ -471,7 +529,8 @@ async def _prepare_payment_screenshot_upload(
             detail="Uploaded file content does not match a supported image type",
         )
     original_filename = _safe_original_filename(file.filename)
-    storage_key = f"venmo/{coadmin_id}/{request_id}/{uuid4().hex}-{original_filename}"
+    request_segment = str(request_id) if request_id is not None else "new"
+    storage_key = f"venmo/{coadmin_id}/{request_segment}/{uuid4().hex}-{original_filename}"
     return _PreparedUpload(
         content=content,
         storage_key=storage_key,
@@ -502,6 +561,58 @@ def _write_upload(storage_key: str, content: bytes) -> None:
     path = _media_path(storage_key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
+
+
+async def _send_confirmation_attempt(
+    *,
+    service: VenmoConfirmationService,
+    request: VenmoConfirmationRequest,
+    media: MediaAsset,
+    attempt: VenmoConfirmationAttempt,
+    event_type: VenmoConfirmationEventType,
+) -> None:
+    chat_id = normalize_telegram_chat_id(get_settings().shared_telegram_supergroup_id)
+    if chat_id is None:
+        await service.mark_attempt_failed(
+            attempt_id=attempt.id,
+            coadmin_id=request.coadmin_id,
+            error="TELEGRAM_CASHOUT_GROUP_ID is required to send confirmation requests.",
+        )
+        return
+    try:
+        async with TelegramBotApiGateway() as gateway:
+            message_id = await gateway.send_photo(
+                chat_id=chat_id,
+                photo_path=_media_path(media.storage_key),
+                caption=venmo_confirmation_caption(
+                    request_id=request.id,
+                    attempt_number=attempt.attempt_number,
+                    note=request.payment_note,
+                ),
+                buttons=venmo_confirmation_buttons(attempt.id),
+                mime_type=media.mime_type,
+                filename=media.original_filename,
+            )
+        if message_id is None:
+            await service.mark_attempt_failed(
+                attempt_id=attempt.id,
+                coadmin_id=request.coadmin_id,
+                error="Telegram Bot API did not return a message_id.",
+            )
+            return
+        await service.mark_attempt_posted(
+            attempt_id=attempt.id,
+            coadmin_id=request.coadmin_id,
+            telegram_chat_id=chat_id,
+            telegram_message_id=message_id,
+            event_type=event_type,
+        )
+    except (RuntimeError, TelegramBotApiError) as error:
+        await service.mark_attempt_failed(
+            attempt_id=attempt.id,
+            coadmin_id=request.coadmin_id,
+            error=str(error),
+        )
 
 
 def _raise_venmo_error(error: Exception) -> None:

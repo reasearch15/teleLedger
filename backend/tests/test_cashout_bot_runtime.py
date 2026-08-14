@@ -156,6 +156,52 @@ class OneCallbackThenCancelGateway(FakeBotGateway):
         ]
 
 
+class TwoCallbacksThenCancelGateway(FakeBotGateway):
+    def __init__(self, *, edit_ok: bool = True) -> None:
+        super().__init__(edit_ok=edit_ok)
+        self.calls = 0
+
+    async def get_updates(self, *, offset: int | None) -> list[TelegramBotUpdate]:
+        self.calls += 1
+        if self.calls == 1:
+            assert offset is None
+            return [
+                TelegramBotUpdate(
+                    update_id=100,
+                    payload={
+                        "callback_query": {
+                            "id": "q-first",
+                            "from": {"id": 9001, "username": "operator"},
+                            "message": {
+                                "message_id": 555,
+                                "chat": {"id": -1001234567890, "type": "supergroup"},
+                            },
+                            "data": encode_callback_data(1, CashoutCallbackAction.FULL),
+                        }
+                    },
+                )
+            ]
+        if self.calls == 2:
+            assert offset == 101
+            return [
+                TelegramBotUpdate(
+                    update_id=101,
+                    payload={
+                        "callback_query": {
+                            "id": "q-second",
+                            "from": {"id": 9002, "username": "operator_two"},
+                            "message": {
+                                "message_id": 556,
+                                "chat": {"id": -1001234567890, "type": "supergroup"},
+                            },
+                            "data": encode_callback_data(2, CashoutCallbackAction.FULL),
+                        }
+                    },
+                )
+            ]
+        raise asyncio.CancelledError
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def reset_database(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     async with test_engine.begin() as connection:
@@ -279,6 +325,24 @@ async def seed_cashout(
         await session.commit()
 
 
+async def seed_completed_cashout(
+    cashout_id: int = 1,
+    *,
+    completion_type: CashoutCompletionType = CashoutCompletionType.FULL,
+    actual_paid_amount: Decimal = Decimal("250.00"),
+    telegram_last_error: str | None = None,
+) -> None:
+    await seed_cashout(cashout_id)
+    async with TestSessionFactory() as session, session.begin():
+        stored = await session.get(CashoutRequest, cashout_id)
+        assert stored is not None
+        stored.status = CashoutStatus.COMPLETED
+        stored.completion_type = completion_type
+        stored.actual_paid_amount = actual_paid_amount
+        stored.completed_at = datetime(2026, 7, 6, 20, 45, tzinfo=UTC)
+        stored.telegram_last_error = telegram_last_error
+
+
 async def callback(action: CashoutCallbackAction, gateway: FakeBotGateway) -> Any:
     async with TestSessionFactory() as session:
         return await CashoutTelegramService(session, gateway=gateway).handle_callback_query(
@@ -355,6 +419,25 @@ async def test_full_payment_uses_authoritative_service_and_renders_completed() -
     assert gateway.edits[-1]["buttons"] is None
     assert "Completed - Full Payment" in gateway.edits[-1]["text"]
     assert "Actual Paid Amount:\n$250.00" in gateway.edits[-1]["text"]
+    assert "Completed By:\n@operator" in gateway.edits[-1]["text"]
+    assert gateway.answers[-1]["text"] == "Cashout completed (Full Payment)."
+
+
+@pytest.mark.asyncio
+async def test_full_payment_edit_failure_does_not_undo_completion() -> None:
+    await seed_cashout()
+    gateway = FakeBotGateway(edit_ok=False)
+
+    result = await callback(CashoutCallbackAction.FULL, gateway)
+
+    stored = await cashout()
+    assert result.status == "completed_full"
+    assert stored.status == CashoutStatus.COMPLETED
+    assert stored.completion_type == CashoutCompletionType.FULL
+    assert stored.actual_paid_amount == Decimal("250.00")
+    assert stored.telegram_status == CashoutTelegramStatus.SENT
+    assert stored.telegram_last_error == "terminal_sync_failed: edit failed"
+    assert gateway.answers[-1]["text"] == "Cashout completed (Full Payment)."
 
 
 @pytest.mark.asyncio
@@ -378,6 +461,31 @@ async def test_update_loop_routes_matching_callback_to_authoritative_service() -
 
 
 @pytest.mark.asyncio
+async def test_update_loop_survives_terminal_edit_failure_and_continues() -> None:
+    await seed_cashout(1, telegram_message_id=555)
+    await seed_cashout(2, telegram_message_id=556)
+    gateway = TwoCallbacksThenCancelGateway(edit_ok=False)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_cashout_bot_update_loop(
+            gateway,
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+    async with TestSessionFactory() as session:
+        first = await session.get(CashoutRequest, 1)
+        second = await session.get(CashoutRequest, 2)
+    assert first is not None
+    assert second is not None
+    assert first.status == CashoutStatus.COMPLETED
+    assert second.status == CashoutStatus.COMPLETED
+    assert first.telegram_last_error == "terminal_sync_failed: edit failed"
+    assert second.telegram_last_error == "terminal_sync_failed: edit failed"
+    assert [answer["query_id"] for answer in gateway.answers] == ["q-first", "q-second"]
+
+
+@pytest.mark.asyncio
 async def test_gateway_get_updates_read_timeout_returns_empty_poll() -> None:
     calls = 0
 
@@ -392,6 +500,29 @@ async def test_gateway_get_updates_read_timeout_returns_empty_poll() -> None:
 
     assert updates == []
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_edit_removes_buttons_with_empty_inline_keyboard_payload() -> None:
+    observed_payload: dict[str, Any] | None = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal observed_payload
+        assert request.url.path.endswith("/editMessageText")
+        observed_payload = json.loads(request.content.decode())
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = TelegramBotApiGateway(token="123:test-token", client=client)
+        await gateway.edit_cashout_task_message(
+            chat_id=-1001234567890,
+            message_id=555,
+            text="CASHOUT COMPLETED",
+            buttons=None,
+        )
+
+    assert observed_payload is not None
+    assert observed_payload["reply_markup"] == {"inline_keyboard": []}
 
 
 @pytest.mark.asyncio
@@ -615,7 +746,10 @@ async def test_valid_partial_amount_uses_authoritative_service() -> None:
     assert stored.status == CashoutStatus.COMPLETED
     assert stored.completion_type == CashoutCompletionType.PARTIAL
     assert stored.actual_paid_amount == Decimal("100.00")
+    assert gateway.edits[-1]["buttons"] is None
     assert "Completed - Partial Payment" in gateway.edits[-1]["text"]
+    assert "Requested Amount:\n$250.00" in gateway.edits[-1]["text"]
+    assert "Actual Paid Amount:\n$100.00" in gateway.edits[-1]["text"]
     assert "Unpaid Difference:\n$150.00" in gateway.edits[-1]["text"]
 
 
@@ -663,13 +797,18 @@ async def test_expired_pending_partial_state_is_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_terminal_cashout_cannot_be_completed_again() -> None:
-    await seed_cashout(status=CashoutStatus.COMPLETED)
+    await seed_completed_cashout()
     gateway = FakeBotGateway()
 
     result = await callback(CashoutCallbackAction.FULL, gateway)
 
     assert result.status == "already_completed"
     assert "already completed" in gateway.answers[-1]["text"]
+    assert gateway.edits[-1]["buttons"] is None
+    assert "Completed - Full Payment" in gateway.edits[-1]["text"]
+    async with TestSessionFactory() as session:
+        actions = list(await session.scalars(select(CashoutRequestAudit.action)))
+    assert actions.count(CashoutAuditAction.TELEGRAM_BOT_COMPLETED) == 0
 
 
 @pytest.mark.asyncio
@@ -685,6 +824,24 @@ async def test_full_vs_full_race_results_in_one_completion() -> None:
     async with TestSessionFactory() as session:
         actions = list(await session.scalars(select(CashoutRequestAudit.action)))
     assert actions.count(CashoutAuditAction.TELEGRAM_BOT_COMPLETED) == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_button_on_completed_cashout_repairs_message_without_new_completion() -> None:
+    await seed_completed_cashout(telegram_last_error="terminal_sync_failed: previous")
+    gateway = FakeBotGateway()
+
+    result = await callback(CashoutCallbackAction.FULL, gateway)
+
+    stored = await cashout()
+    assert result.status == "already_completed"
+    assert stored.status == CashoutStatus.COMPLETED
+    assert stored.telegram_last_error is None
+    assert gateway.edits[-1]["buttons"] is None
+    assert "Completed - Full Payment" in gateway.edits[-1]["text"]
+    async with TestSessionFactory() as session:
+        actions = list(await session.scalars(select(CashoutRequestAudit.action)))
+    assert actions.count(CashoutAuditAction.TELEGRAM_BOT_COMPLETED) == 0
 
 
 @pytest.mark.asyncio
@@ -853,3 +1010,28 @@ async def test_operational_reconciliation_requeues_failed_delivery_idempotently(
     assert second.retryable_delivery_requeued == 0
     assert stored.status == CashoutStatus.FAILED_TO_SEND
     assert stored.telegram_status == CashoutTelegramStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_operational_reconciliation_repairs_completed_terminal_message() -> None:
+    await seed_completed_cashout(telegram_last_error="terminal_sync_failed: object expected")
+    await seed_completed_cashout(2, telegram_last_error="terminal_sync_failed: other")
+    gateway = FakeBotGateway()
+
+    result = await cashout_operational_reconciliation.reconcile_cashout_operational_state(
+        cashout_id=1,
+        gateway=gateway,
+    )
+
+    stored = await cashout()
+    async with TestSessionFactory() as session:
+        other = await session.get(CashoutRequest, 2)
+    assert result.terminal_cleanup_attempted == 1
+    assert result.terminal_cleanup_failed == 0
+    assert stored.status == CashoutStatus.COMPLETED
+    assert stored.telegram_status == CashoutTelegramStatus.SENT
+    assert stored.telegram_last_error is None
+    assert other is not None
+    assert other.telegram_last_error == "terminal_sync_failed: other"
+    assert gateway.edits[-1]["buttons"] is None
+    assert "Completed - Full Payment" in gateway.edits[-1]["text"]

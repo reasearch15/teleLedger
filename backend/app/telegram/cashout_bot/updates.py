@@ -13,12 +13,14 @@ from app.services.cashout_telegram import (
     CashoutTelegramGateway,
     CashoutTelegramService,
 )
+from app.services.venmo_confirmation import VenmoConfirmationService
 from app.telegram.cashout_bot.api import (
     TelegramBotApiError,
     TelegramBotFailureClass,
     TelegramBotUpdate,
 )
 from app.telegram.peer_ids import normalize_telegram_chat_id
+from app.telegram.venmo_confirmation import decode_venmo_confirmation_callback
 
 logger = get_logger(__name__)
 TerminalReporter = Callable[[str], None]
@@ -78,7 +80,7 @@ async def run_cashout_bot_update_loop(
                     "cashout_bot_update_route_failed",
                     extra={"update_id": update.update_id},
                 )
-                raise
+                continue
         if not updates:
             await asyncio.sleep(settings.telegram_bot_poll_seconds)
 
@@ -136,6 +138,33 @@ async def _handle_callback(
         or not isinstance(data, str)
     ):
         logger.info("cashout_bot_callback_ignored", extra={"reason_ignored": "missing_fields"})
+        return
+
+    if decode_venmo_confirmation_callback(data) is not None:
+        async with session_factory() as session:
+            service = VenmoConfirmationService(session)
+            result = await service.handle_telegram_callback(
+                query_id=str(callback_id),
+                callback_data=data,
+                telegram_chat_id=chat_id,
+                telegram_user_id=user_id,
+                telegram_username=_username_from(from_user),
+                message_id=message_id,
+                gateway=gateway,
+            )
+            await session.commit()
+        logger.info(
+            "venmo_confirmation_callback_routed",
+            extra={
+                "telegram_chat_id": chat_id,
+                "telegram_message_id": message_id,
+                "telegram_user_id": user_id,
+                "callback_status": result.status,
+                "venmo_confirmation_request_id": result.request_id,
+                "venmo_confirmation_attempt_id": result.attempt_id,
+            },
+        )
+        report(f"Venmo confirmation callback: {result.status}")
         return
 
     async with session_factory() as session:

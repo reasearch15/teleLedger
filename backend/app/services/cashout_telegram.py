@@ -187,7 +187,11 @@ class CashoutTelegramService:
 
         cashout = context.cashout
         if cashout.status in (CashoutStatus.COMPLETED, CashoutStatus.CANCELLED):
-            await self._refresh_terminal_message(cashout, telegram_user_id=telegram_user_id)
+            await self.sync_terminal_task(
+                cashout,
+                telegram_user_id=telegram_user_id,
+                telegram_username=telegram_username,
+            )
             label = (
                 "already completed"
                 if cashout.status == CashoutStatus.COMPLETED
@@ -302,7 +306,11 @@ class CashoutTelegramService:
         async with self._session.begin():
             await self._pending.delete_for_cashout(cashout.id)
 
-        await self._refresh_completed_message(completed, telegram_user_id=telegram_user_id)
+        await self.sync_terminal_task(
+            completed,
+            telegram_user_id=telegram_user_id,
+            telegram_username=telegram_username,
+        )
         return CashoutTelegramActionResult(
             status="completed_partial",
             cashout_id=completed.id,
@@ -417,7 +425,11 @@ class CashoutTelegramService:
         except CashoutStateConflictError:
             async with self._session.begin():
                 refreshed = await self._cashouts.get_by_id_for_update(cashout.id)
-            await self._refresh_terminal_message(refreshed, telegram_user_id=telegram_user_id)
+            await self.sync_terminal_task(
+                refreshed,
+                telegram_user_id=telegram_user_id,
+                telegram_username=telegram_username,
+            )
             await self._answer(query_id, "This cashout is already completed or cancelled.")
             return CashoutTelegramActionResult(
                 status="already_completed",
@@ -427,7 +439,11 @@ class CashoutTelegramService:
         async with self._session.begin():
             await self._pending.delete_for_cashout(cashout.id)
 
-        await self._refresh_completed_message(completed, telegram_user_id=telegram_user_id)
+        await self.sync_terminal_task(
+            completed,
+            telegram_user_id=telegram_user_id,
+            telegram_username=telegram_username,
+        )
         await self._answer(query_id, "Cashout completed (Full Payment).")
         logger.info(
             "cashout_bot_callback_completed_full",
@@ -539,46 +555,23 @@ class CashoutTelegramService:
             return normalize_telegram_chat_id(settings_row.cashout_group_id)
         return normalize_telegram_chat_id(get_settings().shared_telegram_supergroup_id)
 
-    async def _refresh_completed_message(
-        self,
-        cashout: CashoutRequest,
-        *,
-        telegram_user_id: int,
-    ) -> None:
-        if cashout.telegram_chat_id is None or cashout.telegram_message_id is None:
-            return
-        requested_by = await self._lookup_requested_by(cashout.created_by_staff_id)
-        completed_by = await self._format_completed_by(
-            cashout,
-            fallback_telegram_user_id=telegram_user_id,
-        )
-        view = self._build_view(
-            cashout,
-            requested_by=requested_by,
-            completed_by_label=completed_by,
-        )
-        await self._require_gateway().edit_cashout_task_message(
-            chat_id=cashout.telegram_chat_id,
-            message_id=cashout.telegram_message_id,
-            text=format_completed_cashout_message(view),
-            buttons=None,
-        )
-
-    async def _refresh_terminal_message(
+    async def sync_terminal_task(
         self,
         cashout: CashoutRequest | None,
         *,
         telegram_user_id: int | None = None,
-    ) -> None:
+        telegram_username: str | None = None,
+    ) -> str:
         if cashout is None:
-            return
+            return "not_found"
         if cashout.telegram_chat_id is None or cashout.telegram_message_id is None:
-            return
+            return "no_linked_message"
         requested_by = await self._lookup_requested_by(cashout.created_by_staff_id)
         if cashout.status == CashoutStatus.COMPLETED:
             completed_by = await self._format_completed_by(
                 cashout,
                 fallback_telegram_user_id=telegram_user_id,
+                fallback_telegram_username=telegram_username,
             )
             view = self._build_view(
                 cashout,
@@ -593,12 +586,36 @@ class CashoutTelegramService:
                 completed_by_label=None,
             )
             text = format_cancelled_cashout_message(view)
-        await self._require_gateway().edit_cashout_task_message(
-            chat_id=cashout.telegram_chat_id,
-            message_id=cashout.telegram_message_id,
-            text=text,
-            buttons=None,
+        try:
+            await self._require_gateway().edit_cashout_task_message(
+                chat_id=cashout.telegram_chat_id,
+                message_id=cashout.telegram_message_id,
+                text=text,
+                buttons=None,
+            )
+        except Exception as error:
+            await self._record_terminal_sync_error(cashout, error)
+            logger.exception(
+                "cashout_telegram_terminal_sync_failed",
+                extra={
+                    "cashout_request_id": cashout.id,
+                    "telegram_chat_id": cashout.telegram_chat_id,
+                    "telegram_message_id": cashout.telegram_message_id,
+                    "cashout_status": cashout.status.value,
+                },
+            )
+            return "failed"
+        await self._clear_terminal_sync_error(cashout)
+        logger.info(
+            "cashout_telegram_terminal_sync_succeeded",
+            extra={
+                "cashout_request_id": cashout.id,
+                "telegram_chat_id": cashout.telegram_chat_id,
+                "telegram_message_id": cashout.telegram_message_id,
+                "cashout_status": cashout.status.value,
+            },
         )
+        return "edited_terminal"
 
     async def _lookup_requested_by(self, staff_id: int | None) -> str:
         if staff_id is None:
@@ -611,6 +628,7 @@ class CashoutTelegramService:
         cashout: CashoutRequest,
         *,
         fallback_telegram_user_id: int | None,
+        fallback_telegram_username: str | None = None,
     ) -> str:
         if cashout.completed_by_staff_id is not None:
             username = await self._session.scalar(
@@ -618,6 +636,8 @@ class CashoutTelegramService:
             )
             if username:
                 return username
+        if fallback_telegram_username:
+            return f"@{fallback_telegram_username}"
         if fallback_telegram_user_id is not None:
             return f"Telegram user {fallback_telegram_user_id}"
         return "Telegram bot"
@@ -676,7 +696,10 @@ class CashoutTelegramService:
         gateway = self._gateway
         if gateway is None:
             return
-        await gateway.answer_callback_query(query_id=query_id, text=text, alert=alert)
+        try:
+            await gateway.answer_callback_query(query_id=query_id, text=text, alert=alert)
+        except Exception:
+            logger.exception("cashout_bot_callback_answer_failed")
 
     async def _send_prompt(self, *, chat_id: int, request_number: str) -> int | None:
         gateway = self._gateway
@@ -691,6 +714,21 @@ class CashoutTelegramService:
         if self._gateway is None:
             raise RuntimeError("CashoutTelegramGateway is required for Telegram mutations")
         return self._gateway
+
+    async def _record_terminal_sync_error(
+        self,
+        cashout: CashoutRequest,
+        error: Exception,
+    ) -> None:
+        cashout.telegram_last_error = f"terminal_sync_failed: {error}"[:2000]
+        await self._session.commit()
+
+    async def _clear_terminal_sync_error(self, cashout: CashoutRequest) -> None:
+        if cashout.telegram_last_error and cashout.telegram_last_error.startswith(
+            "terminal_sync_failed:"
+        ):
+            cashout.telegram_last_error = None
+            await self._session.commit()
 
 
 @dataclass(frozen=True, slots=True)

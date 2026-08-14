@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.repositories.media_asset import MediaAssetRepository
 from app.db.repositories.venmo_confirmation import VenmoConfirmationRepository
@@ -22,6 +24,12 @@ from app.models.venmo_confirmation import (
 )
 from app.services.base import ApplicationService
 from app.services.notification import NotificationService
+from app.telegram.peer_ids import chat_ids_equivalent, normalize_telegram_chat_id
+from app.telegram.venmo_confirmation import (
+    VenmoConfirmationCallbackAction,
+    decode_venmo_confirmation_callback,
+    venmo_confirmation_resolved_caption,
+)
 
 logger = get_logger(__name__)
 
@@ -36,6 +44,13 @@ class VenmoConfirmationNotFoundError(Exception):
 
 class VenmoConfirmationStateConflictError(Exception):
     """Raised when a Venmo confirmation transition is invalid."""
+
+
+@dataclass(frozen=True, slots=True)
+class VenmoConfirmationTelegramActionResult:
+    status: str
+    request_id: int | None = None
+    attempt_id: int | None = None
 
 
 class VenmoConfirmationService(ApplicationService):
@@ -54,21 +69,17 @@ class VenmoConfirmationService(ApplicationService):
         payment_note: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> VenmoConfirmationRequest:
-        self._require_staff(actor)
-        if actor.coadmin_id is None:
-            raise VenmoConfirmationAuthorizationError(
-                "Staff must be assigned to a coadmin before requesting confirmation."
-            )
+        coadmin_id = self._actor_coadmin_id(actor)
         media = await self._media_repository.get_for_coadmin(
             screenshot_media_asset_id,
-            actor.coadmin_id,
+            coadmin_id,
         )
         if media is None:
             raise VenmoConfirmationNotFoundError("Screenshot media was not found.")
         request = await self._repository.add_request(
             VenmoConfirmationRequest(
-                coadmin_id=actor.coadmin_id,
-                requested_by_staff_id=actor.id,
+                coadmin_id=coadmin_id,
+                requested_by_staff_id=actor.id if actor.role == UserRole.STAFF else None,
                 screenshot_media_asset_id=media.id,
                 payment_note=payment_note,
                 metadata_json=metadata,
@@ -81,6 +92,215 @@ class VenmoConfirmationService(ApplicationService):
             payload={"screenshot_media_asset_id": media.id},
         )
         return request
+
+    async def mark_attempt_posted(
+        self,
+        *,
+        attempt_id: int,
+        coadmin_id: int,
+        telegram_chat_id: int,
+        telegram_message_id: int,
+        event_type: VenmoConfirmationEventType = VenmoConfirmationEventType.ATTEMPT_POSTED,
+    ) -> VenmoConfirmationAttempt:
+        attempt = await self._repository.get_attempt_for_coadmin(
+            attempt_id,
+            coadmin_id,
+            for_update=True,
+        )
+        if attempt is None:
+            raise VenmoConfirmationNotFoundError("Venmo confirmation attempt was not found.")
+        attempt.telegram_chat_id = normalize_telegram_chat_id(telegram_chat_id)
+        attempt.telegram_message_id = telegram_message_id
+        attempt.status = VenmoConfirmationAttemptStatus.POSTED
+        attempt.posted_at = datetime.now(UTC)
+        attempt.last_error = None
+        await self._record_event(
+            request_id=attempt.request_id,
+            attempt_id=attempt.id,
+            event_type=event_type,
+            payload={
+                "telegram_chat_id": attempt.telegram_chat_id,
+                "telegram_message_id": attempt.telegram_message_id,
+            },
+        )
+        return attempt
+
+    async def mark_attempt_failed(
+        self,
+        *,
+        attempt_id: int,
+        coadmin_id: int,
+        error: str,
+    ) -> VenmoConfirmationAttempt:
+        attempt = await self._repository.get_attempt_for_coadmin(
+            attempt_id,
+            coadmin_id,
+            for_update=True,
+        )
+        if attempt is None:
+            raise VenmoConfirmationNotFoundError("Venmo confirmation attempt was not found.")
+        attempt.status = VenmoConfirmationAttemptStatus.FAILED_TO_SEND
+        attempt.last_error = error[:2000]
+        await self._record_event(
+            request_id=attempt.request_id,
+            attempt_id=attempt.id,
+            event_type=VenmoConfirmationEventType.FAILURE,
+            payload={"error": attempt.last_error},
+        )
+        return attempt
+
+    async def handle_telegram_callback(
+        self,
+        *,
+        query_id: str,
+        callback_data: str,
+        telegram_chat_id: int,
+        telegram_user_id: int,
+        telegram_username: str | None,
+        message_id: int,
+        gateway: object,
+    ) -> VenmoConfirmationTelegramActionResult:
+        decoded = decode_venmo_confirmation_callback(callback_data)
+        if decoded is None:
+            return VenmoConfirmationTelegramActionResult(status="not_venmo_confirmation")
+
+        attempt_id, action = decoded
+        attempt = await self._repository.get_attempt_by_id(attempt_id, for_update=True)
+        if attempt is None:
+            await _answer_gateway_callback(
+                gateway,
+                query_id=query_id,
+                text="Confirmation request was not found.",
+                alert=True,
+            )
+            return VenmoConfirmationTelegramActionResult(
+                status="not_found",
+                attempt_id=attempt_id,
+            )
+        request = await self._repository.get_by_id(attempt.request_id)
+        if request is None:
+            await _answer_gateway_callback(
+                gateway,
+                query_id=query_id,
+                text="Confirmation request was not found.",
+                alert=True,
+            )
+            return VenmoConfirmationTelegramActionResult(
+                status="not_found",
+                attempt_id=attempt_id,
+            )
+        expected_chat_id = normalize_telegram_chat_id(get_settings().shared_telegram_supergroup_id)
+        normalized_chat_id = normalize_telegram_chat_id(telegram_chat_id)
+        if expected_chat_id is None or not chat_ids_equivalent(
+            normalized_chat_id,
+            expected_chat_id,
+        ):
+            await _answer_gateway_callback(
+                gateway,
+                query_id=query_id,
+                text="This confirmation belongs to a different group.",
+                alert=True,
+            )
+            return VenmoConfirmationTelegramActionResult(
+                status="wrong_group",
+                request_id=request.id,
+                attempt_id=attempt.id,
+            )
+        if attempt.telegram_chat_id is not None and not chat_ids_equivalent(
+            attempt.telegram_chat_id,
+            normalized_chat_id,
+        ):
+            await _answer_gateway_callback(
+                gateway,
+                query_id=query_id,
+                text="This confirmation belongs to a different message.",
+                alert=True,
+            )
+            return VenmoConfirmationTelegramActionResult(
+                status="wrong_message",
+                request_id=request.id,
+                attempt_id=attempt.id,
+            )
+        if attempt.telegram_message_id is not None and attempt.telegram_message_id != message_id:
+            await _answer_gateway_callback(
+                gateway,
+                query_id=query_id,
+                text="This confirmation belongs to a different message.",
+                alert=True,
+            )
+            return VenmoConfirmationTelegramActionResult(
+                status="wrong_message",
+                request_id=request.id,
+                attempt_id=attempt.id,
+            )
+
+        display_name = telegram_username or str(telegram_user_id)
+        try:
+            if action == VenmoConfirmationCallbackAction.CONFIRM:
+                await self.mark_confirmed(
+                    attempt_id=attempt.id,
+                    coadmin_id=request.coadmin_id,
+                    telegram_user_id=telegram_user_id,
+                    telegram_username=telegram_username,
+                    display_name=display_name,
+                )
+                await _answer_gateway_callback(
+                    gateway,
+                    query_id=query_id,
+                    text="Confirmation marked confirmed.",
+                )
+                await _edit_gateway_caption(
+                    gateway,
+                    chat_id=normalized_chat_id,
+                    message_id=message_id,
+                    caption=venmo_confirmation_resolved_caption(
+                        request_id=request.id,
+                        status_label="Confirmed",
+                        display_name=display_name,
+                    ),
+                )
+                return VenmoConfirmationTelegramActionResult(
+                    status="confirmed",
+                    request_id=request.id,
+                    attempt_id=attempt.id,
+                )
+
+            await self.mark_attempt_not_received(
+                attempt_id=attempt.id,
+                coadmin_id=request.coadmin_id,
+            )
+            await _answer_gateway_callback(
+                gateway,
+                query_id=query_id,
+                text="Confirmation marked not received.",
+            )
+            await _edit_gateway_caption(
+                gateway,
+                chat_id=normalized_chat_id,
+                message_id=message_id,
+                caption=venmo_confirmation_resolved_caption(
+                    request_id=request.id,
+                    status_label="Not received",
+                    display_name=display_name,
+                ),
+            )
+            return VenmoConfirmationTelegramActionResult(
+                status="not_received",
+                request_id=request.id,
+                attempt_id=attempt.id,
+            )
+        except VenmoConfirmationStateConflictError:
+            await _answer_gateway_callback(
+                gateway,
+                query_id=query_id,
+                text="Confirmation was already resolved.",
+                alert=True,
+            )
+            return VenmoConfirmationTelegramActionResult(
+                status="already_resolved",
+                request_id=request.id,
+                attempt_id=attempt.id,
+            )
 
     async def get_request_for_coadmin(
         self,
@@ -442,3 +662,36 @@ class VenmoConfirmationService(ApplicationService):
         if actor.role == UserRole.STAFF and actor.coadmin_id == coadmin_id:
             return
         raise VenmoConfirmationAuthorizationError("Venmo confirmation is not accessible.")
+
+
+async def _answer_gateway_callback(
+    gateway: object,
+    *,
+    query_id: str,
+    text: str,
+    alert: bool = False,
+) -> None:
+    try:
+        await gateway.answer_callback_query(query_id=query_id, text=text, alert=alert)
+    except Exception:
+        logger.warning("venmo_confirmation_callback_answer_failed", exc_info=True)
+
+
+async def _edit_gateway_caption(
+    gateway: object,
+    *,
+    chat_id: int,
+    message_id: int,
+    caption: str,
+) -> None:
+    edit = getattr(gateway, "edit_message_caption", None)
+    if edit is None:
+        return
+    try:
+        await edit(chat_id=chat_id, message_id=message_id, caption=caption, buttons=None)
+    except Exception:
+        logger.warning(
+            "venmo_confirmation_callback_message_edit_failed",
+            exc_info=True,
+            extra={"telegram_chat_id": chat_id, "telegram_message_id": message_id},
+        )

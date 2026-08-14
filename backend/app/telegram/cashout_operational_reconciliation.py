@@ -15,7 +15,7 @@ from app.services.cashout_telegram import CashoutTelegramService
 logger = get_logger(__name__)
 
 
-class CashoutCancellationGateway(Protocol):
+class CashoutTerminalSyncGateway(Protocol):
     async def delete_message(self, *, chat_id: int, message_id: int) -> bool: ...
 
     async def edit_cashout_task_message(
@@ -43,8 +43,9 @@ async def reconcile_cashout_operational_state(
     *,
     limit: int = 50,
     stale_after_seconds: int = 120,
+    cashout_id: int | None = None,
     coadmin_id: int | None = None,
-    gateway: CashoutCancellationGateway | None = None,
+    gateway: CashoutTerminalSyncGateway | None = None,
 ) -> CashoutOperationalReconciliationResult:
     """Repair or flag cashout operational state without changing financial truth."""
     now = datetime.now(UTC)
@@ -55,6 +56,7 @@ async def reconcile_cashout_operational_state(
         statement = _candidate_statement(
             now=now,
             stale_after_seconds=stale_after_seconds,
+            cashout_id=cashout_id,
             coadmin_id=coadmin_id,
             limit=limit,
         )
@@ -88,10 +90,11 @@ async def reconcile_cashout_operational_state(
                 attached = await session.get(CashoutRequest, cashout.id)
                 if attached is None:
                     continue
-                status = await CashoutTelegramService(
-                    session,
-                    gateway=gateway,
-                ).sync_cancelled_task(attached)
+                service = CashoutTelegramService(session, gateway=gateway)
+                if attached.status == CashoutStatus.CANCELLED:
+                    status = await service.sync_cancelled_task(attached)
+                else:
+                    status = await service.sync_terminal_task(attached)
             if status == "failed":
                 terminal_cleanup_failed += 1
             logger.info(
@@ -127,6 +130,7 @@ def _candidate_statement(
     *,
     now: datetime,
     stale_after_seconds: int,
+    cashout_id: int | None,
     coadmin_id: int | None,
     limit: int,
 ):
@@ -143,6 +147,8 @@ def _candidate_statement(
     ]
     if coadmin_id is not None:
         conditions.append(CashoutRequest.coadmin_id == coadmin_id)
+    if cashout_id is not None:
+        conditions.append(CashoutRequest.id == cashout_id)
     return (
         select(CashoutRequest)
         .where(*conditions)
@@ -161,7 +167,7 @@ def _is_retryable_delivery(cashout: CashoutRequest) -> bool:
 
 def _needs_terminal_cleanup(cashout: CashoutRequest) -> bool:
     return (
-        cashout.status == CashoutStatus.CANCELLED
+        cashout.status in (CashoutStatus.COMPLETED, CashoutStatus.CANCELLED)
         and cashout.telegram_chat_id is not None
         and cashout.telegram_message_id is not None
     )

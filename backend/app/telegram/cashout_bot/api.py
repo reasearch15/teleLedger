@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -129,7 +132,9 @@ class TelegramBotApiGateway:
             "message_id": message_id,
             "text": text,
         }
-        payload["reply_markup"] = self._reply_markup(buttons) if buttons else None
+        payload["reply_markup"] = (
+            self._reply_markup(buttons) if buttons else self._empty_reply_markup()
+        )
         await self._post("editMessageText", payload)
 
     async def delete_message(self, *, chat_id: int, message_id: int) -> bool:
@@ -164,6 +169,52 @@ class TelegramBotApiGateway:
         data = await self._post("sendMessage", payload)
         message_id = data.get("message_id")
         return int(message_id) if isinstance(message_id, int) else None
+
+    async def send_photo(
+        self,
+        *,
+        chat_id: int,
+        photo_path: Path,
+        caption: str,
+        buttons: list[list[tuple[str, str]]],
+        mime_type: str,
+        filename: str | None = None,
+    ) -> int | None:
+        payload = {
+            "chat_id": str(chat_id),
+            "caption": caption,
+            "reply_markup": json.dumps(self._reply_markup(buttons)),
+        }
+        file_name = filename or photo_path.name
+        data = await self._post_file(
+            "sendPhoto",
+            payload,
+            files={
+                "photo": (
+                    file_name,
+                    await asyncio.to_thread(photo_path.read_bytes),
+                    mime_type,
+                )
+            },
+        )
+        message_id = data.get("message_id")
+        return int(message_id) if isinstance(message_id, int) else None
+
+    async def edit_message_caption(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        caption: str,
+        buttons: list[list[tuple[str, str]]] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "caption": caption,
+        }
+        payload["reply_markup"] = self._reply_markup(buttons) if buttons else None
+        await self._post("editMessageCaption", payload)
 
     async def get_updates(
         self,
@@ -209,13 +260,39 @@ class TelegramBotApiGateway:
         )
 
     async def _post(self, method: str, payload: dict[str, Any]) -> Any:
+        return await self._request(method, json=payload)
+
+    async def _post_file(
+        self,
+        method: str,
+        payload: dict[str, Any],
+        *,
+        files: dict[str, tuple[str, bytes, str]],
+    ) -> Any:
+        return await self._request(method, data=payload, files=files)
+
+    async def _request(
+        self,
+        method: str,
+        *,
+        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
+    ) -> Any:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout_seconds)
             self._owns_client = True
         try:
+            request_kwargs: dict[str, Any] = {}
+            if json is not None:
+                request_kwargs["json"] = json
+            if data is not None:
+                request_kwargs["data"] = data
+            if files is not None:
+                request_kwargs["files"] = files
             response = await self._client.post(
                 f"https://api.telegram.org/bot{self._token}/{method}",
-                json=payload,
+                **request_kwargs,
             )
         except httpx.ReadTimeout as error:
             if method == "getUpdates":
@@ -321,6 +398,11 @@ class TelegramBotApiGateway:
                 for row in buttons
             ]
         }
+
+    @staticmethod
+    def _empty_reply_markup() -> dict[str, object]:
+        """Valid InlineKeyboardMarkup payload that removes existing inline buttons."""
+        return {"inline_keyboard": []}
 
     def _default_long_poll_timeout_seconds(self) -> int:
         """Keep Telegram's poll timeout below the HTTP read timeout."""

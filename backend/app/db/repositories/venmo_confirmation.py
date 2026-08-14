@@ -117,6 +117,19 @@ class VenmoConfirmationRepository(BaseRepository[VenmoConfirmationRequest]):
             statement = statement.with_for_update()
         return (await self._session.execute(statement)).scalar_one_or_none()
 
+    async def get_attempt_by_id(
+        self,
+        attempt_id: int,
+        *,
+        for_update: bool = False,
+    ) -> VenmoConfirmationAttempt | None:
+        statement = select(VenmoConfirmationAttempt).where(
+            VenmoConfirmationAttempt.id == attempt_id
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return (await self._session.execute(statement)).scalar_one_or_none()
+
     async def add_inquiry(
         self,
         inquiry: VenmoConfirmationInquiry,
