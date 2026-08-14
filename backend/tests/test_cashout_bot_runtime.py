@@ -417,9 +417,12 @@ async def test_full_payment_uses_authoritative_service_and_renders_completed() -
     assert stored.completion_type == CashoutCompletionType.FULL
     assert stored.actual_paid_amount == Decimal("250.00")
     assert gateway.edits[-1]["buttons"] is None
-    assert "Completed - Full Payment" in gateway.edits[-1]["text"]
-    assert "Actual Paid Amount:\n$250.00" in gateway.edits[-1]["text"]
-    assert "Completed By:\n@operator" in gateway.edits[-1]["text"]
+    assert "✅✅ CASHOUT COMPLETED ✅✅" in gateway.edits[-1]["text"]
+    assert "🟢 PAID IN FULL" in gateway.edits[-1]["text"]
+    assert "Requested Amount: $250.00" in gateway.edits[-1]["text"]
+    assert "Paid Amount: $250.00" in gateway.edits[-1]["text"]
+    assert "✅ NO BALANCE REMAINING" in gateway.edits[-1]["text"]
+    assert "Completed By: @operator" in gateway.edits[-1]["text"]
     assert gateway.answers[-1]["text"] == "Cashout completed (Full Payment)."
 
 
@@ -747,10 +750,12 @@ async def test_valid_partial_amount_uses_authoritative_service() -> None:
     assert stored.completion_type == CashoutCompletionType.PARTIAL
     assert stored.actual_paid_amount == Decimal("100.00")
     assert gateway.edits[-1]["buttons"] is None
-    assert "Completed - Partial Payment" in gateway.edits[-1]["text"]
-    assert "Requested Amount:\n$250.00" in gateway.edits[-1]["text"]
-    assert "Actual Paid Amount:\n$100.00" in gateway.edits[-1]["text"]
-    assert "Unpaid Difference:\n$150.00" in gateway.edits[-1]["text"]
+    assert "⚠️ CASHOUT PARTIALLY PAID ⚠️" in gateway.edits[-1]["text"]
+    assert "🟡 PARTIAL PAYMENT" in gateway.edits[-1]["text"]
+    assert "Requested Amount: $250.00" in gateway.edits[-1]["text"]
+    assert "Paid Amount: $100.00" in gateway.edits[-1]["text"]
+    assert "Remaining Amount: $150.00" in gateway.edits[-1]["text"]
+    assert "⚠️ $150.00 STILL UNPAID" in gateway.edits[-1]["text"]
 
 
 @pytest.mark.asyncio
@@ -805,7 +810,7 @@ async def test_terminal_cashout_cannot_be_completed_again() -> None:
     assert result.status == "already_completed"
     assert "already completed" in gateway.answers[-1]["text"]
     assert gateway.edits[-1]["buttons"] is None
-    assert "Completed - Full Payment" in gateway.edits[-1]["text"]
+    assert "🟢 PAID IN FULL" in gateway.edits[-1]["text"]
     async with TestSessionFactory() as session:
         actions = list(await session.scalars(select(CashoutRequestAudit.action)))
     assert actions.count(CashoutAuditAction.TELEGRAM_BOT_COMPLETED) == 0
@@ -838,7 +843,7 @@ async def test_stale_button_on_completed_cashout_repairs_message_without_new_com
     assert stored.status == CashoutStatus.COMPLETED
     assert stored.telegram_last_error is None
     assert gateway.edits[-1]["buttons"] is None
-    assert "Completed - Full Payment" in gateway.edits[-1]["text"]
+    assert "🟢 PAID IN FULL" in gateway.edits[-1]["text"]
     async with TestSessionFactory() as session:
         actions = list(await session.scalars(select(CashoutRequestAudit.action)))
     assert actions.count(CashoutAuditAction.TELEGRAM_BOT_COMPLETED) == 0
@@ -1034,4 +1039,18 @@ async def test_operational_reconciliation_repairs_completed_terminal_message() -
     assert other is not None
     assert other.telegram_last_error == "terminal_sync_failed: other"
     assert gateway.edits[-1]["buttons"] is None
-    assert "Completed - Full Payment" in gateway.edits[-1]["text"]
+    assert gateway.edits[-1]["text"] == (
+        "✅✅ CASHOUT COMPLETED ✅✅\n"
+        "🟢 PAID IN FULL\n"
+        "\n"
+        "Request ID: CR-000001\n"
+        "Tag: ABC12345\n"
+        "\n"
+        "Requested Amount: $250.00\n"
+        "Paid Amount: $250.00\n"
+        "\n"
+        "✅ NO BALANCE REMAINING\n"
+        "\n"
+        "Completed By: Telegram bot\n"
+        "Completed At: 2026-07-06 20:45 UTC"
+    )

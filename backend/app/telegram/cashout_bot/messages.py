@@ -91,32 +91,37 @@ def format_active_cashout_message(view: CashoutTaskView) -> str:
 def format_completed_cashout_message(view: CashoutTaskView) -> str:
     paid_amount = view.actual_paid_amount or view.requested_amount
     unpaid = view.requested_amount - paid_amount
-    status_label = (
-        "Completed - Partial Payment"
-        if view.completion_type == CashoutCompletionType.PARTIAL
-        else "Completed - Full Payment"
-    )
-    lines = [
-        "CASHOUT COMPLETED",
-        "",
-        f"Request ID: {view.request_number}",
-        f"Status: {status_label}",
-        "",
-        "Tag:",
-        view.player_tag,
-        "",
-        "Requested Amount:",
-        f"${view.requested_amount:,.2f}",
-        "",
-        "Actual Paid Amount:",
-        f"${paid_amount:,.2f}",
-    ]
     if view.completion_type == CashoutCompletionType.PARTIAL:
-        lines.extend(["", "Unpaid Difference:", f"${unpaid:,.2f}"])
+        lines = [
+            "⚠️ CASHOUT PARTIALLY PAID ⚠️",
+            "🟡 PARTIAL PAYMENT",
+            "",
+            f"Request ID: {view.request_number}",
+            f"Tag: {view.player_tag}",
+            "",
+            f"Requested Amount: ${view.requested_amount:,.2f}",
+            f"Paid Amount: ${paid_amount:,.2f}",
+            f"Remaining Amount: ${unpaid:,.2f}",
+            "",
+            f"⚠️ ${unpaid:,.2f} STILL UNPAID",
+        ]
+    else:
+        lines = [
+            "✅✅ CASHOUT COMPLETED ✅✅",
+            "🟢 PAID IN FULL",
+            "",
+            f"Request ID: {view.request_number}",
+            f"Tag: {view.player_tag}",
+            "",
+            f"Requested Amount: ${view.requested_amount:,.2f}",
+            f"Paid Amount: ${paid_amount:,.2f}",
+            "",
+            "✅ NO BALANCE REMAINING",
+        ]
     if view.completed_by_label:
-        lines.extend(["", "Completed By:", view.completed_by_label])
+        lines.extend(["", f"Completed By: {view.completed_by_label}"])
     if view.completed_at is not None:
-        lines.extend(["", "Completed At:", view.completed_at.strftime("%Y-%m-%d %H:%M UTC")])
+        lines.append(f"Completed At: {view.completed_at.strftime('%Y-%m-%d %H:%M UTC')}")
     return "\n".join(lines)
 
 
