@@ -24,6 +24,7 @@ from app.models.venmo_confirmation import (
 )
 from app.services.base import ApplicationService
 from app.services.notification import NotificationService
+from app.telegram.cashout_bot.api import TelegramBotApiError
 from app.telegram.peer_ids import chat_ids_equivalent, normalize_telegram_chat_id
 from app.telegram.venmo_confirmation import (
     VenmoConfirmationCallbackAction,
@@ -349,6 +350,33 @@ class VenmoConfirmationService(ApplicationService):
                 caption=caption,
                 buttons=None,
             )
+        except TelegramBotApiError as error:
+            if _is_telegram_message_not_modified(error):
+                if attempt.last_error and attempt.last_error.startswith("terminal_sync_failed:"):
+                    attempt.last_error = None
+                    await self._session.flush()
+                logger.info(
+                    "venmo_confirmation_terminal_sync_already_synced",
+                    extra={
+                        "venmo_confirmation_request_id": request.id,
+                        "venmo_confirmation_attempt_id": attempt.id,
+                        "telegram_chat_id": attempt.telegram_chat_id,
+                        "telegram_message_id": attempt.telegram_message_id,
+                    },
+                )
+                return "already_synced"
+            attempt.last_error = f"terminal_sync_failed: {error}"[:2000]
+            await self._session.flush()
+            logger.exception(
+                "venmo_confirmation_terminal_sync_failed",
+                extra={
+                    "venmo_confirmation_request_id": request.id,
+                    "venmo_confirmation_attempt_id": attempt.id,
+                    "telegram_chat_id": attempt.telegram_chat_id,
+                    "telegram_message_id": attempt.telegram_message_id,
+                },
+            )
+            return "failed"
         except Exception as error:
             attempt.last_error = f"terminal_sync_failed: {error}"[:2000]
             await self._session.flush()
@@ -749,6 +777,13 @@ async def _answer_gateway_callback(
         await gateway.answer_callback_query(query_id=query_id, text=text, alert=alert)
     except Exception:
         logger.warning("venmo_confirmation_callback_answer_failed", exc_info=True)
+
+
+def _is_telegram_message_not_modified(error: TelegramBotApiError) -> bool:
+    return (
+        error.status_code == 400
+        and "message is not modified" in str(error).casefold()
+    )
 
 
 async def _edit_gateway_caption(

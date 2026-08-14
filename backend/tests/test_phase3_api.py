@@ -268,6 +268,7 @@ class FakeConfirmationGateway:
     edits: list[dict[str, object]] = []
     fail_send = False
     fail_edit = False
+    edit_error: Exception | None = None
 
     async def __aenter__(self) -> FakeConfirmationGateway:
         return self
@@ -320,6 +321,8 @@ class FakeConfirmationGateway:
         caption: str,
         buttons: list[list[tuple[str, str]]] | None = None,
     ) -> None:
+        if self.edit_error is not None:
+            raise self.edit_error
         if self.fail_edit:
             raise RuntimeError("caption edit failed")
         self.edits.append(
@@ -338,6 +341,7 @@ def reset_fake_gateway() -> None:
     FakeConfirmationGateway.edits = []
     FakeConfirmationGateway.fail_send = False
     FakeConfirmationGateway.fail_edit = False
+    FakeConfirmationGateway.edit_error = None
 
 
 @pytest.mark.asyncio
@@ -836,6 +840,180 @@ async def test_venmo_reconciliation_repairs_confirmed_terminal_message(
         "Confirmed By: receiver\n"
         "Confirmed At: 2026-07-15 16:00 UTC"
     )
+
+
+@pytest.mark.asyncio
+async def test_venmo_reconciliation_treats_message_not_modified_as_already_synced(
+    tmp_path: Path,
+) -> None:
+    await seed_venmo(tmp_path)
+    reset_fake_gateway()
+    async with TestSessionFactory() as session, session.begin():
+        request = await session.get(VenmoConfirmationRequest, 100)
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+        assert request is not None
+        assert attempt is not None
+        request.status = VenmoConfirmationStatus.CONFIRMED
+        request.confirmed_at = datetime(2026, 7, 15, 16, 0, tzinfo=UTC)
+        request.confirmed_by_display_name = "receiver"
+        attempt.status = VenmoConfirmationAttemptStatus.CONFIRMED
+        attempt.last_error = "terminal_sync_failed: stale"
+        session.add(
+            VenmoConfirmationEvent(
+                id=702,
+                request_id=100,
+                attempt_id=501,
+                event_type=VenmoConfirmationEventType.CONFIRMED,
+                actor_source="telegram",
+                actor_identifier="700",
+            )
+        )
+    FakeConfirmationGateway.edit_error = TelegramBotApiError(
+        "Bad Request: message is not modified: specified new message content and "
+        "reply markup are exactly the same as a current content and reply markup "
+        "of the message",
+        failure_class=TelegramBotFailureClass.NON_RETRYABLE,
+        status_code=400,
+    )
+
+    result = await reconcile_venmo_confirmation_telegram_state(
+        request_id=100,
+        gateway=FakeConfirmationGateway(),
+    )
+
+    async with TestSessionFactory() as session:
+        request = await session.get(VenmoConfirmationRequest, 100)
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+        confirmed_events = list(
+            await session.scalars(
+                select(VenmoConfirmationEvent).where(
+                    VenmoConfirmationEvent.request_id == 100,
+                    VenmoConfirmationEvent.event_type == VenmoConfirmationEventType.CONFIRMED,
+                )
+            )
+        )
+    assert result.status == "confirmed"
+    assert result.sync_result == "already_synced"
+    assert request is not None
+    assert attempt is not None
+    assert request.status == VenmoConfirmationStatus.CONFIRMED
+    assert request.confirmed_by_display_name == "receiver"
+    assert attempt.status == VenmoConfirmationAttemptStatus.CONFIRMED
+    assert attempt.last_error is None
+    assert len(confirmed_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_venmo_reconciliation_keeps_genuine_telegram_400_as_failure(
+    tmp_path: Path,
+) -> None:
+    await seed_venmo(tmp_path)
+    reset_fake_gateway()
+    async with TestSessionFactory() as session, session.begin():
+        request = await session.get(VenmoConfirmationRequest, 100)
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+        assert request is not None
+        assert attempt is not None
+        request.status = VenmoConfirmationStatus.CONFIRMED
+        request.confirmed_at = datetime(2026, 7, 15, 16, 0, tzinfo=UTC)
+        request.confirmed_by_display_name = "receiver"
+        attempt.status = VenmoConfirmationAttemptStatus.CONFIRMED
+        session.add(
+            VenmoConfirmationEvent(
+                id=702,
+                request_id=100,
+                attempt_id=501,
+                event_type=VenmoConfirmationEventType.CONFIRMED,
+                actor_source="telegram",
+                actor_identifier="700",
+            )
+        )
+    FakeConfirmationGateway.edit_error = TelegramBotApiError(
+        "Bad Request: message caption is too long",
+        failure_class=TelegramBotFailureClass.NON_RETRYABLE,
+        status_code=400,
+    )
+
+    result = await reconcile_venmo_confirmation_telegram_state(
+        request_id=100,
+        gateway=FakeConfirmationGateway(),
+    )
+
+    async with TestSessionFactory() as session:
+        request = await session.get(VenmoConfirmationRequest, 100)
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+        confirmed_events = list(
+            await session.scalars(
+                select(VenmoConfirmationEvent).where(
+                    VenmoConfirmationEvent.request_id == 100,
+                    VenmoConfirmationEvent.event_type == VenmoConfirmationEventType.CONFIRMED,
+                )
+            )
+        )
+    assert result.status == "confirmed"
+    assert result.sync_result == "failed"
+    assert request is not None
+    assert attempt is not None
+    assert request.status == VenmoConfirmationStatus.CONFIRMED
+    assert attempt.status == VenmoConfirmationAttemptStatus.CONFIRMED
+    assert attempt.last_error == "terminal_sync_failed: Bad Request: message caption is too long"
+    assert len(confirmed_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_venmo_not_received_reconciliation_treats_message_not_modified_as_synced(
+    tmp_path: Path,
+) -> None:
+    await seed_venmo(tmp_path)
+    reset_fake_gateway()
+    async with TestSessionFactory() as session, session.begin():
+        request = await session.get(VenmoConfirmationRequest, 100)
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+        assert request is not None
+        assert attempt is not None
+        request.status = VenmoConfirmationStatus.NOT_RECEIVED
+        attempt.status = VenmoConfirmationAttemptStatus.NOT_RECEIVED
+        attempt.last_error = "terminal_sync_failed: stale"
+        session.add(
+            VenmoConfirmationEvent(
+                id=702,
+                request_id=100,
+                attempt_id=501,
+                event_type=VenmoConfirmationEventType.NOT_RECEIVED,
+                actor_source="telegram",
+                actor_identifier="700",
+            )
+        )
+    FakeConfirmationGateway.edit_error = TelegramBotApiError(
+        "Bad Request: message is not modified",
+        failure_class=TelegramBotFailureClass.NON_RETRYABLE,
+        status_code=400,
+    )
+
+    result = await reconcile_venmo_confirmation_telegram_state(
+        request_id=100,
+        gateway=FakeConfirmationGateway(),
+    )
+
+    async with TestSessionFactory() as session:
+        request = await session.get(VenmoConfirmationRequest, 100)
+        attempt = await session.get(VenmoConfirmationAttempt, 501)
+        not_received_events = list(
+            await session.scalars(
+                select(VenmoConfirmationEvent).where(
+                    VenmoConfirmationEvent.request_id == 100,
+                    VenmoConfirmationEvent.event_type == VenmoConfirmationEventType.NOT_RECEIVED,
+                )
+            )
+        )
+    assert result.status == "not_received"
+    assert result.sync_result == "already_synced"
+    assert request is not None
+    assert attempt is not None
+    assert request.status == VenmoConfirmationStatus.NOT_RECEIVED
+    assert attempt.status == VenmoConfirmationAttemptStatus.NOT_RECEIVED
+    assert attempt.last_error is None
+    assert len(not_received_events) == 1
 
 
 @pytest.mark.asyncio
