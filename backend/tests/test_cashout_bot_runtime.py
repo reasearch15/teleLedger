@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -31,7 +33,12 @@ from app.telegram import (
     cashout_operational_reconciliation,
     cashout_reactions,
 )
-from app.telegram.cashout_bot.api import TelegramBotUpdate
+from app.telegram.cashout_bot.api import (
+    TelegramBotApiError,
+    TelegramBotApiGateway,
+    TelegramBotFailureClass,
+    TelegramBotUpdate,
+)
 from app.telegram.cashout_bot.messages import (
     CashoutCallbackAction,
     build_active_task_markup,
@@ -367,6 +374,126 @@ async def test_update_loop_routes_matching_callback_to_authoritative_service() -
     assert stored.completion_type == CashoutCompletionType.FULL
     assert gateway.answers[-1]["query_id"] == "q-loop"
     assert gateway.edits[-1]["buttons"] is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_get_updates_read_timeout_returns_empty_poll() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("idle long poll", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = TelegramBotApiGateway(token="123:test-token", client=client)
+        updates = await gateway.get_updates(offset=None)
+
+    assert updates == []
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_update_loop_routes_callback_after_prior_read_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await seed_cashout()
+    get_updates_calls = 0
+
+    async def fast_sleep(delay: float) -> None:
+        assert delay >= 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal get_updates_calls
+        method = request.url.path.rsplit("/", 1)[-1]
+        if method == "deleteWebhook":
+            return httpx.Response(200, json={"ok": True, "result": True})
+        if method == "getUpdates":
+            get_updates_calls += 1
+            if get_updates_calls == 1:
+                raise httpx.ReadTimeout("idle long poll", request=request)
+            if get_updates_calls == 2:
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "result": [
+                            {
+                                "update_id": 100,
+                                "callback_query": {
+                                    "id": "q-after-timeout",
+                                    "from": {"id": 9001, "username": "operator"},
+                                    "message": {
+                                        "message_id": 555,
+                                        "chat": {
+                                            "id": -1001234567890,
+                                            "type": "supergroup",
+                                        },
+                                    },
+                                    "data": encode_callback_data(
+                                        1,
+                                        CashoutCallbackAction.FULL,
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                )
+            raise asyncio.CancelledError
+        if method in {"answerCallbackQuery", "editMessageText"}:
+            return httpx.Response(200, json={"ok": True, "result": True})
+        raise AssertionError(f"Unexpected Bot API method {method}")
+
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.asyncio.sleep", fast_sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = TelegramBotApiGateway(token="123:test-token", client=client)
+        with pytest.raises(asyncio.CancelledError):
+            await run_cashout_bot_update_loop(
+                gateway,
+                session_factory=TestSessionFactory,
+                report=lambda _: None,
+            )
+
+    stored = await cashout()
+    assert get_updates_calls == 3
+    assert stored.status == CashoutStatus.COMPLETED
+    assert stored.completion_type == CashoutCompletionType.FULL
+
+
+@pytest.mark.asyncio
+async def test_update_loop_fatal_bot_auth_error_still_fails() -> None:
+    class AuthFailureGateway(FakeBotGateway):
+        async def get_updates(self, *, offset: int | None) -> list[object]:
+            del offset
+            raise TelegramBotApiError(
+                "Unauthorized",
+                failure_class=TelegramBotFailureClass.CONFIGURATION,
+                status_code=401,
+            )
+
+    with pytest.raises(TelegramBotApiError):
+        await run_cashout_bot_update_loop(
+            AuthFailureGateway(),
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_httpx_bot_api_logs_redact_token(caplog: pytest.LogCaptureFixture) -> None:
+    token = "123456:REAL_SECRET_TOKEN"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "result": []})
+
+    caplog.set_level(logging.INFO, logger="httpx")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = TelegramBotApiGateway(token=token, client=client)
+        await gateway.get_updates(offset=None)
+
+    assert token not in caplog.text
+    assert f"/bot{token}/" not in caplog.text
+    assert "/bot<redacted-bot-token>/getUpdates" in caplog.text
 
 
 @pytest.mark.asyncio

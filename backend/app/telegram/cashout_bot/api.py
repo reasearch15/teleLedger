@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -10,6 +11,8 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+_REDACTED_BOT_TOKEN = "<redacted-bot-token>"
+_installed_redaction_filters: set[str] = set()
 
 
 class TelegramBotFailureClass(StrEnum):
@@ -43,6 +46,10 @@ class TelegramBotApiError(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
+class TelegramBotLongPollTimeout(Exception):
+    """Expected idle getUpdates long-poll timeout."""
+
+
 class TelegramBotApiGateway:
     """Small Telegram Bot API adapter used by cashout bot runtime."""
 
@@ -65,6 +72,8 @@ class TelegramBotApiGateway:
         self._owns_client = client is None
         self._timeout_seconds = settings.telegram_bot_api_timeout_seconds
         self._max_retry_after_seconds = settings.telegram_bot_max_retry_after_seconds
+        self._long_poll_timeout_seconds = self._default_long_poll_timeout_seconds()
+        _install_httpx_token_redaction(self._token)
 
     async def __aenter__(self) -> TelegramBotApiGateway:
         if self._client is None:
@@ -160,15 +169,27 @@ class TelegramBotApiGateway:
         self,
         *,
         offset: int | None,
-        timeout_seconds: int = 25,
+        timeout_seconds: int | None = None,
     ) -> list[TelegramBotUpdate]:
+        poll_timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self._long_poll_timeout_seconds
+        )
         payload: dict[str, Any] = {
-            "timeout": timeout_seconds,
+            "timeout": poll_timeout,
             "allowed_updates": ["callback_query", "message"],
         }
         if offset is not None:
             payload["offset"] = offset
-        raw_updates = await self._post("getUpdates", payload)
+        try:
+            raw_updates = await self._post("getUpdates", payload)
+        except TelegramBotLongPollTimeout:
+            logger.debug(
+                "cashout_bot_get_updates_long_poll_timeout",
+                extra={"telegram_long_poll_timeout_seconds": poll_timeout},
+            )
+            return []
         if not isinstance(raw_updates, list):
             return []
         updates: list[TelegramBotUpdate] = []
@@ -196,6 +217,13 @@ class TelegramBotApiGateway:
                 f"https://api.telegram.org/bot{self._token}/{method}",
                 json=payload,
             )
+        except httpx.ReadTimeout as error:
+            if method == "getUpdates":
+                raise TelegramBotLongPollTimeout from error
+            raise TelegramBotApiError(
+                "Telegram Bot API request timed out",
+                failure_class=TelegramBotFailureClass.RETRYABLE,
+            ) from error
         except httpx.TimeoutException as error:
             raise TelegramBotApiError(
                 "Telegram Bot API request timed out",
@@ -293,3 +321,45 @@ class TelegramBotApiGateway:
                 for row in buttons
             ]
         }
+
+    def _default_long_poll_timeout_seconds(self) -> int:
+        """Keep Telegram's poll timeout below the HTTP read timeout."""
+        if self._timeout_seconds <= 2:
+            return 1
+        if self._timeout_seconds <= 6:
+            return max(1, int(self._timeout_seconds) - 1)
+        return max(1, min(15, int(self._timeout_seconds) - 5))
+
+
+class _TelegramBotTokenRedactionFilter(logging.Filter):
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._needle = f"/bot{token}/"
+        self._redacted = f"/bot{_REDACTED_BOT_TOKEN}/"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = record.msg.replace(self._needle, self._redacted)
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._redact(value) for value in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: self._redact(value) for key, value in record.args.items()
+            }
+        return True
+
+    def _redact(self, value: object) -> object:
+        if isinstance(value, str):
+            return value.replace(self._needle, self._redacted)
+        if isinstance(value, httpx.URL):
+            return str(value).replace(self._needle, self._redacted)
+        return value
+
+
+def _install_httpx_token_redaction(token: str) -> None:
+    if token in _installed_redaction_filters:
+        return
+    token_filter = _TelegramBotTokenRedactionFilter(token)
+    logging.getLogger("httpx").addFilter(token_filter)
+    logging.getLogger("httpcore").addFilter(token_filter)
+    _installed_redaction_filters.add(token)

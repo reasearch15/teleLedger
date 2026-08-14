@@ -13,7 +13,11 @@ from app.services.cashout_telegram import (
     CashoutTelegramGateway,
     CashoutTelegramService,
 )
-from app.telegram.cashout_bot.api import TelegramBotUpdate
+from app.telegram.cashout_bot.api import (
+    TelegramBotApiError,
+    TelegramBotFailureClass,
+    TelegramBotUpdate,
+)
 from app.telegram.peer_ids import normalize_telegram_chat_id
 
 logger = get_logger(__name__)
@@ -35,6 +39,27 @@ async def run_cashout_bot_update_loop(
     while True:
         try:
             updates = await gateway.get_updates(offset=offset)
+        except TelegramBotApiError as error:
+            if error.failure_class != TelegramBotFailureClass.RETRYABLE:
+                logger.exception(
+                    "cashout_bot_update_poll_failed",
+                    extra={
+                        "failure_class": error.failure_class.value,
+                        "telegram_status_code": error.status_code,
+                    },
+                )
+                raise
+            delay = float(error.retry_after_seconds or settings.telegram_bot_poll_seconds)
+            logger.warning(
+                "cashout_bot_update_poll_retryable_failed",
+                extra={
+                    "failure_class": error.failure_class.value,
+                    "telegram_status_code": error.status_code,
+                    "retry_delay_seconds": delay,
+                },
+            )
+            await asyncio.sleep(delay)
+            continue
         except Exception:
             logger.exception("cashout_bot_update_poll_failed")
             raise
