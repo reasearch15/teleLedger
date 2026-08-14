@@ -42,7 +42,10 @@ export function LedgerDrilldownPanel() {
   }, [filters, isHistorical]);
 
   useEffect(() => {
-    void refresh();
+    const timeoutId = window.setTimeout(() => {
+      void refresh();
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
   }, [refresh]);
 
   useLiveUpdates(LEDGER_PAGE_EVENTS, refresh, isHistorical);
@@ -72,10 +75,23 @@ export function LedgerDrilldownPanel() {
           />
           <DrilldownTable
             title="Cashouts"
-            headers={["Staff", "Amount", "Status", "Completed", "Settlement", "Tag"]}
+            headers={[
+              "Staff",
+              "Total Out",
+              "Requested",
+              "Unpaid",
+              "Payment",
+              "Status",
+              "Completed",
+              "Settlement",
+              "Tag",
+            ]}
             rows={drilldown.cashouts.map((cashout) => [
               cashout.staff_username,
-              formatMoney(cashout.amount),
+              formatMoney(cashout.actual_paid_amount),
+              formatMoney(cashout.requested_amount),
+              formatMoney(cashout.unpaid_difference),
+              cashout.completion_type === "partial" ? "Partial Payment" : "Full Payment",
               cashout.status,
               formatDate(cashout.completed_at),
               cashout.settlement_id ?? "-",

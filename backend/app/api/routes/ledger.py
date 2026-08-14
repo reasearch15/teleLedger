@@ -6,9 +6,9 @@ from fastapi import APIRouter, HTTPException, Path, Query, status
 from app.api.dependencies import CurrentUser, DatabaseSession
 from app.models.staff_settlement import StaffSettlementStatus
 from app.schemas.ledger import (
+    CoadminLedgerSummaryResponse,
     CreateLedgerAdjustmentRequest,
     CreateSettlementRequest,
-    CoadminLedgerSummaryResponse,
     LedgerAdjustmentDrilldownResponse,
     LedgerAdjustmentListResponse,
     LedgerAdjustmentResponse,
@@ -22,6 +22,7 @@ from app.schemas.ledger import (
     SettlementResponse,
 )
 from app.services.ledger import (
+    CoadminNotFoundError,
     LedgerAdjustmentListPage,
     LedgerAdjustmentRecord,
     LedgerAuthorizationError,
@@ -32,7 +33,6 @@ from app.services.ledger import (
     SettlementListPage,
     SettlementNotFoundError,
     SettlementRecord,
-    CoadminNotFoundError,
     StaffNotFoundError,
 )
 
@@ -377,6 +377,10 @@ def _serialize_ledger_drilldown(report: LedgerDrilldownReport) -> LedgerDrilldow
                 staff_id=item.staff_id,
                 staff_username=item.staff_username,
                 amount=item.amount,
+                requested_amount=item.requested_amount,
+                actual_paid_amount=item.actual_paid_amount,
+                unpaid_difference=item.unpaid_difference,
+                completion_type=item.completion_type,
                 status=item.status.value,
                 created_at=item.created_at,
                 completed_at=item.completed_at,

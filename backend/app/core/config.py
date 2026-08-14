@@ -79,6 +79,34 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="TELEGRAM_CASHOUT_GROUP_ID",
     )
+    telegram_bot_token: SecretStr | None = Field(
+        default=None,
+        validation_alias="TELEGRAM_BOT_TOKEN",
+    )
+    telegram_bot_poll_seconds: float = Field(
+        default=1.0,
+        gt=0,
+        le=30,
+        validation_alias="TELEGRAM_BOT_POLL_SECONDS",
+    )
+    telegram_bot_api_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        le=60,
+        validation_alias="TELEGRAM_BOT_API_TIMEOUT_SECONDS",
+    )
+    telegram_bot_max_retry_after_seconds: int = Field(
+        default=60,
+        gt=0,
+        le=300,
+        validation_alias="TELEGRAM_BOT_MAX_RETRY_AFTER_SECONDS",
+    )
+    cashout_partial_pending_ttl_seconds: int = Field(
+        default=300,
+        gt=0,
+        le=3600,
+        validation_alias="CASHOUT_PARTIAL_PENDING_TTL_SECONDS",
+    )
     telegram_group_username: str | None = Field(
         default=None,
         min_length=2,
@@ -151,6 +179,27 @@ class Settings(BaseSettings):
 
         return [origin.strip() for origin in raw_value.split(",") if origin.strip()]
 
+    @field_validator(
+        "telegram_api_id",
+        "telegram_group_id",
+        "telegram_cashout_group_id",
+        mode="before",
+    )
+    @classmethod
+    def parse_optional_telegram_int(cls, value: object) -> object:
+        """Allow tests/local overrides to blank optional Telegram numeric settings."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("telegram_bot_token", mode="before")
+    @classmethod
+    def parse_optional_secret(cls, value: object) -> object:
+        """Treat blank optional secrets as unset."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @model_validator(mode="after")
     def add_local_development_origins(self) -> Self:
         """Always trust both standard loopback frontend origins in development."""
@@ -202,6 +251,15 @@ class Settings(BaseSettings):
         if self.telegram_group_id is not None:
             return self.telegram_group_id
         return self.telegram_group_username
+
+    @property
+    def shared_telegram_supergroup_id(self) -> int | None:
+        """Return the configured Cashout + Venmo operational supergroup ID.
+
+        ``TELEGRAM_CASHOUT_GROUP_ID`` is retained for compatibility with the
+        Phase 2 runtime, but it now represents the shared workflow supergroup.
+        """
+        return self.telegram_cashout_group_id
 
     @property
     def cashout_completion_reaction_allowlist(self) -> frozenset[str] | None:

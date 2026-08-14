@@ -151,6 +151,10 @@ class LedgerCashoutDrilldownItem:
     staff_id: int
     staff_username: str
     amount: Decimal
+    requested_amount: Decimal
+    actual_paid_amount: Decimal
+    unpaid_difference: Decimal
+    completion_type: str | None
     status: CashoutStatus
     created_at: datetime
     completed_at: datetime | None
@@ -1032,7 +1036,15 @@ class LedgerService(ApplicationService):
         statement = (
             select(
                 CashoutRequest.created_by_staff_id,
-                func.coalesce(func.sum(CashoutRequest.amount), ZERO),
+                func.coalesce(
+                    func.sum(
+                        func.coalesce(
+                            CashoutRequest.actual_paid_amount,
+                            CashoutRequest.amount,
+                        )
+                    ),
+                    ZERO,
+                ),
                 func.count(CashoutRequest.id),
             )
             .where(*conditions)
@@ -1139,6 +1151,8 @@ class LedgerService(ApplicationService):
                     CashoutRequest.created_by_staff_id,
                     staff.username,
                     CashoutRequest.amount,
+                    func.coalesce(CashoutRequest.actual_paid_amount, CashoutRequest.amount),
+                    CashoutRequest.completion_type,
                     CashoutRequest.status,
                     CashoutRequest.created_at,
                     CashoutRequest.completed_at,
@@ -1156,13 +1170,17 @@ class LedgerService(ApplicationService):
                 id=int(row[0]),
                 staff_id=int(row[1]),
                 staff_username=row[2],
-                amount=self._money(row[3]),
-                status=row[4],
-                created_at=row[5],
-                completed_at=row[6],
-                settlement_id=row[7],
-                player_tag=row[8],
-                request_number=row[9],
+                amount=self._money(row[4]),
+                requested_amount=self._money(row[3]),
+                actual_paid_amount=self._money(row[4]),
+                unpaid_difference=self._money(row[3]) - self._money(row[4]),
+                completion_type=(row[5].value if row[5] is not None else None),
+                status=row[6],
+                created_at=row[7],
+                completed_at=row[8],
+                settlement_id=row[9],
+                player_tag=row[10],
+                request_number=row[11],
             )
             for row in rows
             if row[1] is not None

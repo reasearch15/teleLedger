@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.cashout import (
     CashoutAuditAction,
+    CashoutCompletionType,
     CashoutStatus,
     CashoutTelegramStatus,
 )
@@ -68,6 +69,8 @@ class CashoutResponse(BaseModel):
     request_number: str
     player_tag: str
     amount: Decimal
+    actual_paid_amount: Decimal | None
+    completion_type: CashoutCompletionType | None
     notes: str | None
     status: CashoutStatus
     telegram_status: CashoutTelegramStatus
@@ -77,6 +80,7 @@ class CashoutResponse(BaseModel):
     telegram_sent_at: datetime | None
     telegram_last_error: str | None
     created_by_staff_id: int
+    coadmin_id: int | None
     completed_by_staff_id: int | None
     requested_by: CashoutStaffResponse | None = None
     completed_by: CashoutStaffResponse | None = None

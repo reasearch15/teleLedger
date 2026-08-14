@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,8 +16,10 @@ from app.db.repositories.cashout import (
     CashoutListPage,
     CashoutRepository,
 )
+from app.db.repositories.cashout_partial_pending import CashoutPartialPendingRepository
 from app.models.cashout import (
     CashoutAuditAction,
+    CashoutCompletionType,
     CashoutRequest,
     CashoutRequestAudit,
     CashoutStatus,
@@ -24,6 +27,7 @@ from app.models.cashout import (
 )
 from app.models.user import User, UserRole
 from app.services.base import ApplicationService
+from app.telegram.peer_ids import chat_ids_equivalent
 from app.websocket.events import LiveEventType, event_broker
 
 logger = get_logger(__name__)
@@ -58,12 +62,17 @@ class CashoutIdempotencyConflictError(Exception):
     """Raised when one submission key is reused with different data."""
 
 
+class CashoutValidationError(Exception):
+    """Raised when cashout payment data is invalid."""
+
+
 class CashoutService(ApplicationService):
     """Cashout creation, history, administration, and audit workflow."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._repository = CashoutRepository(session)
+        self._pending = CashoutPartialPendingRepository(session)
 
     async def create(
         self,
@@ -75,6 +84,10 @@ class CashoutService(ApplicationService):
         actor: User,
     ) -> CashoutRequest:
         self._require_staff(actor)
+        if actor.coadmin_id is None:
+            raise CashoutAuthorizationError(
+                "Staff must be assigned to a coadmin before creating cashouts."
+            )
         key = str(idempotency_key)
         cashout: CashoutRequest
         created = False
@@ -101,6 +114,7 @@ class CashoutService(ApplicationService):
                             telegram_status=CashoutTelegramStatus.PENDING,
                             telegram_random_id=self._telegram_random_id(actor.id, key),
                             created_by_staff_id=actor.id,
+                            coadmin_id=actor.coadmin_id,
                         )
                     )
                     cashout.request_number = f"CR-{cashout.id:06d}"
@@ -117,6 +131,7 @@ class CashoutService(ApplicationService):
                                 "notes": cashout.notes,
                                 "status": cashout.status.value,
                                 "telegram_status": cashout.telegram_status.value,
+                                "coadmin_id": actor.coadmin_id,
                             },
                         )
                     )
@@ -201,6 +216,23 @@ class CashoutService(ApplicationService):
         return cashout
 
     async def complete(self, cashout_id: int, actor: User) -> CashoutRequest:
+        """Complete a cashout as a full payment for backward-compatible admin use."""
+        return await self.complete_cashout(
+            cashout_id,
+            actor=actor,
+            completion_type=CashoutCompletionType.FULL,
+        )
+
+    async def complete_cashout(
+        self,
+        cashout_id: int,
+        *,
+        actor: User,
+        completion_type: CashoutCompletionType,
+        actual_paid_amount: Decimal | None = None,
+        actor_source: str = "atlas_admin",
+        actor_identifier: str | None = None,
+    ) -> CashoutRequest:
         self._require_admin(actor)
         async with self._session.begin():
             cashout = await self._get_locked(cashout_id)
@@ -209,9 +241,39 @@ class CashoutService(ApplicationService):
                     "This cashout is already completed or cancelled."
                 )
             previous_status = cashout.status
-            cashout.status = CashoutStatus.COMPLETED
-            cashout.completed_by_staff_id = actor.id
-            cashout.completed_at = datetime.now(UTC)
+            paid_amount = self._resolve_actual_paid_amount(
+                cashout,
+                completion_type=completion_type,
+                actual_paid_amount=actual_paid_amount,
+            )
+            completed_at = datetime.now(UTC)
+            transition = await self._session.execute(
+                update(CashoutRequest)
+                .where(
+                    CashoutRequest.id == cashout.id,
+                    CashoutRequest.status.in_(
+                        (
+                            CashoutStatus.PENDING,
+                            CashoutStatus.SENT,
+                            CashoutStatus.FAILED_TO_SEND,
+                        )
+                    ),
+                )
+                .values(
+                    status=CashoutStatus.COMPLETED,
+                    completion_type=completion_type,
+                    actual_paid_amount=paid_amount,
+                    completed_by_staff_id=actor.id,
+                    completed_at=completed_at,
+                    telegram_next_attempt_at=None,
+                )
+                .returning(CashoutRequest.id)
+            )
+            if transition.scalar_one_or_none() is None:
+                raise CashoutStateConflictError(
+                    "This cashout is already completed or cancelled."
+                )
+            await self._session.refresh(cashout)
             await self._record_audit(
                 cashout,
                 action=CashoutAuditAction.COMPLETED,
@@ -220,7 +282,117 @@ class CashoutService(ApplicationService):
                 new_value={
                     "status": cashout.status.value,
                     "completed_by_staff_id": actor.id,
+                    "requested_amount": str(cashout.amount),
+                    "actual_paid_amount": str(paid_amount),
+                    "completion_type": completion_type.value,
+                    "actor_source": actor_source,
+                    "actor_identifier": actor_identifier or str(actor.id),
                 },
+            )
+            await self._session.refresh(cashout)
+        await event_broker.publish(
+            LiveEventType.CASHOUT_COMPLETED,
+            cashout_id=cashout.id,
+        )
+        await event_broker.publish(LiveEventType.LEDGER_CHANGED)
+        return cashout
+
+    async def complete_partial(
+        self,
+        cashout_id: int,
+        *,
+        actual_paid_amount: Decimal,
+        actor: User,
+    ) -> CashoutRequest:
+        """Complete a cashout as partial payment for bot/service callers."""
+        return await self.complete_cashout(
+            cashout_id,
+            actor=actor,
+            completion_type=CashoutCompletionType.PARTIAL,
+            actual_paid_amount=actual_paid_amount,
+        )
+
+    async def complete_from_telegram(
+        self,
+        cashout_id: int,
+        *,
+        coadmin_id: int,
+        expected_chat_id: int,
+        completion_type: CashoutCompletionType,
+        actual_paid_amount: Decimal | None = None,
+        telegram_user_id: int | None = None,
+        telegram_username: str | None = None,
+    ) -> CashoutRequest:
+        """Complete a cashout from a verified Telegram bot action."""
+        async with self._session.begin():
+            cashout = await self._repository.get_by_id_for_coadmin(
+                cashout_id,
+                coadmin_id,
+                for_update=True,
+            )
+            if cashout is None:
+                raise CashoutNotFoundError(f"Cashout request {cashout_id} was not found")
+            if cashout.telegram_chat_id is None or not chat_ids_equivalent(
+                cashout.telegram_chat_id,
+                expected_chat_id,
+            ):
+                raise CashoutAuthorizationError("Telegram shared supergroup mismatch.")
+            if cashout.status in (CashoutStatus.COMPLETED, CashoutStatus.CANCELLED):
+                raise CashoutStateConflictError(
+                    "This cashout is already completed or cancelled."
+                )
+
+            previous_status = cashout.status
+            paid_amount = self._resolve_actual_paid_amount(
+                cashout,
+                completion_type=completion_type,
+                actual_paid_amount=actual_paid_amount,
+            )
+            completed_at = datetime.now(UTC)
+            transition = await self._session.execute(
+                update(CashoutRequest)
+                .where(
+                    CashoutRequest.id == cashout.id,
+                    CashoutRequest.coadmin_id == coadmin_id,
+                    CashoutRequest.status.in_(
+                        (
+                            CashoutStatus.PENDING,
+                            CashoutStatus.SENT,
+                            CashoutStatus.FAILED_TO_SEND,
+                        )
+                    ),
+                )
+                .values(
+                    status=CashoutStatus.COMPLETED,
+                    completion_type=completion_type,
+                    actual_paid_amount=paid_amount,
+                    completed_by_staff_id=None,
+                    completed_at=completed_at,
+                    telegram_next_attempt_at=None,
+                )
+                .returning(CashoutRequest.id)
+            )
+            if transition.scalar_one_or_none() is None:
+                raise CashoutStateConflictError(
+                    "This cashout is already completed or cancelled."
+                )
+            await self._session.refresh(cashout)
+            await self._repository.add_audit(
+                CashoutRequestAudit(
+                    cashout_request_id=cashout.id,
+                    action=CashoutAuditAction.TELEGRAM_BOT_COMPLETED,
+                    actor_user_id=None,
+                    previous_value={"status": previous_status.value},
+                    new_value={
+                        "status": cashout.status.value,
+                        "requested_amount": str(cashout.amount),
+                        "actual_paid_amount": str(paid_amount),
+                        "completion_type": completion_type.value,
+                        "actor_source": "telegram_bot",
+                        "telegram_user_id": telegram_user_id,
+                        "telegram_username": telegram_username,
+                    },
+                )
             )
             await self._session.refresh(cashout)
         await event_broker.publish(
@@ -258,6 +430,7 @@ class CashoutService(ApplicationService):
                     previous_value={"status": previous_status.value},
                     new_value={"status": cashout.status.value},
                 )
+            await self._pending.delete_for_cashout(cashout.id)
             await self._session.refresh(cashout)
         if cancellation_status == "cancelled":
             await event_broker.publish(
@@ -389,6 +562,27 @@ class CashoutService(ApplicationService):
             )
 
     @staticmethod
+    def _resolve_actual_paid_amount(
+        cashout: CashoutRequest,
+        *,
+        completion_type: CashoutCompletionType,
+        actual_paid_amount: Decimal | None,
+    ) -> Decimal:
+        requested = Decimal(cashout.amount).quantize(Decimal("0.01"))
+        if completion_type == CashoutCompletionType.FULL:
+            return requested
+        if actual_paid_amount is None:
+            raise CashoutValidationError("Partial completion requires an actual paid amount.")
+        paid = Decimal(actual_paid_amount).quantize(Decimal("0.01"))
+        if paid <= Decimal("0.00"):
+            raise CashoutValidationError("Partial amount must be greater than zero.")
+        if paid >= requested:
+            raise CashoutValidationError(
+                "Partial amount must be less than the requested amount."
+            )
+        return paid
+
+    @staticmethod
     def _telegram_random_id(staff_id: int, idempotency_key: str) -> int:
         digest = hashlib.sha256(
             f"{staff_id}:{idempotency_key}".encode()
@@ -417,15 +611,34 @@ async def _delete_cancelled_cashout_telegram_message(
         return CashoutTelegramDeletionResult("no_linked_message")
 
     try:
-        from telethon.tl import types  # type: ignore[import-untyped]
-
         from app.core.config import get_settings
-        from app.telegram.client import create_telegram_client
 
         settings = get_settings()
-        delete_chat_id = chat_id if chat_id is not None else settings.telegram_cashout_group_id
+        if settings.telegram_bot_token is not None:
+            from app.db.session import SessionFactory
+            from app.services.cashout_telegram import CashoutTelegramService
+            from app.telegram.cashout_bot.api import TelegramBotApiGateway
+
+            async with TelegramBotApiGateway() as gateway:
+                async with SessionFactory() as session:
+                    cashout = await session.get(
+                        CashoutRequest,
+                        target.cashout_request_id,
+                    )
+                    if cashout is None:
+                        return CashoutTelegramDeletionResult("no_linked_message")
+                    status = await CashoutTelegramService(
+                        session,
+                        gateway=gateway,
+                    ).sync_cancelled_task(cashout)
+                    return CashoutTelegramDeletionResult(status)
+
+        from telethon.tl import types  # type: ignore[import-untyped]
+
+        from app.telegram.client import create_telegram_client
+        delete_chat_id = chat_id if chat_id is not None else settings.shared_telegram_supergroup_id
         if delete_chat_id is None:
-            error = "missing_cashout_group_id"
+            error = "missing_shared_supergroup_id"
             logger.warning(
                 "cashout_telegram_delete_failed",
                 extra={

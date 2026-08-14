@@ -23,6 +23,12 @@ from app.models.cashout import (
     CashoutTelegramStatus,
 )
 from app.models.user import User
+from app.telegram.cashout_bot.api import TelegramBotApiError, TelegramBotFailureClass
+from app.telegram.cashout_bot.messages import (
+    CashoutTaskView,
+    build_active_task_markup,
+    format_active_cashout_message,
+)
 from app.telegram.inquiry_ingestion import register_cashout_panel_message
 from app.websocket.events import LiveEventType, event_broker
 
@@ -77,6 +83,7 @@ async def run_cashout_delivery_worker(
     group_input: Any,
     *,
     telegram_chat_id: int | None = None,
+    bot_gateway: Any | None = None,
 ) -> None:
     """Continuously drain pending cashouts through the existing client."""
     logger.info(
@@ -89,6 +96,7 @@ async def run_cashout_delivery_worker(
                 client,
                 group_input,
                 telegram_chat_id=telegram_chat_id,
+                bot_gateway=bot_gateway,
             )
             if not processed:
                 await asyncio.sleep(DELIVERY_POLL_SECONDS)
@@ -101,21 +109,42 @@ async def deliver_next_cashout(
     group_input: Any,
     *,
     telegram_chat_id: int | None = None,
+    bot_gateway: Any | None = None,
 ) -> bool:
     """Claim and deliver one due outbox row."""
     delivery = await _claim_delivery()
     if delivery is None:
         return False
 
-    request = SendMessageRequest(
-        peer=group_input,
-        message=format_cashout_message(delivery),
-        no_webpage=True,
-        random_id=delivery.random_id,
-    )
     try:
-        result = await client(request)
-        message_id = _extract_message_id(result, delivery.random_id)
+        if bot_gateway is not None:
+            if telegram_chat_id is None:
+                raise RuntimeError("telegram_chat_id is required for bot delivery")
+            message_id = await bot_gateway.send_cashout_task_message(
+                chat_id=telegram_chat_id,
+                text=format_active_cashout_message(
+                    CashoutTaskView(
+                        cashout_id=delivery.cashout_id,
+                        request_number=delivery.request_number,
+                        player_tag=delivery.player_tag,
+                        requested_amount=delivery.amount,
+                        status=CashoutStatus.PENDING,
+                        requested_by=delivery.requested_by,
+                        created_at=delivery.created_at.astimezone(UTC),
+                        notes=delivery.notes,
+                    )
+                ),
+                buttons=build_active_task_markup(delivery.cashout_id),
+            )
+        else:
+            request = SendMessageRequest(
+                peer=group_input,
+                message=format_cashout_message(delivery),
+                no_webpage=True,
+                random_id=delivery.random_id,
+            )
+            result = await client(request)
+            message_id = _extract_message_id(result, delivery.random_id)
         await _record_success(
             delivery,
             message_id,
@@ -147,6 +176,9 @@ async def deliver_next_cashout(
             extra={
                 "cashout_request_id": delivery.cashout_id,
                 "cashout_attempt": delivery.attempt,
+                "failure_class": _failure_class(error),
+                "telegram_status_code": _telegram_status_code(error),
+                "retry_after_seconds": _retry_after_seconds(error),
             },
         )
     return True
@@ -306,20 +338,47 @@ async def _record_failure(
     error: Exception,
 ) -> None:
     now = datetime.now(UTC)
-    retry_seconds = min(300, 2 ** min(delivery.attempt, 8) * 2)
+    failure_class = _failure_class(error)
+    retry_after = _retry_after_seconds(error)
+    retry_seconds = retry_after if retry_after is not None else min(
+        300,
+        2 ** min(delivery.attempt, 8) * 2,
+    )
     async with SessionFactory() as session, session.begin():
         repository = CashoutRepository(session)
         cashout = await repository.get_by_id_for_update(delivery.cashout_id)
         if cashout is None or cashout.telegram_status == CashoutTelegramStatus.SENT:
             return
         cashout.telegram_last_error = str(error)[:2000]
-        cashout.telegram_next_attempt_at = now + timedelta(seconds=retry_seconds)
-        if cashout.telegram_attempts >= FAILED_STATUS_AFTER_ATTEMPTS:
+        if failure_class in {
+            TelegramBotFailureClass.NON_RETRYABLE.value,
+            TelegramBotFailureClass.CONFIGURATION.value,
+        }:
             cashout.telegram_status = CashoutTelegramStatus.FAILED_TO_SEND
             if cashout.status == CashoutStatus.PENDING:
                 cashout.status = CashoutStatus.FAILED_TO_SEND
+            cashout.telegram_next_attempt_at = None
         else:
-            cashout.telegram_status = CashoutTelegramStatus.PENDING
+            cashout.telegram_next_attempt_at = now + timedelta(seconds=retry_seconds)
+            if cashout.telegram_attempts >= FAILED_STATUS_AFTER_ATTEMPTS:
+                cashout.telegram_status = CashoutTelegramStatus.FAILED_TO_SEND
+                if cashout.status == CashoutStatus.PENDING:
+                    cashout.status = CashoutStatus.FAILED_TO_SEND
+            else:
+                cashout.telegram_status = CashoutTelegramStatus.PENDING
+        await repository.add_audit(
+            CashoutRequestAudit(
+                cashout_request_id=cashout.id,
+                action=CashoutAuditAction.TELEGRAM_RETRY,
+                actor_user_id=None,
+                previous_value={"telegram_status": cashout.telegram_status.value},
+                new_value={
+                    "failure_class": failure_class,
+                    "retry_after_seconds": retry_seconds,
+                    "terminal": cashout.telegram_next_attempt_at is None,
+                },
+            )
+        )
 
 
 def _extract_message_id(result: Any, random_id: int) -> int | None:
@@ -339,6 +398,26 @@ def _extract_message_id(result: Any, random_id: int) -> int | None:
         message_id = getattr(message, "id", None)
         if isinstance(message_id, int):
             return message_id
+    return None
+
+
+def _failure_class(error: Exception) -> str:
+    if isinstance(error, TelegramBotApiError):
+        return error.failure_class.value
+    if isinstance(error, asyncio.TimeoutError):
+        return TelegramBotFailureClass.RETRYABLE.value
+    return TelegramBotFailureClass.RETRYABLE.value
+
+
+def _telegram_status_code(error: Exception) -> int | None:
+    if isinstance(error, TelegramBotApiError):
+        return error.status_code
+    return None
+
+
+def _retry_after_seconds(error: Exception) -> int | None:
+    if isinstance(error, TelegramBotApiError):
+        return error.retry_after_seconds
     return None
 
 

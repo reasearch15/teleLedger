@@ -64,6 +64,14 @@ class JsonFormatter(logging.Formatter):
             "batch_size",
             "wait_seconds",
             "reconnect_delay_seconds",
+            "failure_class",
+            "telegram_status_code",
+            "retry_after_seconds",
+            "reconciliation_action",
+            "reconciliation_result",
+            "expired_pending_count",
+            "venmo_confirmation_request_id",
+            "coadmin_id",
         ):
             field_value = getattr(record, field_name, None)
             if field_value is not None:

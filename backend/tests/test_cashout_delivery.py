@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -16,7 +17,6 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 from telethon.errors import RandomIdDuplicateError  # type: ignore[import-untyped]
-from unittest.mock import AsyncMock
 
 from app.db.base import Base
 from app.models.cashout import (
@@ -28,6 +28,7 @@ from app.models.cashout import (
 )
 from app.models.user import User, UserRole
 from app.telegram import cashout_delivery
+from app.telegram.cashout_bot.api import TelegramBotApiError, TelegramBotFailureClass
 
 test_engine = create_async_engine(
     "sqlite+aiosqlite://",
@@ -60,6 +61,23 @@ class FakeTelegramClient:
 
     async def get_messages(self, group: Any, *, limit: int = 25) -> list[object]:
         return self.recovery_messages[:limit]
+
+
+class FailingBotGateway:
+    def __init__(self, error: TelegramBotApiError) -> None:
+        self.error = error
+        self.calls = 0
+
+    async def send_cashout_task_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        buttons: list[list[tuple[str, str]]],
+    ) -> int:
+        del chat_id, text, buttons
+        self.calls += 1
+        raise self.error
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -115,6 +133,7 @@ async def reset_database(
     yield
     async with test_engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
+    await test_engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -223,3 +242,80 @@ async def test_duplicate_send_recovers_telegram_message_id() -> None:
         assert cashout is not None
         assert cashout.telegram_status == CashoutTelegramStatus.SENT
         assert cashout.telegram_message_id == 777
+
+
+@pytest.mark.asyncio
+async def test_retryable_bot_timeout_keeps_delivery_retryable() -> None:
+    gateway = FailingBotGateway(
+        TelegramBotApiError(
+            "timeout",
+            failure_class=TelegramBotFailureClass.RETRYABLE,
+        )
+    )
+
+    processed = await cashout_delivery.deliver_next_cashout(
+        object(),
+        "group",
+        telegram_chat_id=-1001234567890,
+        bot_gateway=gateway,
+    )
+
+    assert processed is True
+    assert gateway.calls == 1
+    async with TestSessionFactory() as session:
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        assert cashout.telegram_status == CashoutTelegramStatus.PENDING
+        assert cashout.telegram_next_attempt_at is not None
+        assert cashout.telegram_last_error == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_bot_rate_limit_retry_after_is_recorded() -> None:
+    gateway = FailingBotGateway(
+        TelegramBotApiError(
+            "rate limited",
+            failure_class=TelegramBotFailureClass.RETRYABLE,
+            status_code=429,
+            retry_after_seconds=45,
+        )
+    )
+
+    await cashout_delivery.deliver_next_cashout(
+        object(),
+        "group",
+        telegram_chat_id=-1001234567890,
+        bot_gateway=gateway,
+    )
+
+    async with TestSessionFactory() as session:
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        assert cashout.telegram_next_attempt_at is not None
+        delay = cashout.telegram_next_attempt_at.replace(tzinfo=UTC) - datetime.now(UTC)
+        assert 0 < delay.total_seconds() <= 45
+
+
+@pytest.mark.asyncio
+async def test_invalid_bot_group_failure_is_terminal() -> None:
+    gateway = FailingBotGateway(
+        TelegramBotApiError(
+            "chat not found",
+            failure_class=TelegramBotFailureClass.NON_RETRYABLE,
+            status_code=400,
+        )
+    )
+
+    await cashout_delivery.deliver_next_cashout(
+        object(),
+        "group",
+        telegram_chat_id=-1001234567890,
+        bot_gateway=gateway,
+    )
+
+    async with TestSessionFactory() as session:
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        assert cashout.status == CashoutStatus.FAILED_TO_SEND
+        assert cashout.telegram_status == CashoutTelegramStatus.FAILED_TO_SEND
+        assert cashout.telegram_next_attempt_at is None

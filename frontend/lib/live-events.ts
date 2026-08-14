@@ -16,6 +16,8 @@ export const LIVE_EVENTS = {
   INQUIRY_MESSAGE_CREATED: "inquiry_message_created",
   INQUIRY_MESSAGE_UPDATED: "inquiry_message_updated",
   INQUIRY_MEDIA_READY: "inquiry_media_ready",
+  NOTIFICATION_CREATED: "notification_created",
+  NOTIFICATION_READ: "notification_read",
   SETTLEMENT_CREATED: "settlement_created",
   SETTLEMENT_DONE: "settlement_done",
   LEDGER_CHANGED: "ledger_changed",
@@ -29,6 +31,7 @@ export type LiveEvent = {
   payment_id?: number;
   cashout_id?: number;
   inquiry_message_id?: number;
+  notification_id?: number;
   sender_alias?: string;
   direction?: string;
   settlement_id?: number;
@@ -74,6 +77,11 @@ export const INQUIRY_PAGE_EVENTS: LiveEventType[] = [
   LIVE_EVENTS.INQUIRY_MESSAGE_CREATED,
   LIVE_EVENTS.INQUIRY_MESSAGE_UPDATED,
   LIVE_EVENTS.INQUIRY_MEDIA_READY,
+];
+
+export const NOTIFICATION_EVENTS: LiveEventType[] = [
+  LIVE_EVENTS.NOTIFICATION_CREATED,
+  LIVE_EVENTS.NOTIFICATION_READ,
 ];
 
 export const LEDGER_PAGE_EVENTS: LiveEventType[] = [

@@ -24,6 +24,7 @@ from app.services.cashout import (
     CashoutNotFoundError,
     CashoutService,
     CashoutStateConflictError,
+    CashoutValidationError,
 )
 
 router = APIRouter(prefix="/api/cashouts", tags=["cashouts"])
@@ -234,6 +235,11 @@ def _raise_workflow_error(error: Exception) -> NoReturn:
     if isinstance(error, CashoutStateConflictError):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    if isinstance(error, CashoutValidationError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(error),
         ) from error
     raise error

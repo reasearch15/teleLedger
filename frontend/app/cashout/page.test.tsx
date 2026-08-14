@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import CashoutPage from "@/app/cashout/page";
 import { createCashout, listCashouts } from "@/services/cashouts";
@@ -17,6 +17,8 @@ vi.mock("@/components/auth-provider", () => ({
       role: "staff",
       is_active: true,
       staff_color: "#2563EB",
+      coadmin_id: 10,
+      coadmin_username: "coadmin",
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
       last_login_at: null,
@@ -44,6 +46,8 @@ const createdCashout: Cashout = {
   request_number: "CR-000001",
   player_tag: "ABC12345",
   amount: "250.00",
+  actual_paid_amount: null,
+  completion_type: null,
   notes: "VIP Player",
   status: "pending",
   telegram_status: "pending",
@@ -52,6 +56,7 @@ const createdCashout: Cashout = {
   telegram_sent_at: null,
   telegram_last_error: null,
   created_by_staff_id: 42,
+  coadmin_id: 10,
   completed_by_staff_id: null,
   requested_by: {
     id: 42,
@@ -72,7 +77,29 @@ const emptyPage: CashoutPageResponse = {
   has_more: false,
 };
 
+function cashoutFixture(overrides: Partial<Cashout>): Cashout {
+  return {
+    ...createdCashout,
+    id: 100,
+    request_number: "CR-000100",
+    status: "completed",
+    telegram_status: "sent",
+    actual_paid_amount: "250.00",
+    completion_type: "full",
+    completed_by_staff_id: 42,
+    completed_by: {
+      id: 42,
+      username: "sarah",
+      color: "#2563EB",
+    },
+    completed_at: "2026-07-06T21:35:00Z",
+    ...overrides,
+  };
+}
+
 describe("CashoutPage", () => {
+  afterEach(() => cleanup());
+
   beforeEach(() => {
     vi.mocked(listCashouts).mockReset();
     vi.mocked(createCashout).mockReset();
@@ -121,5 +148,63 @@ describe("CashoutPage", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByText("ABC12345")).toBeInTheDocument();
+  });
+
+  it("renders completed full payments with requested, paid, and zero unpaid amounts", async () => {
+    vi.mocked(listCashouts).mockResolvedValue({
+      ...emptyPage,
+      items: [cashoutFixture({ amount: "250.00", actual_paid_amount: "250.00" })],
+    });
+
+    render(<CashoutPage />);
+
+    expect(await screen.findByText("Full Payment")).toBeInTheDocument();
+    expect(screen.getByText("Requested: $250.00")).toBeInTheDocument();
+    expect(screen.getAllByText("Actual paid: $250.00").length).toBeGreaterThan(0);
+    expect(screen.getByText("Unpaid difference: $0.00")).toBeInTheDocument();
+    expect(screen.getByText("Completed by: sarah")).toBeInTheDocument();
+  });
+
+  it("renders completed partial payments without treating the unpaid difference as active", async () => {
+    vi.mocked(listCashouts).mockResolvedValue({
+      ...emptyPage,
+      items: [
+        cashoutFixture({
+          amount: "100.00",
+          actual_paid_amount: "60.00",
+          completion_type: "partial",
+        }),
+      ],
+    });
+
+    render(<CashoutPage />);
+
+    expect(await screen.findByText("Partial Payment")).toBeInTheDocument();
+    expect(screen.getByText("Requested: $100.00")).toBeInTheDocument();
+    expect(screen.getAllByText("Actual paid: $60.00").length).toBeGreaterThan(0);
+    expect(screen.getByText("Unpaid difference: $40.00")).toBeInTheDocument();
+    expect(screen.getByText("Completion type: Partial Payment")).toBeInTheDocument();
+  });
+
+  it("renders legacy completed cashouts using safe full-payment fallbacks", async () => {
+    vi.mocked(listCashouts).mockResolvedValue({
+      ...emptyPage,
+      items: [
+        cashoutFixture({
+          amount: "125.00",
+          actual_paid_amount: null,
+          completion_type: null,
+          completed_by: null,
+        }),
+      ],
+    });
+
+    render(<CashoutPage />);
+
+    expect(await screen.findByText("Full Payment")).toBeInTheDocument();
+    expect(screen.getByText("Requested: $125.00")).toBeInTheDocument();
+    expect(screen.getAllByText("Actual paid: $125.00").length).toBeGreaterThan(0);
+    expect(screen.getByText("Unpaid difference: $0.00")).toBeInTheDocument();
+    expect(screen.getByText("Completed by: Telegram bot")).toBeInTheDocument();
   });
 });

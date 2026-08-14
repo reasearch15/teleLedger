@@ -4,6 +4,7 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -15,7 +16,6 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 from telethon.tl import types  # type: ignore[import-untyped]
-from unittest.mock import AsyncMock
 
 from app.db.base import Base
 from app.models.cashout import (
@@ -95,6 +95,7 @@ async def reset_database(
     yield
     async with test_engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
+    await test_engine.dispose()
 
 
 async def seed_cashout(
@@ -147,7 +148,7 @@ async def audit_actions() -> list[CashoutAuditAction]:
 
 
 @pytest.mark.asyncio
-async def test_any_reaction_completes_cashout_and_writes_audit() -> None:
+async def test_any_reaction_is_non_mutating_for_cashout_completion() -> None:
     await seed_cashout(1, message_id=555)
 
     result = await complete_cashout_from_reaction(
@@ -156,18 +157,16 @@ async def test_any_reaction_completes_cashout_and_writes_audit() -> None:
         -1001234567890,
     )
 
-    assert result.completed is True
+    assert result.completed is False
     assert result.cashout_id == 1
+    assert result.reason == "reaction_completion_disabled"
     async with TestSessionFactory() as session:
         cashout = await session.get(CashoutRequest, 1)
         assert cashout is not None
-        assert cashout.status == CashoutStatus.COMPLETED
-        assert cashout.completed_at is not None
+        assert cashout.status == CashoutStatus.SENT
+        assert cashout.completed_at is None
         assert cashout.telegram_status == CashoutTelegramStatus.SENT
-    assert await audit_actions() == [
-        CashoutAuditAction.TELEGRAM_SENT,
-        CashoutAuditAction.TELEGRAM_REACTION_COMPLETED,
-    ]
+    assert await audit_actions() == [CashoutAuditAction.TELEGRAM_SENT]
 
 
 @pytest.mark.asyncio
@@ -185,13 +184,11 @@ async def test_multiple_reactions_do_not_duplicate_completion() -> None:
         -1001234567890,
     )
 
-    assert first.completed is True
+    assert first.completed is False
     assert second.completed is False
-    assert second.reason == "already_completed"
-    assert await audit_actions() == [
-        CashoutAuditAction.TELEGRAM_SENT,
-        CashoutAuditAction.TELEGRAM_REACTION_COMPLETED,
-    ]
+    assert first.reason == "reaction_completion_disabled"
+    assert second.reason == "reaction_completion_disabled"
+    assert await audit_actions() == [CashoutAuditAction.TELEGRAM_SENT]
 
 
 @pytest.mark.asyncio
@@ -415,7 +412,7 @@ async def test_cancelled_cashouts_are_ignored() -> None:
     )
 
     assert result.completed is False
-    assert result.reason == "cancelled"
+    assert result.reason == "reaction_completion_disabled"
     async with TestSessionFactory() as session:
         cashout = await session.get(CashoutRequest, 1)
         assert cashout is not None
@@ -493,7 +490,7 @@ async def test_unrelated_emoji_is_ignored_by_allowlist() -> None:
 
 
 @pytest.mark.asyncio
-async def test_allowed_emoji_completes_cashout() -> None:
+async def test_allowed_emoji_does_not_complete_cashout() -> None:
     await seed_cashout(1, message_id=555)
 
     result = await complete_cashout_from_reaction(
@@ -504,8 +501,10 @@ async def test_allowed_emoji_completes_cashout() -> None:
         reaction_emoji="✅",
     )
 
-    assert result.completed is True
+    assert result.completed is False
     assert result.cashout_id == 1
+    assert result.reason == "reaction_completion_disabled"
+    assert await audit_actions() == [CashoutAuditAction.TELEGRAM_SENT]
 
 
 @pytest.mark.asyncio
@@ -536,7 +535,8 @@ async def test_historical_null_chat_id_falls_back_to_configured_group() -> None:
         -1001234567890,
     )
 
-    assert result.completed is True
+    assert result.completed is False
+    assert result.reason == "reaction_completion_disabled"
     async with TestSessionFactory() as session:
         cashout = await session.get(CashoutRequest, 1)
         assert cashout is not None
@@ -553,4 +553,5 @@ async def test_positive_channel_id_normalizes_to_marked_form() -> None:
         -1001234567890,
     )
 
-    assert result.completed is True
+    assert result.completed is False
+    assert result.reason == "reaction_completion_disabled"

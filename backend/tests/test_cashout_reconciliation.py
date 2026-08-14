@@ -70,6 +70,7 @@ async def reset_database(
     yield
     async with test_engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
+    await test_engine.dispose()
 
 
 async def seed_sent(cashout_id: int, message_id: int) -> None:
@@ -114,7 +115,7 @@ def _reacted_message(emoji: str = "✅") -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_reconciliation_completes_missed_reaction() -> None:
+async def test_reconciliation_reports_reaction_without_completing_cashout() -> None:
     await seed_sent(1, 555)
     client = AsyncMock()
     client.get_messages = AsyncMock(return_value=_reacted_message("✅"))
@@ -127,11 +128,12 @@ async def test_reconciliation_completes_missed_reaction() -> None:
     )
 
     assert len(results) == 1
-    assert results[0].completed is True
+    assert results[0].completed is False
+    assert results[0].reason == "reaction_completion_disabled"
     async with TestSessionFactory() as session:
         cashout = await session.get(CashoutRequest, 1)
         assert cashout is not None
-        assert cashout.status == CashoutStatus.COMPLETED
+        assert cashout.status == CashoutStatus.SENT
 
 
 @pytest.mark.asyncio
@@ -228,13 +230,14 @@ async def test_reconciliation_fetch_failure_retries_safely() -> None:
     )
 
     assert len(results) == 1
-    assert results[0].completed is True
+    assert results[0].completed is False
+    assert results[0].reason == "reaction_completion_disabled"
     assert client.get_messages.await_count == 2
     async with TestSessionFactory() as session:
         first = await session.get(CashoutRequest, 1)
         second = await session.get(CashoutRequest, 2)
-        assert first is not None and first.status == CashoutStatus.COMPLETED
-        # Newest-first batch order failed on id=2 first, then completed id=1.
+        assert first is not None and first.status == CashoutStatus.SENT
+        # Newest-first batch order failed on id=2 first, then inspected id=1.
         assert second is not None and second.status == CashoutStatus.SENT
 
 

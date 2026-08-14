@@ -20,7 +20,12 @@ from app.api.dependencies import get_current_user
 from app.db.base import Base
 from app.db.session import get_session
 from app.main import app
-from app.models.cashout import CashoutRequest, CashoutStatus, CashoutTelegramStatus
+from app.models.cashout import (
+    CashoutCompletionType,
+    CashoutRequest,
+    CashoutStatus,
+    CashoutTelegramStatus,
+)
 from app.models.ledger_adjustment import LedgerAdjustment, LedgerAdjustmentType
 from app.models.payment_event import PaymentEvent, PaymentStatus
 from app.models.staff_settlement import (
@@ -153,12 +158,29 @@ async def seed_cashout(
     cashout_id: int,
     *,
     amount: str = "30.00",
+    actual_paid_amount: str | None = None,
+    completion_type: CashoutCompletionType | None = None,
     status: CashoutStatus = CashoutStatus.COMPLETED,
     completed_at: datetime = datetime(2026, 7, 2, 12, tzinfo=UTC),
     staff_id: int | None = 42,
     created_at: datetime | None = None,
     settlement_id: int | None = None,
 ) -> None:
+    requested = Decimal(amount)
+    resolved_actual = (
+        Decimal(actual_paid_amount)
+        if actual_paid_amount is not None
+        else requested
+        if status == CashoutStatus.COMPLETED
+        else None
+    )
+    resolved_completion_type = (
+        completion_type
+        if completion_type is not None
+        else CashoutCompletionType.FULL
+        if status == CashoutStatus.COMPLETED
+        else None
+    )
     async with TestSessionFactory() as session:
         session.add(
             CashoutRequest(
@@ -166,12 +188,15 @@ async def seed_cashout(
                 request_number=f"CR-{cashout_id:06d}",
                 idempotency_key=f"00000000-0000-0000-0000-{cashout_id:012d}",
                 player_tag="ABC",
-                amount=Decimal(amount),
+                amount=requested,
+                actual_paid_amount=resolved_actual,
+                completion_type=resolved_completion_type,
                 notes=None,
                 status=status,
                 telegram_status=CashoutTelegramStatus.SENT,
                 telegram_random_id=10_000 + cashout_id,
                 created_by_staff_id=staff_id,
+                coadmin_id=10 if staff_id == 42 else None,
                 created_at=created_at or completed_at,
                 completed_at=completed_at if status == CashoutStatus.COMPLETED else None,
                 settlement_id=settlement_id,
@@ -229,6 +254,40 @@ async def test_admin_can_view_ledger_and_staff_cannot() -> None:
     assert item["payments_count"] == 1
     assert item["cashouts_count"] == 1
     assert forbidden.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_ledger_cashouts_use_actual_paid_amount_for_total_out() -> None:
+    await seed_done_payment(1, amount="100.00")
+    await seed_cashout(
+        1,
+        amount="40.00",
+        actual_paid_amount="15.00",
+        completion_type=CashoutCompletionType.PARTIAL,
+    )
+    await seed_cashout(
+        2,
+        amount="20.00",
+        actual_paid_amount="20.00",
+        completion_type=CashoutCompletionType.FULL,
+    )
+
+    async with api_client_for(ADMIN) as client:
+        ledger = await client.get("/api/admin/ledger")
+        drilldown = await client.get(
+            "/api/admin/ledger/drilldown",
+            params={"date_from": "2026-07-01", "date_to": "2026-07-03"},
+        )
+
+    item = ledger.json()["items"][0]
+    assert item["total_out"] == "35.00"
+    assert item["net"] == "65.00"
+    cashouts = sorted(drilldown.json()["cashouts"], key=lambda item: item["id"])
+    assert cashouts[0]["amount"] == "15.00"
+    assert cashouts[0]["requested_amount"] == "40.00"
+    assert cashouts[0]["actual_paid_amount"] == "15.00"
+    assert cashouts[0]["unpaid_difference"] == "25.00"
+    assert cashouts[0]["completion_type"] == "partial"
 
 
 @pytest.mark.asyncio
@@ -604,6 +663,8 @@ async def test_recreated_username_starts_fresh_after_deleted_staff_rows_detached
             "staff_color": "#2563EB",
             "coadmin_id": None,
             "coadmin_username": "default_coadmin",
+            "payment_total": "75.00",
+            "adjustment_total": "0.00",
             "total_in": "75.00",
             "total_out": "0.00",
             "settled_amount": "0.00",

@@ -11,6 +11,7 @@ from app.db.repositories.cashout import CashoutRepository
 from app.db.session import SessionFactory
 from app.models.cashout import (
     CashoutAuditAction,
+    CashoutCompletionType,
     CashoutRequest,
     CashoutRequestAudit,
     CashoutStatus,
@@ -45,16 +46,9 @@ async def complete_recent_cashout_reactions(
     allowed_reactions: frozenset[str] | None = None,
     limit: int = 100,
 ) -> list[CashoutReactionCompletionResult]:
-    """Use fieldless UpdateRecentReactions as a trigger to inspect sent messages."""
-    from app.telegram.cashout_reconciliation import reconcile_pending_cashout_reactions
-
-    return await reconcile_pending_cashout_reactions(
-        client,
-        group,
-        expected_chat_id=expected_chat_id,
-        allowed_reactions=allowed_reactions,
-        limit=limit,
-    )
+    """Reaction-triggered cashout completion is retired in favor of bot buttons."""
+    del client, group, expected_chat_id, allowed_reactions, limit
+    return []
 
 
 async def complete_cashout_from_reaction(
@@ -156,6 +150,27 @@ async def complete_cashout_from_reaction(
             cashout.telegram_chat_id = normalized_chat
 
         previous_status = cashout.status.value
+        logger.info(
+            "reaction_update_ignored",
+            extra={
+                "telegram_message_id": telegram_message_id,
+                "cashout_request_id": cashout.id,
+                "telegram_chat_id": normalized_chat,
+                "matched_cashout": True,
+                "previous_status": previous_status,
+                "completed": False,
+                "reason_ignored": "reaction_completion_disabled",
+                "reaction_emoji": reaction_emoji,
+            },
+        )
+        return CashoutReactionCompletionResult(
+            completed=False,
+            cashout_id=cashout.id,
+            reason="reaction_completion_disabled",
+            matched_cashout=True,
+            previous_status=previous_status,
+            reaction_emoji=reaction_emoji,
+        )
         if cashout.status == CashoutStatus.COMPLETED:
             logger.info(
                 "reaction_update_ignored",
@@ -217,6 +232,8 @@ async def complete_cashout_from_reaction(
             )
             .values(
                 status=CashoutStatus.COMPLETED,
+                completion_type=CashoutCompletionType.FULL,
+                actual_paid_amount=cashout.amount,
                 completed_at=now,
                 telegram_next_attempt_at=None,
                 telegram_chat_id=normalized_chat,
@@ -260,6 +277,9 @@ async def complete_cashout_from_reaction(
                 new_value={
                     "status": CashoutStatus.COMPLETED.value,
                     "completed_at": now.isoformat(),
+                    "requested_amount": str(cashout.amount),
+                    "actual_paid_amount": str(cashout.amount),
+                    "completion_type": CashoutCompletionType.FULL.value,
                     "telegram_message_id": telegram_message_id,
                     "telegram_chat_id": normalized_chat,
                     "reaction_emoji": reaction_emoji,

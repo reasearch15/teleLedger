@@ -99,6 +99,7 @@ export type CashoutStatus =
   | "failed_to_send";
 
 export type CashoutTelegramStatus = "pending" | "sent" | "failed_to_send";
+export type CashoutCompletionType = "full" | "partial";
 
 export type InquiryMessage = {
   id: number;
@@ -153,6 +154,8 @@ export type Cashout = {
   request_number: string;
   player_tag: string;
   amount: string;
+  actual_paid_amount: string | null;
+  completion_type: CashoutCompletionType | null;
   notes: string | null;
   status: CashoutStatus;
   telegram_status: CashoutTelegramStatus;
@@ -162,6 +165,7 @@ export type Cashout = {
   telegram_sent_at: string | null;
   telegram_last_error: string | null;
   created_by_staff_id: number;
+  coadmin_id: number | null;
   completed_by_staff_id: number | null;
   requested_by: CashoutStaff | null;
   completed_by: CashoutStaff | null;
@@ -183,6 +187,7 @@ export type CashoutAuditAction =
   | "telegram_sent"
   | "telegram_retry"
   | "telegram_reaction_completed"
+  | "telegram_bot_completed"
   | "completed"
   | "cancelled"
   | "edited_notes";
@@ -280,6 +285,10 @@ export type LedgerCashoutDrilldown = {
   staff_id: number;
   staff_username: string;
   amount: string;
+  requested_amount: string;
+  actual_paid_amount: string;
+  unpaid_difference: string;
+  completion_type: CashoutCompletionType | null;
   status: string;
   created_at: string;
   completed_at: string | null;
@@ -373,4 +382,133 @@ export type SettlementPage = {
   has_more: boolean;
   hasMore: boolean;
   nextCursor: string | null;
+};
+
+export type NotificationType = "venmo_confirmation_confirmed";
+
+export type PersistentNotification = {
+  id: number;
+  recipient_user_id: number;
+  coadmin_id: number | null;
+  type: NotificationType;
+  related_entity_type: string;
+  related_entity_id: number;
+  title: string;
+  body: string | null;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+  read_at: string | null;
+  navigation_href: string | null;
+};
+
+export type NotificationListResponse = {
+  items: PersistentNotification[];
+  unread_count: number;
+};
+
+export type NotificationCountResponse = {
+  unread_count: number;
+};
+
+export type VenmoConfirmationStatus =
+  | "pending"
+  | "confirmed"
+  | "not_received"
+  | "cancelled";
+
+export type VenmoConfirmationAttemptStatus =
+  | "pending"
+  | "posted"
+  | "confirmed"
+  | "not_received"
+  | "failed_to_send";
+
+export type VenmoConfirmationInquiryStatus = "open" | "dismissed" | "resent";
+
+export type VenmoConfirmationEventType =
+  | "request_created"
+  | "attempt_created"
+  | "attempt_posted"
+  | "confirmed"
+  | "not_received"
+  | "inquiry_created"
+  | "inquiry_dismissed"
+  | "resend_requested"
+  | "resend_posted"
+  | "failure";
+
+export type MediaAsset = {
+  id: number;
+  original_filename: string | null;
+  mime_type: string;
+  size_bytes: number;
+  created_at: string;
+  preview_url: string;
+};
+
+export type VenmoConfirmationAttempt = {
+  id: number;
+  request_id: number;
+  attempt_number: number;
+  telegram_chat_id: number | null;
+  telegram_message_id: number | null;
+  status: VenmoConfirmationAttemptStatus;
+  created_at: string;
+  posted_at: string | null;
+  resolved_at: string | null;
+  last_error: string | null;
+};
+
+export type VenmoConfirmationInquiry = {
+  id: number;
+  request_id: number;
+  source_attempt_id: number;
+  resulting_attempt_id: number | null;
+  status: VenmoConfirmationInquiryStatus;
+  created_at: string;
+  dismissed_at: string | null;
+  dismissed_by_staff_id: number | null;
+  resent_at: string | null;
+  resent_by_staff_id: number | null;
+};
+
+export type VenmoConfirmationEvent = {
+  id: number;
+  request_id: number;
+  attempt_id: number | null;
+  inquiry_id: number | null;
+  event_type: VenmoConfirmationEventType;
+  actor_user_id: number | null;
+  actor_username: string | null;
+  actor_source: string | null;
+  actor_identifier: string | null;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type VenmoConfirmationSummary = {
+  id: number;
+  coadmin_id: number;
+  requested_by_staff_id: number | null;
+  requested_by_username: string | null;
+  coadmin_username: string | null;
+  screenshot_media_asset_id: number;
+  status: VenmoConfirmationStatus;
+  payment_note: string | null;
+  metadata: Record<string, unknown> | null;
+  confirmed_at: string | null;
+  confirmed_by_display_name: string | null;
+  created_at: string;
+  updated_at: string;
+  media: MediaAsset | null;
+};
+
+export type VenmoConfirmationDetail = VenmoConfirmationSummary & {
+  attempts: VenmoConfirmationAttempt[];
+  inquiries: VenmoConfirmationInquiry[];
+  events: VenmoConfirmationEvent[];
+};
+
+export type VenmoConfirmationListResponse = {
+  items: VenmoConfirmationSummary[];
 };

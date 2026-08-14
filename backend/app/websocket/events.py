@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 from enum import StrEnum
 from typing import Any
 
-
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -62,6 +61,8 @@ class LiveEventType(StrEnum):
     INQUIRY_MESSAGE_CREATED = "inquiry_message_created"
     INQUIRY_MESSAGE_UPDATED = "inquiry_message_updated"
     INQUIRY_MEDIA_READY = "inquiry_media_ready"
+    NOTIFICATION_CREATED = "notification_created"
+    NOTIFICATION_READ = "notification_read"
     SETTLEMENT_CREATED = "settlement_created"
     SETTLEMENT_DONE = "settlement_done"
     LEDGER_CHANGED = "ledger_changed"

@@ -47,7 +47,10 @@ export function LedgerSummaryPanel() {
   }, [filters]);
 
   useEffect(() => {
-    void refresh();
+    const timeoutId = window.setTimeout(() => {
+      void refresh();
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
   }, [refresh]);
 
   useLiveUpdates(LEDGER_PAGE_EVENTS, refresh, true);
@@ -82,7 +85,7 @@ export function LedgerSummaryPanel() {
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[
             ["Payments", summary?.payment_total ?? "0.00"],
-            ["Cashouts", summary?.total_out ?? "0.00"],
+            ["Total Out", summary?.total_out ?? "0.00"],
             ["Adjustments", summary?.adjustment_total ?? "0.00"],
             ["Net", summary?.net ?? "0.00"],
           ].map(([label, value]) => (
@@ -95,6 +98,11 @@ export function LedgerSummaryPanel() {
               >
                 {formatMoney(value)}
               </p>
+              {label === "Total Out" ? (
+                <p className="mt-1 text-xs font-medium text-slate-500">
+                  Uses actual paid cashout amounts.
+                </p>
+              ) : null}
             </div>
           ))}
         </div>

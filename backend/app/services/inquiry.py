@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -14,9 +15,6 @@ from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.db.repositories.inquiry_message import InquiryMessageRepository
 from app.models.inquiry_message import (
-    InquiryDirection,
-    InquiryMediaDownloadStatus,
-    InquiryMediaType,
     InquiryMessage,
     InquiryMessageSource,
 )
@@ -185,7 +183,7 @@ class InquiryService(ApplicationService):
             raise InquiryAuthorizationError("Staff access required")
 
     def _cashout_chat_id(self) -> int:
-        chat_id = self._settings.telegram_cashout_group_id
+        chat_id = self._settings.shared_telegram_supergroup_id
         if chat_id is None:
             raise InquiryValidationError("Inquiry delivery channel is not configured")
         normalized = normalize_telegram_chat_id(chat_id)
@@ -275,4 +273,4 @@ class InquiryService(ApplicationService):
                 force_document=False,
             )
         finally:
-            temp_path.unlink(missing_ok=True)
+            await asyncio.to_thread(temp_path.unlink, missing_ok=True)

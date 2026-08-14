@@ -81,6 +81,10 @@ class LedgerCashoutDrilldownResponse(BaseModel):
     staff_id: int
     staff_username: str
     amount: Decimal
+    requested_amount: Decimal
+    actual_paid_amount: Decimal
+    unpaid_difference: Decimal
+    completion_type: str | None
     status: str
     created_at: datetime
     completed_at: datetime | None

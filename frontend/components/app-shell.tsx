@@ -2,12 +2,18 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/components/auth-provider";
+import { useLiveUpdates } from "@/components/live-updates-provider";
 import { LoadingScreen } from "@/components/loading-screen";
 import { friendlyError } from "@/lib/api-client";
-import type { UserRole } from "@/types/api";
+import { NOTIFICATION_EVENTS } from "@/lib/live-events";
+import {
+  listNotifications,
+  markNotificationRead,
+} from "@/services/notifications";
+import type { PersistentNotification, UserRole } from "@/types/api";
 
 type AppShellProps = {
   title: string;
@@ -21,6 +27,7 @@ const navigation = [
   { href: "/payments", label: "Payments" },
   { href: "/payment-history", label: "Payment History" },
   { href: "/cashout", label: "Cashout" },
+  { href: "/venmo-confirmations", label: "Venmo" },
   { href: "/inquiry", label: "Inquiry" },
 ];
 
@@ -65,7 +72,8 @@ export function AppShell({
   }, [loading, pathname, requiredRole, router, user]);
 
   useEffect(() => {
-    setMenuOpen(false);
+    const timeoutId = window.setTimeout(() => setMenuOpen(false), 0);
+    return () => window.clearTimeout(timeoutId);
   }, [pathname]);
 
   useEffect(() => {
@@ -109,6 +117,7 @@ export function AppShell({
             </span>
           </Link>
           <div className="flex items-center gap-3">
+            <NotificationMenu />
             <button
               type="button"
               onClick={() => setMenuOpen(true)}
@@ -220,6 +229,121 @@ export function AppShell({
         </div>
         {children}
       </main>
+    </div>
+  );
+}
+
+function NotificationMenu() {
+  const router = useRouter();
+  const { user } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<PersistentNotification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const refresh = useCallback(async () => {
+    if (!user) return;
+    setLoading(true);
+    setError("");
+    try {
+      const response = await listNotifications({ limit: 20 });
+      setItems(response.items);
+      setUnreadCount(response.unread_count);
+    } catch (loadError) {
+      setError(friendlyError(loadError));
+    } finally {
+      setLoading(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      void refresh();
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [refresh]);
+
+  useLiveUpdates(NOTIFICATION_EVENTS, refresh, Boolean(user));
+
+  const openNotification = async (notification: PersistentNotification) => {
+    setError("");
+    try {
+      if (!notification.read_at) {
+        await markNotificationRead(notification.id);
+      }
+      await refresh();
+      setOpen(false);
+      if (notification.navigation_href) {
+        router.push(notification.navigation_href);
+      }
+    } catch (readError) {
+      setError(friendlyError(readError));
+    }
+  };
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="relative rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+        aria-expanded={open}
+      >
+        Notifications
+        {unreadCount > 0 ? (
+          <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs text-white">
+            {unreadCount}
+          </span>
+        ) : null}
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-full z-30 mt-2 w-[min(24rem,calc(100vw-2rem))] rounded-lg border border-slate-200 bg-white p-3 shadow-xl">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-sm font-black text-slate-950">Notifications</p>
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              className="text-xs font-bold text-indigo-600 disabled:opacity-50"
+              disabled={loading}
+            >
+              Refresh
+            </button>
+          </div>
+          {error ? <p className="mb-2 text-xs font-semibold text-red-700">{error}</p> : null}
+          {loading && items.length === 0 ? (
+            <p className="py-6 text-center text-sm text-slate-500">Loading...</p>
+          ) : null}
+          {!loading && items.length === 0 ? (
+            <p className="py-6 text-center text-sm text-slate-500">
+              No notifications.
+            </p>
+          ) : null}
+          <div className="max-h-80 overflow-y-auto">
+            {items.map((notification) => (
+              <button
+                key={notification.id}
+                type="button"
+                onClick={() => void openNotification(notification)}
+                className={`mb-2 block w-full rounded-lg border px-3 py-2 text-left text-sm transition hover:bg-slate-50 ${
+                  notification.read_at
+                    ? "border-slate-200 bg-white"
+                    : "border-indigo-200 bg-indigo-50"
+                }`}
+              >
+                <span className="block font-bold text-slate-950">
+                  {notification.title}
+                </span>
+                {notification.body ? (
+                  <span className="mt-1 block text-xs text-slate-600">
+                    {notification.body}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

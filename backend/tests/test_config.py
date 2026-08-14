@@ -20,10 +20,28 @@ async def test_enabled_listener_requires_cashout_group_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_enabled_telegram_env(monkeypatch)
-    monkeypatch.delenv("TELEGRAM_CASHOUT_GROUP_ID", raising=False)
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:test-token")
     run_listener.get_settings.cache_clear()
 
-    with pytest.raises(RuntimeError, match="TELEGRAM_CASHOUT_GROUP_ID is required"):
+    with pytest.raises(
+        RuntimeError,
+        match="TELEGRAM_CASHOUT_GROUP_ID is required for the shared cashout/Venmo supergroup",
+    ):
+        await run_listener.run_listener(report=lambda _: None)
+    run_listener.get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_enabled_listener_requires_bot_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_enabled_telegram_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-1009876543210")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
+    run_listener.get_settings.cache_clear()
+
+    with pytest.raises(RuntimeError, match="TELEGRAM_BOT_TOKEN is required"):
         await run_listener.run_listener(report=lambda _: None)
     run_listener.get_settings.cache_clear()
 
@@ -38,3 +56,4 @@ def test_cashout_group_id_accepts_supergroup_integer(
 
     assert settings.telegram_group_id == -1001234567890
     assert settings.telegram_cashout_group_id == -1009876543210
+    assert settings.shared_telegram_supergroup_id == -1009876543210

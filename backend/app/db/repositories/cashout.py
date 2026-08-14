@@ -92,6 +92,21 @@ class CashoutRepository(BaseRepository[CashoutRequest]):
         statement = select(CashoutRequest).where(CashoutRequest.id == cashout_id).with_for_update()
         return (await self._session.execute(statement)).scalar_one_or_none()
 
+    async def get_by_id_for_coadmin(
+        self,
+        cashout_id: int,
+        coadmin_id: int,
+        *,
+        for_update: bool = False,
+    ) -> CashoutRequest | None:
+        statement = select(CashoutRequest).where(
+            CashoutRequest.id == cashout_id,
+            CashoutRequest.coadmin_id == coadmin_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return (await self._session.execute(statement)).scalar_one_or_none()
+
     async def get_by_telegram_message_id_for_update(
         self,
         telegram_message_id: int,
@@ -115,7 +130,7 @@ class CashoutRepository(BaseRepository[CashoutRequest]):
 
         Prefers an exact ``(telegram_chat_id, telegram_message_id)`` match.
         Falls back to message-id-only rows whose chat ID is null (historical)
-        or equals the configured cashout group, so pre-migration rows still work.
+        or equals the configured shared workflow group, so pre-migration rows still work.
         """
         normalized_chat = normalize_telegram_chat_id(telegram_chat_id)
         normalized_fallback = normalize_telegram_chat_id(fallback_chat_id)

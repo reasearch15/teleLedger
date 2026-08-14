@@ -14,9 +14,9 @@ import {
   dismissPaymentNotOurs,
   listPayments,
 } from "@/services/payments";
-import type { Payment, PaymentPage } from "@/types/api";
+import type { Payment, PaymentPage, User } from "@/types/api";
 
-const authState = {
+const authState: { user: User } = {
   user: {
     id: 1,
     username: "staff",

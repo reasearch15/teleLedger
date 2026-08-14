@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -34,6 +36,13 @@ class CashoutStatus(StrEnum):
     FAILED_TO_SEND = "failed_to_send"
 
 
+class CashoutCompletionType(StrEnum):
+    """How a completed cashout was paid."""
+
+    FULL = "full"
+    PARTIAL = "partial"
+
+
 class CashoutTelegramStatus(StrEnum):
     """Delivery state for the Telegram outbox."""
 
@@ -49,6 +58,7 @@ class CashoutAuditAction(StrEnum):
     TELEGRAM_SENT = "telegram_sent"
     TELEGRAM_RETRY = "telegram_retry"
     TELEGRAM_REACTION_COMPLETED = "telegram_reaction_completed"
+    TELEGRAM_BOT_COMPLETED = "telegram_bot_completed"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     EDITED_NOTES = "edited_notes"
@@ -59,6 +69,39 @@ class CashoutRequest(Base):
 
     __tablename__ = "cashout_requests"
     __table_args__ = (
+        CheckConstraint("amount > 0", name="cashout_requests_amount_positive"),
+        CheckConstraint(
+            "actual_paid_amount IS NULL OR actual_paid_amount > 0",
+            name="cashout_requests_actual_paid_positive",
+        ),
+        CheckConstraint(
+            "("
+            "status != 'completed' "
+            "OR (completion_type IS NOT NULL AND actual_paid_amount IS NOT NULL)"
+            ")",
+            name="cashout_requests_completed_has_payment",
+        ),
+        CheckConstraint(
+            "("
+            "completion_type IS NULL "
+            "OR (status = 'completed' AND actual_paid_amount IS NOT NULL)"
+            ")",
+            name="cashout_requests_completion_only_when_completed",
+        ),
+        CheckConstraint(
+            "("
+            "completion_type != 'full' "
+            "OR actual_paid_amount = amount"
+            ")",
+            name="cashout_requests_full_paid_matches_amount",
+        ),
+        CheckConstraint(
+            "("
+            "completion_type != 'partial' "
+            "OR (actual_paid_amount > 0 AND actual_paid_amount < amount)"
+            ")",
+            name="cashout_requests_partial_paid_less_than_amount",
+        ),
         UniqueConstraint(
             "created_by_staff_id",
             "idempotency_key",
@@ -75,6 +118,7 @@ class CashoutRequest(Base):
             "telegram_chat_id",
             "telegram_message_id",
         ),
+        Index("ix_cashout_requests_coadmin_status", "coadmin_id", "status"),
     )
 
     id: Mapped[int] = mapped_column(
@@ -89,6 +133,18 @@ class CashoutRequest(Base):
     idempotency_key: Mapped[str] = mapped_column(String(36), nullable=False)
     player_tag: Mapped[str] = mapped_column(String(128), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    actual_paid_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 2),
+        nullable=True,
+    )
+    completion_type: Mapped[CashoutCompletionType | None] = mapped_column(
+        Enum(
+            CashoutCompletionType,
+            name="cashout_completion_type",
+            values_callable=lambda types: [completion_type.value for completion_type in types],
+        ),
+        nullable=True,
+    )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[CashoutStatus] = mapped_column(
         Enum(
@@ -134,6 +190,11 @@ class CashoutRequest(Base):
     )
     telegram_last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_staff_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    coadmin_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
@@ -216,3 +277,20 @@ class CashoutRequestAudit(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+@event.listens_for(CashoutRequest, "before_insert")
+@event.listens_for(CashoutRequest, "before_update")
+def _default_completed_cashout_payment_fields(
+    mapper: object,
+    connection: object,
+    target: CashoutRequest,
+) -> None:
+    """Normalize legacy-style completed ORM rows to full-payment semantics."""
+    if (
+        target.status == CashoutStatus.COMPLETED
+        and target.completion_type is None
+        and target.actual_paid_amount is None
+    ):
+        target.completion_type = CashoutCompletionType.FULL
+        target.actual_paid_amount = target.amount

@@ -9,6 +9,20 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
 
 
+class ReadinessCheck(BaseModel):
+    """One non-secret readiness signal."""
+
+    status: Literal["ok", "degraded", "not_configured"]
+    detail: str | None = None
+
+
+class ReadinessResponse(BaseModel):
+    """Dependency/configuration readiness response."""
+
+    status: Literal["ok", "degraded", "not_configured"]
+    checks: dict[str, ReadinessCheck]
+
+
 class ListenerHealthResponse(BaseModel):
     """Telegram listener health snapshot for operators."""
 

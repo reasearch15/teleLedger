@@ -22,6 +22,7 @@ from app.db.session import get_session
 from app.main import app
 from app.models.cashout import (
     CashoutAuditAction,
+    CashoutCompletionType,
     CashoutRequest,
     CashoutRequestAudit,
     CashoutStatus,
@@ -29,6 +30,7 @@ from app.models.cashout import (
 )
 from app.models.user import User, UserRole
 from app.services import cashout as cashout_service
+from app.services.cashout import CashoutService
 
 test_engine = create_async_engine(
     "sqlite+aiosqlite://",
@@ -63,7 +65,13 @@ async def api_client_for(user: User) -> AsyncIterator[AsyncClient]:
         app.dependency_overrides.clear()
 
 
-def make_user(user_id: int, username: str, role: UserRole) -> User:
+def make_user(
+    user_id: int,
+    username: str,
+    role: UserRole,
+    *,
+    coadmin_id: int | None = None,
+) -> User:
     timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     return User(
         id=user_id,
@@ -72,13 +80,16 @@ def make_user(user_id: int, username: str, role: UserRole) -> User:
         role=role,
         is_active=True,
         staff_color="#2563EB",
+        coadmin_id=coadmin_id,
         created_at=timestamp,
         updated_at=timestamp,
     )
 
 
-STAFF = make_user(42, "sarah", UserRole.STAFF)
-OTHER_STAFF = make_user(84, "alex", UserRole.STAFF)
+COADMIN = make_user(10, "default_coadmin", UserRole.COADMIN)
+OTHER_COADMIN = make_user(11, "other_coadmin", UserRole.COADMIN)
+STAFF = make_user(42, "sarah", UserRole.STAFF, coadmin_id=10)
+OTHER_STAFF = make_user(84, "alex", UserRole.STAFF, coadmin_id=11)
 ADMIN = make_user(1, "admin", UserRole.ADMIN)
 
 
@@ -92,12 +103,21 @@ async def reset_database() -> AsyncIterator[None]:
                 make_user(42, "sarah", UserRole.STAFF),
                 make_user(84, "alex", UserRole.STAFF),
                 make_user(1, "admin", UserRole.ADMIN),
+                make_user(10, "default_coadmin", UserRole.COADMIN),
+                make_user(11, "other_coadmin", UserRole.COADMIN),
             ]
         )
+        staff = await session.get(User, 42)
+        other_staff = await session.get(User, 84)
+        assert staff is not None
+        assert other_staff is not None
+        staff.coadmin_id = 10
+        other_staff.coadmin_id = 11
         await session.commit()
     yield
     async with test_engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
+    await test_engine.dispose()
 
 
 @pytest_asyncio.fixture
@@ -160,6 +180,14 @@ async def seed_cashout(
                 idempotency_key=f"00000000-0000-0000-0000-{cashout_id:012d}",
                 player_tag=tag,
                 amount=Decimal("250.00"),
+                actual_paid_amount=(
+                    Decimal("250.00") if status == CashoutStatus.COMPLETED else None
+                ),
+                completion_type=(
+                    CashoutCompletionType.FULL
+                    if status == CashoutStatus.COMPLETED
+                    else None
+                ),
                 notes=None,
                 status=status,
                 telegram_status=telegram_status,
@@ -167,6 +195,7 @@ async def seed_cashout(
                 telegram_message_id=telegram_message_id,
                 telegram_random_id=10_000 + cashout_id,
                 created_by_staff_id=staff_id,
+                coadmin_id=10 if staff_id == 42 else 11 if staff_id == 84 else None,
                 created_at=timestamp,
                 updated_at=timestamp,
             )
@@ -432,7 +461,149 @@ async def test_cancelled_cashout_is_hidden_from_staff_but_retained_for_admin() -
     async with TestSessionFactory() as session:
         stored = await session.get(CashoutRequest, cashout_id)
         assert stored is not None
-        assert stored.status == CashoutStatus.CANCELLED
+    assert stored.status == CashoutStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_service_full_completion_sets_actual_paid_and_type() -> None:
+    await seed_cashout(1, staff_id=42, tag="FULL")
+
+    async with TestSessionFactory() as session:
+        cashout = await CashoutService(session).complete(1, ADMIN)
+
+    assert cashout.status == CashoutStatus.COMPLETED
+    assert cashout.completion_type == CashoutCompletionType.FULL
+    assert cashout.actual_paid_amount == Decimal("250.00")
+
+
+@pytest.mark.asyncio
+async def test_service_partial_completion_completes_without_remainder_task() -> None:
+    await seed_cashout(1, staff_id=42, tag="PARTIAL")
+
+    async with TestSessionFactory() as session:
+        cashout = await CashoutService(session).complete_partial(
+            1,
+            actual_paid_amount=Decimal("15.00"),
+            actor=ADMIN,
+        )
+
+    assert cashout.status == CashoutStatus.COMPLETED
+    assert cashout.completion_type == CashoutCompletionType.PARTIAL
+    assert cashout.amount == Decimal("250.00")
+    assert cashout.actual_paid_amount == Decimal("15.00")
+    assert cashout.amount - cashout.actual_paid_amount == Decimal("235.00")
+    async with TestSessionFactory() as session:
+        assert await session.scalar(select(func.count(CashoutRequest.id))) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_amount", ["0.00", "-1.00", "250.00", "300.00"])
+async def test_service_rejects_invalid_partial_amounts(invalid_amount: str) -> None:
+    await seed_cashout(1, staff_id=42, tag="BAD-PARTIAL")
+
+    async with TestSessionFactory() as session:
+        with pytest.raises(cashout_service.CashoutValidationError):
+            await CashoutService(session).complete_partial(
+                1,
+                actual_paid_amount=Decimal(invalid_amount),
+                actor=ADMIN,
+            )
+
+
+@pytest.mark.asyncio
+async def test_double_completion_only_first_transition_wins() -> None:
+    await seed_cashout(1, staff_id=42, tag="DOUBLE")
+
+    async with TestSessionFactory() as session:
+        first = await CashoutService(session).complete(1, ADMIN)
+    async with TestSessionFactory() as session:
+        with pytest.raises(cashout_service.CashoutStateConflictError):
+            await CashoutService(session).complete_partial(
+                1,
+                actual_paid_amount=Decimal("10.00"),
+                actor=ADMIN,
+            )
+
+    async with TestSessionFactory() as session:
+        stored = await session.get(CashoutRequest, 1)
+        audits = (
+            await session.scalars(
+                select(CashoutRequestAudit).where(
+                    CashoutRequestAudit.action == CashoutAuditAction.COMPLETED
+                )
+            )
+        ).all()
+    assert first.status == CashoutStatus.COMPLETED
+    assert stored is not None
+    assert stored.completion_type == CashoutCompletionType.FULL
+    assert len(audits) == 1
+
+
+@pytest.mark.asyncio
+async def test_completion_vs_cancellation_only_one_terminal_result_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def delete_spy(
+        target: cashout_service.CashoutTelegramDeletionTarget,
+        *,
+        cancellation_status: str,
+    ) -> cashout_service.CashoutTelegramDeletionResult:
+        return cashout_service.CashoutTelegramDeletionResult("no_linked_message")
+
+    monkeypatch.setattr(
+        cashout_service,
+        "_delete_cancelled_cashout_telegram_message",
+        delete_spy,
+    )
+    await seed_cashout(1, staff_id=42, tag="RACE")
+
+    async with TestSessionFactory() as session:
+        await CashoutService(session).cancel(1, ADMIN)
+    async with TestSessionFactory() as session:
+        with pytest.raises(cashout_service.CashoutStateConflictError):
+            await CashoutService(session).complete(1, ADMIN)
+
+    async with TestSessionFactory() as session:
+        stored = await session.get(CashoutRequest, 1)
+    assert stored is not None
+    assert stored.status == CashoutStatus.CANCELLED
+    assert stored.actual_paid_amount is None
+    assert stored.completion_type is None
+
+
+@pytest.mark.asyncio
+async def test_cashout_coadmin_snapshot_is_explicit_and_scoped() -> None:
+    async with api_client_for(STAFF) as staff_api:
+        created = await staff_api.post(
+            "/api/cashouts",
+            json={
+                "player_tag": "OWNED",
+                "amount": "40.00",
+                "idempotency_key": "2d49bd59-78e6-418d-ae11-b43cf1aba76a",
+            },
+        )
+    cashout_id = created.json()["id"]
+
+    async with TestSessionFactory() as session:
+        stored = await session.get(CashoutRequest, cashout_id)
+        assert stored is not None
+        assert stored.coadmin_id == 10
+        sarah = await session.get(User, 42)
+        assert sarah is not None
+        sarah.coadmin_id = 11
+        await session.commit()
+
+    async with TestSessionFactory() as session:
+        scoped_owner = await cashout_service.CashoutRepository(session).get_by_id_for_coadmin(
+            cashout_id,
+            10,
+        )
+        scoped_other = await cashout_service.CashoutRepository(session).get_by_id_for_coadmin(
+            cashout_id,
+            11,
+        )
+    assert scoped_owner is not None
+    assert scoped_other is None
 
 
 @pytest.mark.asyncio

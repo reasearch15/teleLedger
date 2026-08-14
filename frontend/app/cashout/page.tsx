@@ -53,6 +53,7 @@ const auditActionLabels: Record<CashoutAuditAction, string> = {
   telegram_sent: "Delivery sent",
   telegram_retry: "Delivery retry",
   telegram_reaction_completed: "Reaction completed",
+  telegram_bot_completed: "Bot completed",
   completed: "Completed",
   cancelled: "Cancelled",
   edited_notes: "Edited notes",
@@ -75,6 +76,20 @@ function formatDate(value: string | null): string {
 
 function providerNeutralText(value: string): string {
   return value.replaceAll(/telegram/gi, "delivery");
+}
+
+function cashoutPaymentInfo(cashout: Cashout) {
+  const requested = Number(cashout.amount);
+  const actual = Number(cashout.actual_paid_amount ?? cashout.amount);
+  const difference = Math.max(0, requested - actual);
+  const completionType = cashout.completion_type ?? "full";
+  return {
+    requested,
+    actual,
+    difference,
+    completionType,
+    label: completionType === "partial" ? "Partial Payment" : "Full Payment",
+  };
 }
 
 export default function CashoutPage() {
@@ -447,6 +462,7 @@ export default function CashoutPage() {
             const busy = actionId === cashout.id;
             const immutable =
               cashout.status === "completed" || cashout.status === "cancelled";
+            const payment = cashoutPaymentInfo(cashout);
 
             return (
               <article
@@ -462,6 +478,17 @@ export default function CashoutPage() {
                       <span className="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700">
                         {telegramLabels[cashout.telegram_status]}
                       </span>
+                      {cashout.status === "completed" ? (
+                        <span
+                          className={`rounded-full border px-2.5 py-1 text-xs font-black ${
+                            payment.completionType === "partial"
+                              ? "border-amber-300 bg-amber-50 text-amber-900"
+                              : "border-emerald-300 bg-emerald-50 text-emerald-900"
+                          }`}
+                        >
+                          {payment.label}
+                        </span>
+                      ) : null}
                       {user?.role === "admin" && cashout.requested_by ? (
                         <span className="rounded-full border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700">
                           Requested by: {cashout.requested_by.username}
@@ -473,7 +500,11 @@ export default function CashoutPage() {
                     </p>
                     <div className="mt-1 flex flex-wrap items-baseline gap-3">
                       <strong className="text-2xl font-black">
-                        {formatMoney(cashout.amount)}
+                        {formatMoney(
+                          cashout.status === "completed"
+                            ? String(payment.actual)
+                            : cashout.amount,
+                        )}
                       </strong>
                       <span className="font-bold">{cashout.player_tag}</span>
                     </div>
@@ -568,6 +599,15 @@ export default function CashoutPage() {
                 ) : null}
 
                 <div className="mt-4 grid gap-2 border-t border-current/20 pt-4 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                  <span>Requested: {formatMoney(String(payment.requested))}</span>
+                  <span>Actual paid: {formatMoney(String(payment.actual))}</span>
+                  <span>Unpaid difference: {formatMoney(String(payment.difference))}</span>
+                  <span>Completion type: {cashout.status === "completed" ? payment.label : "-"}</span>
+                  <span>
+                    Completed by:{" "}
+                    {cashout.completed_by?.username ??
+                      (cashout.status === "completed" ? "Telegram bot" : "-")}
+                  </span>
                   <span>Created: {formatDate(cashout.created_at)}</span>
                   <span>Delivery sent: {formatDate(cashout.telegram_sent_at)}</span>
                   <span>Completed: {formatDate(cashout.completed_at)}</span>

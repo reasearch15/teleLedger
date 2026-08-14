@@ -6,6 +6,8 @@ asyncpg>=0.30.0,<1.0.0
 pydantic>=2.11.5,<3.0.0
 pydantic-settings>=2.14.2,<3.0.0
 telethon>=1.44.0,<2.0.0
+python-multipart>=0.0.20,<1.0.0
+tzdata>=2025.2
 pwdlib[argon2]>=0.3.0,<1.0.0
 PyJWT>=2.10.0,<3.0.0
 
