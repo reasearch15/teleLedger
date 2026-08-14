@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
@@ -30,8 +35,11 @@ from app.services.venmo_confirmation import (
     VenmoConfirmationService,
     VenmoConfirmationStateConflictError,
 )
+from app.telegram.inquiry_media import ALLOWED_IMAGE_MIME_TYPES
 
 router = APIRouter(prefix="/api/venmo-confirmations", tags=["venmo-confirmations"])
+
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class MediaAssetResponse(BaseModel):
@@ -230,6 +238,37 @@ async def resend_venmo_confirmation(
         _raise_venmo_error(error)
 
 
+@router.post("/{request_id}/payment-screenshot", response_model=VenmoRequestDetailResponse)
+async def upload_venmo_payment_screenshot(
+    request_id: Annotated[int, ApiPath(gt=0)],
+    session: DatabaseSession,
+    current_user: CurrentUser,
+    file: Annotated[UploadFile, File()],
+) -> VenmoRequestDetailResponse:
+    service = VenmoConfirmationService(session)
+    try:
+        request = await service.get_request_for_actor(request_id, actor=current_user)
+        upload = await _prepare_payment_screenshot_upload(
+            file,
+            coadmin_id=request.coadmin_id,
+            request_id=request.id,
+        )
+        await asyncio.to_thread(_write_upload, upload.storage_key, upload.content)
+        await service.replace_payment_screenshot(
+            request_id=request.id,
+            actor=current_user,
+            storage_key=upload.storage_key,
+            original_filename=upload.original_filename,
+            mime_type=upload.mime_type,
+            size_bytes=len(upload.content),
+            checksum_sha256=hashlib.sha256(upload.content).hexdigest(),
+        )
+        await session.commit()
+        return await get_venmo_confirmation(request.id, session, current_user)
+    except Exception as error:
+        _raise_venmo_error(error)
+
+
 @router.get("/media/{media_id}")
 async def get_venmo_media(
     media_id: Annotated[int, ApiPath(gt=0)],
@@ -393,7 +432,81 @@ def _media_path(storage_key: str) -> Path:
     return path
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedUpload:
+    content: bytes
+    storage_key: str
+    original_filename: str
+    mime_type: str
+
+
+async def _prepare_payment_screenshot_upload(
+    file: UploadFile,
+    *,
+    coadmin_id: int,
+    request_id: int,
+) -> _PreparedUpload:
+    settings = get_settings()
+    max_bytes = settings.inquiry_media_max_bytes
+    mime_type = file.content_type or ""
+    if mime_type not in ALLOWED_IMAGE_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Only JPEG, PNG, and WEBP images are supported",
+        )
+    content = await file.read(max_bytes + 1)
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded image is empty",
+        )
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="Uploaded image is too large",
+        )
+    if not _content_matches_image_type(content, mime_type):
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Uploaded file content does not match a supported image type",
+        )
+    original_filename = _safe_original_filename(file.filename)
+    storage_key = f"venmo/{coadmin_id}/{request_id}/{uuid4().hex}-{original_filename}"
+    return _PreparedUpload(
+        content=content,
+        storage_key=storage_key,
+        original_filename=original_filename,
+        mime_type=mime_type,
+    )
+
+
+def _safe_original_filename(filename: str | None) -> str:
+    basename = Path(filename or "payment-screenshot").name
+    sanitized = _SAFE_FILENAME_RE.sub("_", basename).strip("._")
+    if not sanitized:
+        return "payment-screenshot"
+    return sanitized[:255]
+
+
+def _content_matches_image_type(content: bytes, mime_type: str) -> bool:
+    if mime_type == "image/png":
+        return content.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime_type == "image/jpeg":
+        return content.startswith(b"\xff\xd8\xff")
+    if mime_type == "image/webp":
+        return len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP"
+    return False
+
+
+def _write_upload(storage_key: str, content: bytes) -> None:
+    path = _media_path(storage_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
 def _raise_venmo_error(error: Exception) -> None:
+    if isinstance(error, HTTPException):
+        raise error
     if isinstance(error, VenmoConfirmationNotFoundError):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     if isinstance(error, VenmoConfirmationAuthorizationError):

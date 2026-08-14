@@ -180,6 +180,13 @@ class TelegramBotApiGateway:
                 updates.append(TelegramBotUpdate(update_id=update_id, payload=raw))
         return updates
 
+    async def delete_webhook(self, *, drop_pending_updates: bool = False) -> None:
+        """Ensure long polling can receive callback queries."""
+        await self._post(
+            "deleteWebhook",
+            {"drop_pending_updates": drop_pending_updates},
+        )
+
     async def _post(self, method: str, payload: dict[str, Any]) -> Any:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout_seconds)
@@ -223,10 +230,10 @@ class TelegramBotApiGateway:
                 status_code=status_code,
                 retry_after_seconds=retry_after,
             )
-        if status_code in (401, 403, 400):
+        if status_code in (401, 403, 400, 409):
             failure_class = (
                 TelegramBotFailureClass.CONFIGURATION
-                if status_code in (401, 403)
+                if status_code in (401, 403, 409)
                 else TelegramBotFailureClass.NON_RETRYABLE
             )
             return TelegramBotApiError(

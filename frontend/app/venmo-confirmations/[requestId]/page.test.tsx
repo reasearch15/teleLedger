@@ -8,6 +8,7 @@ import {
   getVenmoConfirmation,
   markVenmoAttemptNotReceived,
   resendVenmoConfirmation,
+  uploadVenmoPaymentScreenshot,
 } from "@/services/venmo-confirmations";
 import type { VenmoConfirmationDetail } from "@/types/api";
 
@@ -46,6 +47,7 @@ vi.mock("@/services/venmo-confirmations", () => ({
   markVenmoAttemptNotReceived: vi.fn(),
   dismissVenmoInquiry: vi.fn(),
   resendVenmoConfirmation: vi.fn(),
+  uploadVenmoPaymentScreenshot: vi.fn(),
 }));
 
 const detail: VenmoConfirmationDetail = {
@@ -125,6 +127,7 @@ describe("VenmoConfirmationDetailPage", () => {
     vi.mocked(markVenmoAttemptNotReceived).mockReset();
     vi.mocked(dismissVenmoInquiry).mockReset();
     vi.mocked(resendVenmoConfirmation).mockReset();
+    vi.mocked(uploadVenmoPaymentScreenshot).mockReset();
     vi.mocked(getVenmoConfirmation).mockResolvedValue(detail);
     vi.mocked(confirmVenmoAttempt).mockResolvedValue({
       ...detail,
@@ -133,6 +136,57 @@ describe("VenmoConfirmationDetailPage", () => {
       confirmed_by_display_name: "sarah",
       attempts: [{ ...detail.attempts[0], status: "confirmed" }],
     });
+  });
+
+  it("uploads and displays a replacement payment screenshot", async () => {
+    const updatedDetail: VenmoConfirmationDetail = {
+      ...detail,
+      screenshot_media_asset_id: 9,
+      media: {
+        id: 9,
+        original_filename: "replacement.png",
+        mime_type: "image/png",
+        size_bytes: 4096,
+        created_at: "2026-07-15T16:00:00Z",
+        preview_url: "/api/venmo-confirmations/media/9",
+      },
+      events: [
+        ...detail.events,
+        {
+          id: 14,
+          request_id: 77,
+          attempt_id: null,
+          inquiry_id: null,
+          event_type: "payment_screenshot_uploaded",
+          actor_user_id: 42,
+          actor_username: "sarah",
+          actor_source: "atlas",
+          actor_identifier: "42",
+          payload: null,
+          created_at: "2026-07-15T16:00:00Z",
+        },
+      ],
+    };
+    vi.mocked(uploadVenmoPaymentScreenshot).mockResolvedValue(updatedDetail);
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    render(<VenmoConfirmationDetailPage />);
+
+    await screen.findByText("Pending");
+    fireEvent.change(screen.getByLabelText("Choose image"), {
+      target: {
+        files: [new File(["image"], "replacement.png", { type: "image/png" })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Replace screenshot" }));
+
+    await waitFor(() => expect(uploadVenmoPaymentScreenshot).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("Payment screenshot uploaded.")).toBeInTheDocument();
+    expect(screen.getByText("replacement.png")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open image" })).toHaveAttribute(
+      "href",
+      "http://127.0.0.1:8000/api/venmo-confirmations/media/9",
+    );
   });
 
   it("renders media evidence, attempts, inquiries, and event history", async () => {

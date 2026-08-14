@@ -30,16 +30,30 @@ async def run_cashout_bot_update_loop(
     offset: int | None = None
     settings = get_settings()
     report("Listening for cashout bot callbacks.")
+    await gateway.delete_webhook(drop_pending_updates=False)
+    logger.info("cashout_bot_webhook_cleared_for_polling")
     while True:
-        updates = await gateway.get_updates(offset=offset)
+        try:
+            updates = await gateway.get_updates(offset=offset)
+        except Exception:
+            logger.exception("cashout_bot_update_poll_failed")
+            raise
         for update in updates:
             offset = update.update_id + 1
-            await handle_cashout_bot_update(
-                update,
-                gateway=gateway,
-                session_factory=session_factory,
-                report=report,
-            )
+            logger.info("cashout_bot_update_received", extra={"update_id": update.update_id})
+            try:
+                await handle_cashout_bot_update(
+                    update,
+                    gateway=gateway,
+                    session_factory=session_factory,
+                    report=report,
+                )
+            except Exception:
+                logger.exception(
+                    "cashout_bot_update_route_failed",
+                    extra={"update_id": update.update_id},
+                )
+                raise
         if not updates:
             await asyncio.sleep(settings.telegram_bot_poll_seconds)
 
@@ -54,6 +68,7 @@ async def handle_cashout_bot_update(
     payload = update.payload
     callback = payload.get("callback_query")
     if isinstance(callback, dict):
+        logger.info("cashout_bot_callback_update_received")
         await _handle_callback(
             callback,
             gateway=gateway,
@@ -64,6 +79,7 @@ async def handle_cashout_bot_update(
 
     message = payload.get("message")
     if isinstance(message, dict):
+        logger.info("cashout_bot_message_update_received")
         await _handle_message(
             message,
             gateway=gateway,
@@ -94,7 +110,7 @@ async def _handle_callback(
         or callback_id is None
         or not isinstance(data, str)
     ):
-        logger.info("cashout_bot_callback_ignored", extra={"reason": "missing_fields"})
+        logger.info("cashout_bot_callback_ignored", extra={"reason_ignored": "missing_fields"})
         return
 
     async with session_factory() as session:
@@ -107,6 +123,15 @@ async def _handle_callback(
             telegram_username=_username_from(from_user),
             message_id=message_id,
         )
+    logger.info(
+        "cashout_bot_callback_routed",
+        extra={
+            "telegram_chat_id": chat_id,
+            "telegram_message_id": message_id,
+            "telegram_user_id": user_id,
+            "callback_status": result.status,
+        },
+    )
     report(f"Cashout bot callback: {result.status}")
 
 

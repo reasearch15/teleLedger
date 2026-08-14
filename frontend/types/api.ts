@@ -435,6 +435,7 @@ export type VenmoConfirmationEventType =
   | "inquiry_dismissed"
   | "resend_requested"
   | "resend_posted"
+  | "payment_screenshot_uploaded"
   | "failure";
 
 export type MediaAsset = {

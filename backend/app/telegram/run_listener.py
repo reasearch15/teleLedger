@@ -238,6 +238,7 @@ async def _run_listener_session(
             run_cashout_bot_update_loop(bot_gateway, report=report),
             name="cashout-bot-updates",
         )
+        bot_update_task.add_done_callback(_log_background_task_failure)
         report("Listening for new text messages and cashout bot actions. Press Ctrl+C to stop.")
         logger.info(
             "telegram_listener_connected",
@@ -260,6 +261,18 @@ async def _run_listener_session(
             await bot_gateway.__aexit__(None, None, None)
         await client.disconnect()
         logger.info("telegram_listener_stopped")
+
+
+def _log_background_task_failure(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception:
+        logger.exception(
+            "telegram_listener_background_task_failed",
+            extra={"task_name": task.get_name()},
+        )
 
 
 def main() -> None:

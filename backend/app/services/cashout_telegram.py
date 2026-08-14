@@ -85,6 +85,8 @@ class CashoutTelegramGateway(Protocol):
         offset: int | None,
     ) -> list[object]: ...
 
+    async def delete_webhook(self, *, drop_pending_updates: bool = False) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class CashoutTelegramActionResult:
@@ -134,10 +136,21 @@ class CashoutTelegramService:
     ) -> CashoutTelegramActionResult:
         decoded = decode_callback_data(callback_data)
         if decoded is None:
+            logger.info("cashout_bot_callback_invalid_format")
             await self._answer(query_id, "Unknown action.", alert=True)
             return CashoutTelegramActionResult(status="invalid_callback")
 
         cashout_id, action = decoded
+        logger.info(
+            "cashout_bot_callback_received",
+            extra={
+                "cashout_request_id": cashout_id,
+                "telegram_chat_id": telegram_chat_id,
+                "telegram_message_id": message_id,
+                "telegram_user_id": telegram_user_id,
+                "callback_action": action.value,
+            },
+        )
         try:
             async with self._session.begin():
                 context = await self._resolve_callback_context(
@@ -146,9 +159,29 @@ class CashoutTelegramService:
                     message_id=message_id,
                 )
         except CashoutAuthorizationError:
+            logger.warning(
+                "cashout_bot_callback_rejected",
+                extra={
+                    "cashout_request_id": cashout_id,
+                    "telegram_chat_id": telegram_chat_id,
+                    "telegram_message_id": message_id,
+                    "telegram_user_id": telegram_user_id,
+                    "callback_action": action.value,
+                },
+            )
             await self._answer(query_id, "This cashout is not available here.", alert=True)
             return CashoutTelegramActionResult(status="rejected", cashout_id=cashout_id)
         except CashoutNotFoundError:
+            logger.warning(
+                "cashout_bot_callback_not_found",
+                extra={
+                    "cashout_request_id": cashout_id,
+                    "telegram_chat_id": telegram_chat_id,
+                    "telegram_message_id": message_id,
+                    "telegram_user_id": telegram_user_id,
+                    "callback_action": action.value,
+                },
+            )
             await self._answer(query_id, "Cashout not found.", alert=True)
             return CashoutTelegramActionResult(status="not_found", cashout_id=cashout_id)
 
@@ -396,6 +429,14 @@ class CashoutTelegramService:
 
         await self._refresh_completed_message(completed, telegram_user_id=telegram_user_id)
         await self._answer(query_id, "Cashout completed (Full Payment).")
+        logger.info(
+            "cashout_bot_callback_completed_full",
+            extra={
+                "cashout_request_id": completed.id,
+                "telegram_chat_id": expected_chat_id,
+                "telegram_user_id": telegram_user_id,
+            },
+        )
         return CashoutTelegramActionResult(
             status="completed_full",
             cashout_id=completed.id,
@@ -437,6 +478,14 @@ class CashoutTelegramService:
         await self._answer(
             query_id,
             f"Reply with the amount paid for {cashout.request_number}. Send cancel to abort.",
+        )
+        logger.info(
+            "cashout_bot_partial_pending_created",
+            extra={
+                "cashout_request_id": cashout.id,
+                "telegram_chat_id": expected_chat_id,
+                "telegram_user_id": telegram_user_id,
+            },
         )
         return CashoutTelegramActionResult(
             status="partial_pending",

@@ -31,12 +31,14 @@ export async function apiRequest<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
+  const isFormData =
+    typeof FormData !== "undefined" && options.body instanceof FormData;
   const response = await fetch(`${environment.apiUrl}${path}`, {
     ...options,
     credentials: "include",
     headers: {
       Accept: "application/json",
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.body && !isFormData ? { "Content-Type": "application/json" } : {}),
       ...options.headers,
     },
   });
@@ -69,4 +71,3 @@ export function friendlyError(error: unknown): string {
   }
   return "Something went wrong. Please try again.";
 }
-

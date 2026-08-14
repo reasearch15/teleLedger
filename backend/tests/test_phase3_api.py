@@ -65,6 +65,9 @@ STAFF = make_user(42, "sarah", UserRole.STAFF, coadmin_id=10)
 OTHER_STAFF = make_user(84, "alex", UserRole.STAFF, coadmin_id=11)
 COADMIN = make_user(10, "default_coadmin", UserRole.COADMIN)
 OTHER_COADMIN = make_user(11, "other_coadmin", UserRole.COADMIN)
+ADMIN = make_user(1, "admin", UserRole.ADMIN)
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -83,6 +86,7 @@ async def reset_database(
                 make_user(84, "alex", UserRole.STAFF, coadmin_id=11),
                 make_user(10, "default_coadmin", UserRole.COADMIN),
                 make_user(11, "other_coadmin", UserRole.COADMIN),
+                make_user(1, "admin", UserRole.ADMIN),
             ]
         )
         await session.commit()
@@ -220,6 +224,19 @@ async def seed_venmo(media_root: Path) -> None:
         await session.commit()
 
 
+def upload_stayed_inside_media_root(
+    media_root: Path,
+    storage_key: str,
+    filename: str,
+) -> bool:
+    path = (media_root / storage_key).resolve()
+    return (
+        path.is_relative_to(media_root.resolve())
+        and path.exists()
+        and not (media_root.parent / filename).exists()
+    )
+
+
 @pytest.mark.asyncio
 async def test_notification_list_count_and_read_are_scoped() -> None:
     await seed_notification()
@@ -285,3 +302,107 @@ async def test_duplicate_venmo_confirm_action_conflicts_without_duplicate_event(
         assert first.status_code == 200
         second = await client.post("/api/venmo-confirmations/attempts/501/confirm")
         assert second.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_authorized_user_can_upload_venmo_payment_screenshot(tmp_path: Path) -> None:
+    await seed_venmo(tmp_path)
+
+    async with api_client_for(STAFF) as client:
+        response = await client.post(
+            "/api/venmo-confirmations/100/payment-screenshot",
+            files={"file": ("receipt.png", PNG_BYTES, "image/png")},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["media"]["original_filename"] == "receipt.png"
+    assert body["media"]["mime_type"] == "image/png"
+    assert body["media"]["preview_url"].startswith("/api/venmo-confirmations/media/")
+    assert body["media"]["preview_url"] != "/api/venmo-confirmations/media/1"
+    assert body["screenshot_media_asset_id"] == body["media"]["id"]
+    assert body["events"][-1]["event_type"] == "payment_screenshot_uploaded"
+
+
+@pytest.mark.asyncio
+async def test_cross_coadmin_venmo_screenshot_upload_is_rejected(tmp_path: Path) -> None:
+    await seed_venmo(tmp_path)
+
+    async with api_client_for(OTHER_STAFF) as client:
+        response = await client.post(
+            "/api/venmo-confirmations/100/payment-screenshot",
+            files={"file": ("receipt.png", PNG_BYTES, "image/png")},
+        )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_non_image_venmo_screenshot_upload_is_rejected(tmp_path: Path) -> None:
+    await seed_venmo(tmp_path)
+
+    async with api_client_for(STAFF) as client:
+        response = await client.post(
+            "/api/venmo-confirmations/100/payment-screenshot",
+            files={"file": ("receipt.txt", b"not-image", "text/plain")},
+        )
+
+    assert response.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_oversized_venmo_screenshot_upload_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await seed_venmo(tmp_path)
+    monkeypatch.setenv("INQUIRY_MEDIA_MAX_BYTES", "8")
+    get_settings.cache_clear()
+
+    async with api_client_for(STAFF) as client:
+        response = await client.post(
+            "/api/venmo-confirmations/100/payment-screenshot",
+            files={"file": ("receipt.png", PNG_BYTES, "image/png")},
+        )
+
+    assert response.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_traversal_filename_cannot_escape_venmo_media_root(tmp_path: Path) -> None:
+    await seed_venmo(tmp_path)
+
+    async with api_client_for(STAFF) as client:
+        response = await client.post(
+            "/api/venmo-confirmations/100/payment-screenshot",
+            files={"file": ("../evil.png", PNG_BYTES, "image/png")},
+        )
+
+    assert response.status_code == 200
+    media_id = response.json()["media"]["id"]
+    async with TestSessionFactory() as session:
+        asset = await session.get(MediaAsset, media_id)
+        assert asset is not None
+        assert asset.original_filename == "evil.png"
+        storage_key = asset.storage_key
+    assert upload_stayed_inside_media_root(tmp_path, storage_key, "evil.png")
+
+
+@pytest.mark.asyncio
+async def test_venmo_screenshot_upload_does_not_alter_ledger_totals(tmp_path: Path) -> None:
+    await seed_venmo(tmp_path)
+
+    async with api_client_for(ADMIN) as client:
+        before = await client.get("/api/admin/ledger")
+    async with api_client_for(STAFF) as client:
+        uploaded = await client.post(
+            "/api/venmo-confirmations/100/payment-screenshot",
+            files={"file": ("receipt.png", PNG_BYTES, "image/png")},
+        )
+    async with api_client_for(ADMIN) as client:
+        after = await client.get("/api/admin/ledger")
+
+    assert before.status_code == 200
+    assert uploaded.status_code == 200
+    assert after.status_code == 200
+    assert after.json()["summary"] == before.json()["summary"]

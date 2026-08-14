@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -30,11 +31,13 @@ from app.telegram import (
     cashout_operational_reconciliation,
     cashout_reactions,
 )
+from app.telegram.cashout_bot.api import TelegramBotUpdate
 from app.telegram.cashout_bot.messages import (
     CashoutCallbackAction,
     build_active_task_markup,
     encode_callback_data,
 )
+from app.telegram.cashout_bot.updates import run_cashout_bot_update_loop
 
 test_engine = create_async_engine(
     "sqlite+aiosqlite://",
@@ -57,6 +60,7 @@ class FakeBotGateway:
         self.edits: list[dict[str, Any]] = []
         self.deletes: list[dict[str, Any]] = []
         self.messages: list[dict[str, Any]] = []
+        self.webhook_cleared = False
 
     async def send_cashout_task_message(
         self,
@@ -110,6 +114,38 @@ class FakeBotGateway:
     async def get_updates(self, *, offset: int | None) -> list[object]:
         del offset
         return []
+
+    async def delete_webhook(self, *, drop_pending_updates: bool = False) -> None:
+        del drop_pending_updates
+        self.webhook_cleared = True
+
+
+class OneCallbackThenCancelGateway(FakeBotGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def get_updates(self, *, offset: int | None) -> list[TelegramBotUpdate]:
+        self.calls += 1
+        if self.calls > 1:
+            raise asyncio.CancelledError
+        assert offset is None
+        return [
+            TelegramBotUpdate(
+                update_id=100,
+                payload={
+                    "callback_query": {
+                        "id": "q-loop",
+                        "from": {"id": 9001, "username": "operator"},
+                        "message": {
+                            "message_id": 555,
+                            "chat": {"id": -1001234567890, "type": "supergroup"},
+                        },
+                        "data": encode_callback_data(1, CashoutCallbackAction.FULL),
+                    }
+                },
+            )
+        ]
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -311,6 +347,26 @@ async def test_full_payment_uses_authoritative_service_and_renders_completed() -
     assert gateway.edits[-1]["buttons"] is None
     assert "Completed - Full Payment" in gateway.edits[-1]["text"]
     assert "Actual Paid Amount:\n$250.00" in gateway.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_update_loop_routes_matching_callback_to_authoritative_service() -> None:
+    await seed_cashout()
+    gateway = OneCallbackThenCancelGateway()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_cashout_bot_update_loop(
+            gateway,
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+    stored = await cashout()
+    assert gateway.webhook_cleared is True
+    assert stored.status == CashoutStatus.COMPLETED
+    assert stored.completion_type == CashoutCompletionType.FULL
+    assert gateway.answers[-1]["query_id"] == "q-loop"
+    assert gateway.edits[-1]["buttons"] is None
 
 
 @pytest.mark.asyncio

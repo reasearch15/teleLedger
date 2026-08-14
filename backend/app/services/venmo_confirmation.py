@@ -358,6 +358,43 @@ class VenmoConfirmationService(ApplicationService):
             )
         )
 
+    async def replace_payment_screenshot(
+        self,
+        *,
+        request_id: int,
+        actor: User,
+        storage_key: str,
+        original_filename: str | None,
+        mime_type: str,
+        size_bytes: int,
+        checksum_sha256: str,
+    ) -> MediaAsset:
+        request = await self.get_request_for_actor(request_id, actor=actor)
+        self._require_coadmin_actor(actor, request.coadmin_id)
+        media = await self.create_media_asset(
+            coadmin_id=request.coadmin_id,
+            storage_key=storage_key,
+            original_filename=original_filename,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            checksum_sha256=checksum_sha256,
+            actor=actor,
+        )
+        previous_media_asset_id = request.screenshot_media_asset_id
+        request.screenshot_media_asset_id = media.id
+        await self._record_event(
+            request_id=request.id,
+            event_type=VenmoConfirmationEventType.PAYMENT_SCREENSHOT_UPLOADED,
+            actor=actor,
+            payload={
+                "media_asset_id": media.id,
+                "previous_media_asset_id": previous_media_asset_id,
+                "mime_type": media.mime_type,
+                "size_bytes": media.size_bytes,
+            },
+        )
+        return media
+
     async def _record_event(
         self,
         *,

@@ -13,6 +13,7 @@ import {
   getVenmoConfirmation,
   markVenmoAttemptNotReceived,
   resendVenmoConfirmation,
+  uploadVenmoPaymentScreenshot,
 } from "@/services/venmo-confirmations";
 import type {
   VenmoConfirmationAttempt,
@@ -54,6 +55,9 @@ export default function VenmoConfirmationDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [actionKey, setActionKey] = useState<string | null>(null);
+  const [selectedScreenshot, setSelectedScreenshot] = useState<File | null>(null);
+  const [screenshotPreviewUrl, setScreenshotPreviewUrl] = useState<string | null>(null);
+  const [uploadMessage, setUploadMessage] = useState("");
 
   const refresh = useCallback(async () => {
     if (!Number.isFinite(requestId)) return;
@@ -81,6 +85,12 @@ export default function VenmoConfirmationDetailPage() {
   }, [detail?.media]);
   const canMutate = user?.role !== "admin";
 
+  useEffect(() => {
+    return () => {
+      if (screenshotPreviewUrl) URL.revokeObjectURL(screenshotPreviewUrl);
+    };
+  }, [screenshotPreviewUrl]);
+
   const runAction = async (
     key: string,
     action: () => Promise<VenmoConfirmationDetail>,
@@ -92,6 +102,49 @@ export default function VenmoConfirmationDetailPage() {
       setDetail(await action());
     } catch (actionError) {
       setError(friendlyError(actionError));
+    } finally {
+      setActionKey(null);
+    }
+  };
+
+  const chooseScreenshot = (file: File | undefined) => {
+    setUploadMessage("");
+    if (!file) {
+      clearSelectedScreenshot();
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      clearSelectedScreenshot();
+      setUploadMessage("Choose a JPEG, PNG, or WEBP image.");
+      return;
+    }
+    setSelectedScreenshot(file);
+    const objectUrl = URL.createObjectURL(file);
+    setScreenshotPreviewUrl((previousUrl) => {
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      return objectUrl;
+    });
+  };
+
+  const clearSelectedScreenshot = () => {
+    setSelectedScreenshot(null);
+    setScreenshotPreviewUrl((previousUrl) => {
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      return null;
+    });
+  };
+
+  const uploadScreenshot = async () => {
+    if (!selectedScreenshot || actionKey) return;
+    setActionKey("upload-screenshot");
+    setError("");
+    setUploadMessage("");
+    try {
+      setDetail(await uploadVenmoPaymentScreenshot(requestId, selectedScreenshot));
+      clearSelectedScreenshot();
+      setUploadMessage("Payment screenshot uploaded.");
+    } catch (uploadError) {
+      setUploadMessage(friendlyError(uploadError));
     } finally {
       setActionKey(null);
     }
@@ -153,7 +206,20 @@ export default function VenmoConfirmationDetailPage() {
           </section>
 
           <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-            <h2 className="text-lg font-black text-slate-950">Screenshot Evidence</h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="text-lg font-black text-slate-950">Payment Screenshot</h2>
+              {canMutate ? (
+                <label className="rounded-lg border border-indigo-300 px-3 py-2 text-sm font-bold text-indigo-700">
+                  Choose image
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    className="sr-only"
+                    onChange={(event) => chooseScreenshot(event.currentTarget.files?.[0])}
+                  />
+                </label>
+              ) : null}
+            </div>
             {detail.media && mediaUrl ? (
               <div className="mt-4 grid gap-4 md:grid-cols-[16rem_1fr]">
                 {detail.media.mime_type.startsWith("image/") ? (
@@ -188,6 +254,55 @@ export default function VenmoConfirmationDetailPage() {
             ) : (
               <p className="mt-4 text-sm text-slate-600">No media available.</p>
             )}
+            {canMutate && selectedScreenshot ? (
+              <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <div className="grid gap-4 md:grid-cols-[12rem_1fr]">
+                  {screenshotPreviewUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element -- local upload preview
+                    <img
+                      src={screenshotPreviewUrl}
+                      alt="Selected payment screenshot"
+                      className="aspect-video w-full rounded-lg border border-slate-200 object-cover"
+                    />
+                  ) : null}
+                  <div className="text-sm text-slate-700">
+                    <p className="font-bold text-slate-950">{selectedScreenshot.name}</p>
+                    <p className="mt-1">{selectedScreenshot.type}</p>
+                    <p className="mt-1">{formatBytes(selectedScreenshot.size)}</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void uploadScreenshot()}
+                        disabled={actionKey === "upload-screenshot"}
+                        className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-50"
+                      >
+                        {actionKey === "upload-screenshot"
+                          ? "Uploading..."
+                          : detail.media
+                            ? "Replace screenshot"
+                            : "Upload screenshot"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearSelectedScreenshot}
+                        disabled={actionKey === "upload-screenshot"}
+                        className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+            {uploadMessage ? (
+              <p
+                role="status"
+                className="mt-3 text-sm font-semibold text-slate-700"
+              >
+                {uploadMessage}
+              </p>
+            ) : null}
           </section>
 
           <AttemptsTable

@@ -51,3 +51,15 @@ export function resendVenmoConfirmation(
     { method: "POST" },
   );
 }
+
+export function uploadVenmoPaymentScreenshot(
+  requestId: number,
+  file: File,
+): Promise<VenmoConfirmationDetail> {
+  const form = new FormData();
+  form.append("file", file);
+  return apiRequest<VenmoConfirmationDetail>(
+    `/api/venmo-confirmations/${requestId}/payment-screenshot`,
+    { method: "POST", body: form },
+  );
+}

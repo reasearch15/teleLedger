@@ -61,6 +61,7 @@ class VenmoConfirmationEventType(StrEnum):
     INQUIRY_DISMISSED = "inquiry_dismissed"
     RESEND_REQUESTED = "resend_requested"
     RESEND_POSTED = "resend_posted"
+    PAYMENT_SCREENSHOT_UPLOADED = "payment_screenshot_uploaded"
     FAILURE = "failure"
 
 
