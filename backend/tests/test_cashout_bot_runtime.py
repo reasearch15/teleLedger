@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -462,7 +463,7 @@ async def test_update_loop_routes_callback_after_prior_read_timeout(
 
 @pytest.mark.asyncio
 async def test_update_loop_fatal_bot_auth_error_still_fails() -> None:
-    class AuthFailureGateway(FakeBotGateway):
+    class ConfigFailureGateway(FakeBotGateway):
         async def get_updates(self, *, offset: int | None) -> list[object]:
             del offset
             raise TelegramBotApiError(
@@ -473,10 +474,98 @@ async def test_update_loop_fatal_bot_auth_error_still_fails() -> None:
 
     with pytest.raises(TelegramBotApiError):
         await run_cashout_bot_update_loop(
-            AuthFailureGateway(),
+            ConfigFailureGateway(),
             session_factory=TestSessionFactory,
             report=lambda _: None,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403, 409])
+async def test_gateway_bot_configuration_errors_are_fatal(status_code: int) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            json={"ok": False, "description": "configuration failed"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = TelegramBotApiGateway(token="123:test-token", client=client)
+        with pytest.raises(TelegramBotApiError) as error:
+            await gateway.get_updates(offset=None)
+
+    assert error.value.failure_class == TelegramBotFailureClass.CONFIGURATION
+    assert error.value.status_code == status_code
+
+
+@pytest.mark.asyncio
+async def test_update_loop_retryable_transport_error_backs_off_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    class RetryThenCancelGateway(FakeBotGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def get_updates(self, *, offset: int | None) -> list[object]:
+            del offset
+            self.calls += 1
+            if self.calls == 1:
+                raise TelegramBotApiError(
+                    "Telegram Bot API transport error",
+                    failure_class=TelegramBotFailureClass.RETRYABLE,
+                )
+            raise asyncio.CancelledError
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    gateway = RetryThenCancelGateway()
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.asyncio.sleep", record_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_cashout_bot_update_loop(
+            gateway,
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+    assert gateway.calls == 2
+    assert sleeps == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_update_loop_exits_cleanly_only_when_cancelled() -> None:
+    class CancelledGateway(FakeBotGateway):
+        async def get_updates(self, *, offset: int | None) -> list[object]:
+            del offset
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_cashout_bot_update_loop(
+            CancelledGateway(),
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_default_long_poll_timeout_stays_below_http_timeout() -> None:
+    observed_timeout: int | None = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal observed_timeout
+        payload = json.loads(request.content.decode())
+        observed_timeout = payload["timeout"]
+        return httpx.Response(200, json={"ok": True, "result": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = TelegramBotApiGateway(token="123:test-token", client=client)
+        await gateway.get_updates(offset=None)
+
+    assert observed_timeout == 10
 
 
 @pytest.mark.asyncio
