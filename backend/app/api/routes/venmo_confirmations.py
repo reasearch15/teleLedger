@@ -371,6 +371,20 @@ async def get_venmo_media(
     )
 
 
+@router.delete("/{request_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_venmo_confirmation(
+    request_id: Annotated[int, ApiPath(gt=0)],
+    session: DatabaseSession,
+    current_user: CurrentUser,
+) -> None:
+    service = VenmoConfirmationService(session)
+    try:
+        await service.delete_request(request_id, actor=current_user)
+        await session.commit()
+    except Exception as error:
+        _raise_venmo_error(error)
+
+
 @router.get("/{request_id}", response_model=VenmoRequestDetailResponse)
 async def get_venmo_confirmation(
     request_id: Annotated[int, ApiPath(gt=0)],

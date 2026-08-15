@@ -26,11 +26,26 @@ class VenmoConfirmationRepository(BaseRepository[VenmoConfirmationRequest]):
         await self._session.flush()
         return request
 
-    async def get_by_id(self, request_id: int) -> VenmoConfirmationRequest | None:
+    async def get_by_id(
+        self,
+        request_id: int,
+        *,
+        for_update: bool = False,
+    ) -> VenmoConfirmationRequest | None:
         statement = select(VenmoConfirmationRequest).where(
             VenmoConfirmationRequest.id == request_id
         )
+        if for_update:
+            statement = statement.with_for_update()
         return (await self._session.execute(statement)).scalar_one_or_none()
+
+    async def count_requests_for_media_asset(self, media_asset_id: int) -> int:
+        value = await self._session.scalar(
+            select(func.count())
+            .select_from(VenmoConfirmationRequest)
+            .where(VenmoConfirmationRequest.screenshot_media_asset_id == media_asset_id)
+        )
+        return int(value or 0)
 
     async def get_request_for_coadmin(
         self,
@@ -207,12 +222,19 @@ class VenmoConfirmationRepository(BaseRepository[VenmoConfirmationRequest]):
         await self._session.flush()
         return event
 
-    async def list_attempts(self, request_id: int) -> list[VenmoConfirmationAttempt]:
+    async def list_attempts(
+        self,
+        request_id: int,
+        *,
+        for_update: bool = False,
+    ) -> list[VenmoConfirmationAttempt]:
         statement = (
             select(VenmoConfirmationAttempt)
             .where(VenmoConfirmationAttempt.request_id == request_id)
             .order_by(VenmoConfirmationAttempt.attempt_number.asc())
         )
+        if for_update:
+            statement = statement.with_for_update()
         return list((await self._session.scalars(statement)).all())
 
     async def latest_attempt_for_request(

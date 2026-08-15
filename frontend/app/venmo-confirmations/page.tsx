@@ -5,11 +5,13 @@ import type { FormEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
+import { useAuth } from "@/components/auth-provider";
 import { useLiveUpdates } from "@/components/live-updates-provider";
 import { friendlyError } from "@/lib/api-client";
-import { VENMO_CONFIRMATION_EVENTS } from "@/lib/live-events";
+import { LIVE_EVENTS, VENMO_CONFIRMATION_EVENTS, type LiveEvent } from "@/lib/live-events";
 import {
   createVenmoConfirmation,
+  deleteVenmoConfirmation,
   listVenmoConfirmations,
 } from "@/services/venmo-confirmations";
 import type { VenmoConfirmationSummary } from "@/types/api";
@@ -46,6 +48,7 @@ function formatDate(value: string | null): string {
 }
 
 export default function VenmoConfirmationsPage() {
+  const { user } = useAuth();
   const [items, setItems] = useState<VenmoConfirmationSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -59,7 +62,12 @@ export default function VenmoConfirmationsPage() {
   const [paymentNote, setPaymentNote] = useState("");
   const [createStatus, setCreateStatus] = useState("");
   const [createError, setCreateError] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<VenmoConfirmationSummary | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleteStatus, setDeleteStatus] = useState("");
   const loadingMoreRef = useRef(false);
+  const isAdmin = user?.role === "admin";
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -110,7 +118,24 @@ export default function VenmoConfirmationsPage() {
     }, 0);
     return () => window.clearTimeout(timeoutId);
   }, [refresh]);
-  useLiveUpdates(VENMO_CONFIRMATION_EVENTS, refresh, true);
+
+  const handleLiveUpdate = useCallback(
+    (events: LiveEvent[]) => {
+      const deletedIds = events
+        .filter((event) => event.event === LIVE_EVENTS.VENMO_CONFIRMATION_DELETED)
+        .map((event) => event.venmo_confirmation_request_id)
+        .filter((id): id is number => id !== undefined);
+      if (deletedIds.length > 0) {
+        setItems((current) => current.filter((item) => !deletedIds.includes(item.id)));
+      }
+      if (events.some((event) => event.event !== LIVE_EVENTS.VENMO_CONFIRMATION_DELETED)) {
+        void refresh();
+      }
+    },
+    [refresh],
+  );
+
+  useLiveUpdates(VENMO_CONFIRMATION_EVENTS, handleLiveUpdate, true);
 
   useEffect(() => {
     if (!previewUrl) return;
@@ -159,6 +184,23 @@ export default function VenmoConfirmationsPage() {
     }
   }
 
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    setDeletingId(deleteTarget.id);
+    setDeleteError("");
+    setDeleteStatus("");
+    try {
+      await deleteVenmoConfirmation(deleteTarget.id);
+      setItems((current) => current.filter((item) => item.id !== deleteTarget.id));
+      setDeleteStatus(`Request #${deleteTarget.id} deleted.`);
+      setDeleteTarget(null);
+    } catch (deleteRequestError) {
+      setDeleteError(friendlyError(deleteRequestError));
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <AppShell
       title="Venmo Confirmations"
@@ -170,6 +212,22 @@ export default function VenmoConfirmationsPage() {
           className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700"
         >
           {error}
+        </div>
+      ) : null}
+      {deleteStatus ? (
+        <div
+          role="status"
+          className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm font-semibold text-emerald-700"
+        >
+          {deleteStatus}
+        </div>
+      ) : null}
+      {deleteError ? (
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700"
+        >
+          {deleteError}
         </div>
       ) : null}
       <div className="mb-4 flex items-center justify-between">
@@ -261,50 +319,69 @@ export default function VenmoConfirmationsPage() {
           </div>
         ) : null}
         {items.map((request) => (
-          <Link
+          <article
             key={request.id}
-            href={`/venmo-confirmations/${request.id}`}
             className={`rounded-lg border p-4 transition ${
               cardClasses[request.status] ?? cardClasses.pending
             }`}
           >
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">
-                  Request #{request.id}
-                </p>
-                <h2
-                  className={`mt-1 text-lg font-black ${
-                    request.status === "confirmed" ? "text-emerald-900" : "text-slate-950"
+              <div className="min-w-0 flex-1">
+                <Link href={`/venmo-confirmations/${request.id}`} className="block">
+                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">
+                    Request #{request.id}
+                  </p>
+                  <h2
+                    className={`mt-1 text-lg font-black ${
+                      request.status === "confirmed" ? "text-emerald-900" : "text-slate-950"
+                    }`}
+                  >
+                    {request.status === "confirmed" ? "✅ " : ""}
+                    {statusLabels[request.status]}
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-600">
+                    Staff: {request.requested_by_username ?? "Unknown"} · Coadmin:{" "}
+                    {request.coadmin_username ?? request.coadmin_id}
+                  </p>
+                </Link>
+              </div>
+              <div className="flex items-start gap-2">
+                {isAdmin && request.status === "pending" ? (
+                  <button
+                    type="button"
+                    disabled={deletingId === request.id}
+                    onClick={() => {
+                      setDeleteError("");
+                      setDeleteStatus("");
+                      setDeleteTarget(request);
+                    }}
+                    className="rounded-md border border-red-200 px-2 py-1 text-xs font-bold text-red-700 hover:border-red-300 disabled:opacity-50"
+                  >
+                    Delete
+                  </button>
+                ) : null}
+                <span
+                  className={`rounded-full border px-2.5 py-1 text-xs font-black ${
+                    badgeClasses[request.status] ?? badgeClasses.pending
                   }`}
                 >
-                  {request.status === "confirmed" ? "✅ " : ""}
+                  {request.status === "confirmed" ? "✓ " : ""}
                   {statusLabels[request.status]}
-                </h2>
-                <p className="mt-1 text-sm text-slate-600">
-                  Staff: {request.requested_by_username ?? "Unknown"} · Coadmin:{" "}
-                  {request.coadmin_username ?? request.coadmin_id}
-                </p>
+                </span>
               </div>
-              <span
-                className={`rounded-full border px-2.5 py-1 text-xs font-black ${
-                  badgeClasses[request.status] ?? badgeClasses.pending
-                }`}
-              >
-                {request.status === "confirmed" ? "✓ " : ""}
-                {statusLabels[request.status]}
-              </span>
             </div>
-            {request.payment_note ? (
-              <p className="mt-3 text-sm text-slate-700">{request.payment_note}</p>
-            ) : null}
-            <p className="mt-3 text-xs text-slate-500">
-              Created {formatDate(request.created_at)}
-              {request.confirmed_at
-                ? ` · Confirmed ${formatDate(request.confirmed_at)}`
-                : ""}
-            </p>
-          </Link>
+            <Link href={`/venmo-confirmations/${request.id}`} className="block">
+              {request.payment_note ? (
+                <p className="mt-3 text-sm text-slate-700">{request.payment_note}</p>
+              ) : null}
+              <p className="mt-3 text-xs text-slate-500">
+                Created {formatDate(request.created_at)}
+                {request.confirmed_at
+                  ? ` · Confirmed ${formatDate(request.confirmed_at)}`
+                  : ""}
+              </p>
+            </Link>
+          </article>
         ))}
         {loadMoreError ? (
           <p role="alert" className="text-sm font-bold text-red-700">
@@ -324,6 +401,49 @@ export default function VenmoConfirmationsPage() {
           </div>
         ) : null}
       </section>
+      {deleteTarget ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4"
+          role="presentation"
+          onClick={() => {
+            if (deletingId === null) setDeleteTarget(null);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-labelledby="delete-venmo-title"
+            aria-modal="true"
+            className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-5 shadow-lg"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="delete-venmo-title" className="text-lg font-black text-slate-950">
+              Delete Request #{deleteTarget.id}?
+            </h2>
+            <p className="mt-2 text-sm text-slate-600">
+              This removes the request from TeleLedger only. It will not delete any Telegram
+              message.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={deletingId !== null}
+                onClick={() => setDeleteTarget(null)}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingId !== null}
+                onClick={() => void confirmDelete()}
+                className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white disabled:opacity-50"
+              >
+                {deletingId === deleteTarget.id ? "Deleting..." : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </AppShell>
   );
 }

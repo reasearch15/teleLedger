@@ -18,7 +18,10 @@ from app.models.venmo_confirmation import (
     VenmoConfirmationEventType,
     VenmoConfirmationRequest,
 )
-from app.services.venmo_confirmation import VenmoConfirmationService
+from app.services.venmo_confirmation import (
+    VenmoConfirmationNotFoundError,
+    VenmoConfirmationService,
+)
 from app.telegram.cashout_bot.api import (
     TelegramBotApiError,
     TelegramBotApiGateway,
@@ -306,14 +309,23 @@ async def deliver_next_due_venmo_confirmation(
         if due is None:
             return False
         request, media, attempt = due
-        await send_confirmation_attempt_with_retries(
-            service=service,
-            request=request,
-            media=media,
-            attempt=attempt,
-            event_type=VenmoConfirmationEventType.ATTEMPT_POSTED,
-            gateway_factory=gateway_factory,
-        )
+        try:
+            await send_confirmation_attempt_with_retries(
+                service=service,
+                request=request,
+                media=media,
+                attempt=attempt,
+                event_type=VenmoConfirmationEventType.ATTEMPT_POSTED,
+                gateway_factory=gateway_factory,
+            )
+        except VenmoConfirmationNotFoundError:
+            logger.info(
+                "venmo_confirmation_delivery_request_deleted",
+                extra={
+                    "venmo_confirmation_request_id": request.id,
+                    "venmo_confirmation_attempt_id": attempt.id,
+                },
+            )
         await session.commit()
     return True
 

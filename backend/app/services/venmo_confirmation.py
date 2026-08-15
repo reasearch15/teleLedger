@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +34,7 @@ from app.telegram.venmo_confirmation import (
     format_venmo_confirmation_confirmed_caption,
     format_venmo_confirmation_not_received_caption,
 )
+from app.websocket.events import LiveEventType, event_broker
 
 logger = get_logger(__name__)
 
@@ -596,6 +599,66 @@ class VenmoConfirmationService(ApplicationService):
             raise VenmoConfirmationNotFoundError("Venmo confirmation was not found.")
         return request
 
+    async def delete_request(self, request_id: int, *, actor: User) -> None:
+        """Permanently remove a pending Venmo confirmation request from TeleLedger."""
+        self._require_admin(actor)
+        request = await self._repository.get_by_id(request_id, for_update=True)
+        if request is None:
+            raise VenmoConfirmationNotFoundError("Venmo confirmation was not found.")
+        if request.status != VenmoConfirmationStatus.PENDING:
+            raise VenmoConfirmationStateConflictError(
+                "Only pending Venmo confirmation requests can be deleted."
+            )
+
+        attempts = await self._repository.list_attempts(request_id, for_update=True)
+        now = datetime.now(UTC)
+        telegram_message_existed = False
+        for attempt in attempts:
+            if attempt.telegram_message_id is not None:
+                telegram_message_existed = True
+            if (
+                attempt.status == VenmoConfirmationAttemptStatus.PENDING
+                and attempt.telegram_message_id is None
+            ):
+                lease_until = attempt.delivery_lease_until
+                if lease_until is not None:
+                    if lease_until.tzinfo is None:
+                        lease_until = lease_until.replace(tzinfo=UTC)
+                    if lease_until > now:
+                        raise VenmoConfirmationStateConflictError(
+                            "Confirmation delivery is in progress. Try again shortly."
+                        )
+                attempt.next_retry_at = None
+                attempt.delivery_lease_until = None
+
+        media_asset_id = request.screenshot_media_asset_id
+        previous_status = request.status.value
+        logger.info(
+            "venmo_confirmation_request_deleted",
+            extra={
+                "venmo_confirmation_request_id": request.id,
+                "admin_user_id": actor.id,
+                "previous_status": previous_status,
+                "telegram_message_existed": telegram_message_existed,
+                "deleted_at": now.isoformat(),
+                "coadmin_id": request.coadmin_id,
+            },
+        )
+        for event in await self._repository.list_events(request_id):
+            await self._session.delete(event)
+        for inquiry in await self._repository.list_inquiries(request_id):
+            await self._session.delete(inquiry)
+        for attempt in attempts:
+            await self._session.delete(attempt)
+        await self._session.delete(request)
+        await self._session.flush()
+        await self._delete_orphan_media_asset(media_asset_id)
+        await event_broker.publish(
+            LiveEventType.VENMO_CONFIRMATION_DELETED,
+            venmo_confirmation_request_id=request_id,
+            broadcast=True,
+        )
+
     async def get_detail_for_actor(
         self,
         request_id: int,
@@ -866,6 +929,25 @@ class VenmoConfirmationService(ApplicationService):
         )
         return media
 
+    async def _delete_orphan_media_asset(self, media_asset_id: int) -> None:
+        remaining = await self._repository.count_requests_for_media_asset(media_asset_id)
+        if remaining > 0:
+            return
+        media = await self._media_repository.get_by_id(media_asset_id)
+        if media is None:
+            return
+        storage_key = media.storage_key
+        await self._session.delete(media)
+        await self._session.flush()
+        await asyncio.to_thread(self._delete_media_file, storage_key)
+
+    @staticmethod
+    def _delete_media_file(storage_key: str) -> None:
+        root = Path(get_settings().inquiry_media_dir).resolve()
+        path = (root / storage_key).resolve()
+        if path.is_relative_to(root):
+            path.unlink(missing_ok=True)
+
     async def _record_event(
         self,
         *,
@@ -890,6 +972,11 @@ class VenmoConfirmationService(ApplicationService):
                 payload=payload,
             )
         )
+
+    @staticmethod
+    def _require_admin(actor: User) -> None:
+        if actor.role != UserRole.ADMIN:
+            raise VenmoConfirmationAuthorizationError("Administrator access is required.")
 
     @staticmethod
     def _require_staff(actor: User) -> None:

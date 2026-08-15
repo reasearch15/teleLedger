@@ -17,6 +17,7 @@ export const LIVE_EVENTS = {
   INQUIRY_MESSAGE_UPDATED: "inquiry_message_updated",
   INQUIRY_MEDIA_READY: "inquiry_media_ready",
   VENMO_CONFIRMATION_UPDATED: "venmo_confirmation_updated",
+  VENMO_CONFIRMATION_DELETED: "venmo_confirmation_deleted",
   NOTIFICATION_CREATED: "notification_created",
   NOTIFICATION_READ: "notification_read",
   SETTLEMENT_CREATED: "settlement_created",
@@ -88,6 +89,7 @@ export const NOTIFICATION_EVENTS: LiveEventType[] = [
 
 export const VENMO_CONFIRMATION_EVENTS: LiveEventType[] = [
   LIVE_EVENTS.VENMO_CONFIRMATION_UPDATED,
+  LIVE_EVENTS.VENMO_CONFIRMATION_DELETED,
 ];
 
 export const LEDGER_PAGE_EVENTS: LiveEventType[] = [

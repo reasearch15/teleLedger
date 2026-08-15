@@ -92,3 +92,9 @@ export function uploadVenmoPaymentScreenshot(
     { method: "POST", body: form },
   );
 }
+
+export function deleteVenmoConfirmation(requestId: number): Promise<void> {
+  return apiRequest<void>(`/api/venmo-confirmations/${requestId}`, {
+    method: "DELETE",
+  });
+}

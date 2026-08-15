@@ -1,16 +1,34 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import VenmoConfirmationsPage from "@/app/venmo-confirmations/page";
 import { useLiveUpdates } from "@/components/live-updates-provider";
 import {
   createVenmoConfirmation,
+  deleteVenmoConfirmation,
   listVenmoConfirmations,
 } from "@/services/venmo-confirmations";
 import type { VenmoConfirmationListResponse } from "@/types/api";
 
+const mockAuthState = vi.hoisted(() => ({
+  role: "staff" as "admin" | "staff",
+}));
+
 vi.mock("@/components/app-shell", () => ({
   AppShell: ({ children }: { children: React.ReactNode }) => <main>{children}</main>,
+}));
+
+vi.mock("@/components/auth-provider", () => ({
+  useAuth: () => ({
+    user: {
+      id: mockAuthState.role === "admin" ? 1 : 42,
+      username: mockAuthState.role,
+      role: mockAuthState.role,
+    },
+    loading: false,
+    login: vi.fn(),
+    logout: vi.fn(),
+  }),
 }));
 
 vi.mock("@/components/live-updates-provider", () => ({
@@ -35,6 +53,7 @@ vi.mock("next/link", () => ({
 
 vi.mock("@/services/venmo-confirmations", () => ({
   createVenmoConfirmation: vi.fn(),
+  deleteVenmoConfirmation: vi.fn(),
   listVenmoConfirmations: vi.fn(),
 }));
 
@@ -65,10 +84,12 @@ describe("VenmoConfirmationsPage", () => {
   afterEach(() => cleanup());
 
   beforeEach(() => {
+    mockAuthState.role = "staff";
     global.URL.createObjectURL = vi.fn(() => "blob:preview");
     global.URL.revokeObjectURL = vi.fn();
     vi.mocked(useLiveUpdates).mockReset();
     vi.mocked(createVenmoConfirmation).mockReset();
+    vi.mocked(deleteVenmoConfirmation).mockReset();
     vi.mocked(listVenmoConfirmations).mockReset();
     vi.mocked(listVenmoConfirmations).mockResolvedValue(listResponse);
   });
@@ -84,7 +105,7 @@ describe("VenmoConfirmationsPage", () => {
     expect(screen.getByText(/Staff: sarah/)).toBeInTheDocument();
     expect(screen.getByText("Reference ABC")).toBeInTheDocument();
     expect(useLiveUpdates).toHaveBeenCalledWith(
-      ["venmo_confirmation_updated"],
+      ["venmo_confirmation_updated", "venmo_confirmation_deleted"],
       expect.any(Function),
       true,
     );
@@ -112,13 +133,13 @@ describe("VenmoConfirmationsPage", () => {
 
     render(<VenmoConfirmationsPage />);
 
-    const confirmed = await screen.findByRole("link", { name: /Request #78/ });
-    const notReceived = await screen.findByRole("link", { name: /Request #79/ });
-    expect(confirmed).toHaveClass("bg-emerald-50");
-    expect(confirmed).toHaveTextContent("✅ Confirmed");
-    expect(confirmed).toHaveTextContent("✓ Confirmed");
-    expect(notReceived).toHaveClass("bg-amber-50");
-    expect(notReceived).toHaveTextContent("Not received");
+    const confirmedLink = await screen.findByRole("link", { name: /Request #78/ });
+    const notReceivedLink = await screen.findByRole("link", { name: /Request #79/ });
+    expect(confirmedLink.closest("article")).toHaveClass("bg-emerald-50");
+    expect(confirmedLink).toHaveTextContent("✅ Confirmed");
+    expect(confirmedLink.closest("article")).toHaveTextContent("✓ Confirmed");
+    expect(notReceivedLink.closest("article")).toHaveClass("bg-amber-50");
+    expect(notReceivedLink).toHaveTextContent("Not received");
   });
 
   it("shows loading and error states safely", async () => {
@@ -231,5 +252,35 @@ describe("VenmoConfirmationsPage", () => {
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Load More" })).not.toBeInTheDocument(),
     );
+  });
+
+  it("shows admin delete only for pending requests and removes card after confirm", async () => {
+    mockAuthState.role = "admin";
+    vi.mocked(deleteVenmoConfirmation).mockResolvedValue(undefined);
+
+    render(<VenmoConfirmationsPage />);
+
+    expect(await screen.findByRole("button", { name: "Delete" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent("Delete Request #77?");
+    expect(dialog).toHaveTextContent(
+      "This removes the request from TeleLedger only. It will not delete any Telegram message.",
+    );
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(deleteVenmoConfirmation).toHaveBeenCalledWith(77));
+    expect(await screen.findByText("Request #77 deleted.")).toBeInTheDocument();
+    expect(screen.queryByText("Request #77")).not.toBeInTheDocument();
+    expect(screen.getByText("0 requests")).toBeInTheDocument();
+  });
+
+  it("does not show delete for staff users", async () => {
+    mockAuthState.role = "staff";
+    render(<VenmoConfirmationsPage />);
+
+    expect(await screen.findByText("Request #77")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
   });
 });
