@@ -71,6 +71,9 @@ class JsonFormatter(logging.Formatter):
             "reconciliation_result",
             "expired_pending_count",
             "venmo_confirmation_request_id",
+            "venmo_confirmation_attempt_id",
+            "attempt_number",
+            "retry_number",
             "coadmin_id",
         ):
             field_value = getattr(record, field_name, None)

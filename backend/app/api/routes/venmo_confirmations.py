@@ -35,10 +35,9 @@ from app.services.venmo_confirmation import (
     VenmoConfirmationService,
     VenmoConfirmationStateConflictError,
 )
-from app.telegram.cashout_bot.api import TelegramBotApiError, TelegramBotApiGateway
+from app.telegram.cashout_bot.api import TelegramBotApiGateway
 from app.telegram.inquiry_media import ALLOWED_IMAGE_MIME_TYPES
-from app.telegram.peer_ids import normalize_telegram_chat_id
-from app.telegram.venmo_confirmation import venmo_confirmation_buttons, venmo_confirmation_caption
+from app.telegram.venmo_confirmation_delivery import send_confirmation_attempt_with_retries
 from app.websocket.events import LiveEventType, event_broker
 
 router = APIRouter(prefix="/api/venmo-confirmations", tags=["venmo-confirmations"])
@@ -68,6 +67,9 @@ class VenmoAttemptResponse(BaseModel):
     posted_at: datetime | None
     resolved_at: datetime | None
     last_error: str | None
+    delivery_attempts: int
+    next_retry_at: datetime | None
+    delivery_lease_until: datetime | None
 
 
 class VenmoInquiryResponse(BaseModel):
@@ -276,6 +278,13 @@ async def resend_venmo_confirmation(
     service = VenmoConfirmationService(session)
     try:
         request = await service.get_request_for_actor(request_id, actor=current_user)
+        if await service.has_active_delivery_for_request(
+            request_id=request.id,
+            coadmin_id=request.coadmin_id,
+        ):
+            raise VenmoConfirmationStateConflictError(
+                "Confirmation delivery is retrying automatically. Try again after it finishes."
+            )
         attempt = await service.create_attempt(
             request_id=request.id,
             coadmin_id=request.coadmin_id,
@@ -578,48 +587,15 @@ async def _send_confirmation_attempt(
     attempt: VenmoConfirmationAttempt,
     event_type: VenmoConfirmationEventType,
 ) -> None:
-    chat_id = normalize_telegram_chat_id(get_settings().shared_telegram_supergroup_id)
-    if chat_id is None:
-        await service.mark_attempt_failed(
-            attempt_id=attempt.id,
-            coadmin_id=request.coadmin_id,
-            error="TELEGRAM_CASHOUT_GROUP_ID is required to send confirmation requests.",
-        )
-        return
-    try:
-        async with TelegramBotApiGateway() as gateway:
-            message_id = await gateway.send_photo(
-                chat_id=chat_id,
-                photo_path=_media_path(media.storage_key),
-                caption=venmo_confirmation_caption(
-                    request_id=request.id,
-                    attempt_number=attempt.attempt_number,
-                    note=request.payment_note,
-                ),
-                buttons=venmo_confirmation_buttons(attempt.id),
-                mime_type=media.mime_type,
-                filename=media.original_filename,
-            )
-        if message_id is None:
-            await service.mark_attempt_failed(
-                attempt_id=attempt.id,
-                coadmin_id=request.coadmin_id,
-                error="Telegram Bot API did not return a message_id.",
-            )
-            return
-        await service.mark_attempt_posted(
-            attempt_id=attempt.id,
-            coadmin_id=request.coadmin_id,
-            telegram_chat_id=chat_id,
-            telegram_message_id=message_id,
-            event_type=event_type,
-        )
-    except (RuntimeError, TelegramBotApiError) as error:
-        await service.mark_attempt_failed(
-            attempt_id=attempt.id,
-            coadmin_id=request.coadmin_id,
-            error=str(error),
-        )
+    await send_confirmation_attempt_with_retries(
+        service=service,
+        request=request,
+        media=media,
+        attempt=attempt,
+        event_type=event_type,
+        gateway_factory=TelegramBotApiGateway,
+        stop_after_scheduling_retry=True,
+    )
 
 
 def _raise_venmo_error(error: Exception) -> None:

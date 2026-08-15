@@ -458,6 +458,9 @@ export type VenmoConfirmationAttempt = {
   posted_at: string | null;
   resolved_at: string | null;
   last_error: string | null;
+  delivery_attempts: number;
+  next_retry_at: string | null;
+  delivery_lease_until: string | null;
 };
 
 export type VenmoConfirmationInquiry = {

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -129,6 +129,8 @@ class VenmoConfirmationService(ApplicationService):
         attempt.status = VenmoConfirmationAttemptStatus.POSTED
         attempt.posted_at = datetime.now(UTC)
         attempt.last_error = None
+        attempt.next_retry_at = None
+        attempt.delivery_lease_until = None
         await self._record_event(
             request_id=attempt.request_id,
             attempt_id=attempt.id,
@@ -136,6 +138,74 @@ class VenmoConfirmationService(ApplicationService):
             payload={
                 "telegram_chat_id": attempt.telegram_chat_id,
                 "telegram_message_id": attempt.telegram_message_id,
+            },
+        )
+        return attempt
+
+    async def begin_attempt_delivery(
+        self,
+        *,
+        attempt_id: int,
+        coadmin_id: int,
+        lease_seconds: int,
+    ) -> VenmoConfirmationAttempt:
+        attempt = await self._repository.get_attempt_for_coadmin(
+            attempt_id,
+            coadmin_id,
+            for_update=True,
+        )
+        if attempt is None:
+            raise VenmoConfirmationNotFoundError("Venmo confirmation attempt was not found.")
+        if attempt.telegram_message_id is not None:
+            return attempt
+        if attempt.status != VenmoConfirmationAttemptStatus.PENDING:
+            raise VenmoConfirmationStateConflictError(
+                "Venmo confirmation attempt is not pending delivery."
+            )
+        attempt.delivery_attempts += 1
+        attempt.delivery_lease_until = datetime.now(UTC) + timedelta(seconds=lease_seconds)
+        attempt.next_retry_at = None
+        await self._session.flush()
+        return attempt
+
+    async def record_attempt_retry(
+        self,
+        *,
+        attempt_id: int,
+        coadmin_id: int,
+        error: str,
+        failure_class: str,
+        retry_number: int,
+        delay_seconds: float,
+        next_retry_at: datetime,
+        telegram_status_code: int | None = None,
+    ) -> VenmoConfirmationAttempt:
+        attempt = await self._repository.get_attempt_for_coadmin(
+            attempt_id,
+            coadmin_id,
+            for_update=True,
+        )
+        if attempt is None:
+            raise VenmoConfirmationNotFoundError("Venmo confirmation attempt was not found.")
+        if attempt.telegram_message_id is not None:
+            return attempt
+        attempt.status = VenmoConfirmationAttemptStatus.PENDING
+        attempt.last_error = error[:2000]
+        attempt.next_retry_at = next_retry_at
+        attempt.delivery_lease_until = None
+        await self._record_event(
+            request_id=attempt.request_id,
+            attempt_id=attempt.id,
+            event_type=VenmoConfirmationEventType.FAILURE,
+            payload={
+                "error": attempt.last_error,
+                "failure_class": failure_class,
+                "retry_number": retry_number,
+                "retryable": True,
+                "delay_seconds": delay_seconds,
+                "next_retry_at": next_retry_at.isoformat(),
+                "telegram_status_code": telegram_status_code,
+                "terminal": False,
             },
         )
         return attempt
@@ -156,13 +226,60 @@ class VenmoConfirmationService(ApplicationService):
             raise VenmoConfirmationNotFoundError("Venmo confirmation attempt was not found.")
         attempt.status = VenmoConfirmationAttemptStatus.FAILED_TO_SEND
         attempt.last_error = error[:2000]
+        attempt.next_retry_at = None
+        attempt.delivery_lease_until = None
         await self._record_event(
             request_id=attempt.request_id,
             attempt_id=attempt.id,
             event_type=VenmoConfirmationEventType.FAILURE,
-            payload={"error": attempt.last_error},
+            payload={"error": attempt.last_error, "terminal": True},
         )
         return attempt
+
+    async def link_posted_attempt_from_message(
+        self,
+        *,
+        request_id: int,
+        attempt_number: int,
+        telegram_chat_id: int,
+        telegram_message_id: int,
+    ) -> VenmoConfirmationAttempt | None:
+        request = await self._repository.get_by_id(request_id)
+        if request is None:
+            return None
+        attempt = await self._repository.get_attempt_by_request_number(
+            request_id,
+            attempt_number,
+            for_update=True,
+        )
+        if attempt is None:
+            return None
+        if attempt.telegram_message_id is not None:
+            return attempt
+        return await self.mark_attempt_posted(
+            attempt_id=attempt.id,
+            coadmin_id=request.coadmin_id,
+            telegram_chat_id=telegram_chat_id,
+            telegram_message_id=telegram_message_id,
+        )
+
+    async def has_active_delivery_for_request(
+        self,
+        *,
+        request_id: int,
+        coadmin_id: int,
+    ) -> bool:
+        latest = await self._repository.latest_attempt_for_request(request_id)
+        if latest is None:
+            return False
+        request = await self._repository.get_request_for_coadmin(request_id, coadmin_id)
+        if request is None:
+            raise VenmoConfirmationNotFoundError("Venmo confirmation was not found.")
+        if latest.telegram_message_id is not None:
+            return False
+        if latest.status != VenmoConfirmationAttemptStatus.PENDING:
+            return False
+        return latest.delivery_lease_until is not None or latest.next_retry_at is not None
 
     async def handle_telegram_callback(
         self,

@@ -5,8 +5,10 @@ from datetime import datetime
 from sqlalchemy import and_, func, or_, select
 
 from app.db.repositories.base import BaseRepository
+from app.models.media_asset import MediaAsset
 from app.models.venmo_confirmation import (
     VenmoConfirmationAttempt,
+    VenmoConfirmationAttemptStatus,
     VenmoConfirmationEvent,
     VenmoConfirmationInquiry,
     VenmoConfirmationRequest,
@@ -155,6 +157,21 @@ class VenmoConfirmationRepository(BaseRepository[VenmoConfirmationRequest]):
             statement = statement.with_for_update()
         return (await self._session.execute(statement)).scalar_one_or_none()
 
+    async def get_attempt_by_request_number(
+        self,
+        request_id: int,
+        attempt_number: int,
+        *,
+        for_update: bool = False,
+    ) -> VenmoConfirmationAttempt | None:
+        statement = select(VenmoConfirmationAttempt).where(
+            VenmoConfirmationAttempt.request_id == request_id,
+            VenmoConfirmationAttempt.attempt_number == attempt_number,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return (await self._session.execute(statement)).scalar_one_or_none()
+
     async def add_inquiry(
         self,
         inquiry: VenmoConfirmationInquiry,
@@ -212,6 +229,44 @@ class VenmoConfirmationRepository(BaseRepository[VenmoConfirmationRequest]):
             .limit(1)
         )
         return (await self._session.execute(statement)).scalar_one_or_none()
+
+    async def claim_next_due_delivery(
+        self,
+        now: datetime,
+    ) -> tuple[VenmoConfirmationRequest, MediaAsset, VenmoConfirmationAttempt] | None:
+        statement = (
+            select(VenmoConfirmationRequest, MediaAsset, VenmoConfirmationAttempt)
+            .join(
+                VenmoConfirmationAttempt,
+                VenmoConfirmationAttempt.request_id == VenmoConfirmationRequest.id,
+            )
+            .join(
+                MediaAsset,
+                MediaAsset.id == VenmoConfirmationRequest.screenshot_media_asset_id,
+            )
+            .where(
+                VenmoConfirmationAttempt.status == VenmoConfirmationAttemptStatus.PENDING,
+                VenmoConfirmationAttempt.telegram_message_id.is_(None),
+                or_(
+                    VenmoConfirmationAttempt.next_retry_at.is_(None),
+                    VenmoConfirmationAttempt.next_retry_at <= now,
+                ),
+                or_(
+                    VenmoConfirmationAttempt.delivery_lease_until.is_(None),
+                    VenmoConfirmationAttempt.delivery_lease_until <= now,
+                ),
+            )
+            .order_by(
+                VenmoConfirmationAttempt.next_retry_at.asc().nullsfirst(),
+                VenmoConfirmationAttempt.id.asc(),
+            )
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        row = (await self._session.execute(statement)).one_or_none()
+        if row is None:
+            return None
+        return row[0], row[1], row[2]
 
     async def list_inquiries(self, request_id: int) -> list[VenmoConfirmationInquiry]:
         statement = (

@@ -89,6 +89,9 @@ const detail: VenmoConfirmationDetail = {
       posted_at: "2026-07-15T15:46:00Z",
       resolved_at: null,
       last_error: null,
+      delivery_attempts: 1,
+      next_retry_at: null,
+      delivery_lease_until: null,
     },
   ],
   inquiries: [

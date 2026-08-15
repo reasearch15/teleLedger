@@ -535,10 +535,15 @@ async def test_telegram_failure_leaves_durable_confirmation_request(
 
     assert response.status_code == 201
     body = response.json()
-    assert body["attempts"][0]["status"] == "failed_to_send"
+    assert body["attempts"][0]["status"] == "pending"
     assert body["attempts"][0]["last_error"] == "temporary send failure"
     assert body["events"][-1]["event_type"] == "failure"
     assert listed.json()["items"][0]["id"] == body["id"]
+    async with TestSessionFactory() as session:
+        attempt = await session.get(VenmoConfirmationAttempt, body["attempts"][0]["id"])
+    assert attempt is not None
+    assert attempt.delivery_attempts == 1
+    assert attempt.next_retry_at is not None
 
 
 @pytest.mark.asyncio

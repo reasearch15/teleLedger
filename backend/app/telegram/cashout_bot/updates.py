@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -25,6 +26,10 @@ from app.websocket.events import LiveEventType, event_broker
 
 logger = get_logger(__name__)
 TerminalReporter = Callable[[str], None]
+_VENMO_CONFIRMATION_CAPTION_RE = re.compile(
+    r"Confirmation request #(?P<request_id>\d+)\s+Attempt #(?P<attempt_number>\d+)",
+    re.IGNORECASE,
+)
 
 
 async def run_cashout_bot_update_loop(
@@ -210,7 +215,17 @@ async def _handle_message(
     chat = message.get("chat")
     from_user = message.get("from")
     chat_id = _id_from(chat)
+    message_id = _id_from(message)
     user_id = _id_from(from_user)
+    caption = message.get("caption")
+    if chat_id is not None and message_id is not None and isinstance(caption, str):
+        await _reconcile_venmo_confirmation_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=caption,
+            session_factory=session_factory,
+            report=report,
+        )
     text = message.get("text")
     if chat_id is None or user_id is None or not isinstance(text, str):
         return
@@ -225,6 +240,46 @@ async def _handle_message(
         )
     if result is not None:
         report(f"Cashout bot message: {result.status}")
+
+
+async def _reconcile_venmo_confirmation_message(
+    *,
+    chat_id: int,
+    message_id: int,
+    caption: str,
+    session_factory: async_sessionmaker[Any],
+    report: TerminalReporter,
+) -> None:
+    match = _VENMO_CONFIRMATION_CAPTION_RE.search(caption)
+    if match is None:
+        return
+    async with session_factory() as session:
+        service = VenmoConfirmationService(session)
+        attempt = await service.link_posted_attempt_from_message(
+            request_id=int(match.group("request_id")),
+            attempt_number=int(match.group("attempt_number")),
+            telegram_chat_id=chat_id,
+            telegram_message_id=message_id,
+        )
+        await session.commit()
+    if attempt is None:
+        return
+    await event_broker.publish(
+        LiveEventType.VENMO_CONFIRMATION_UPDATED,
+        venmo_confirmation_request_id=attempt.request_id,
+        broadcast=True,
+    )
+    logger.info(
+        "venmo_confirmation_message_reconciled",
+        extra={
+            "telegram_chat_id": chat_id,
+            "telegram_message_id": message_id,
+            "venmo_confirmation_request_id": attempt.request_id,
+            "venmo_confirmation_attempt_id": attempt.id,
+            "attempt_number": attempt.attempt_number,
+        },
+    )
+    report("Venmo confirmation message reconciled.")
 
 
 def _id_from(value: object) -> int | None:

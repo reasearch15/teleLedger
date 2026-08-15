@@ -149,6 +149,12 @@ class VenmoConfirmationAttempt(Base):
             name="uq_venmo_confirmation_attempts_chat_message",
         ),
         Index("ix_venmo_confirmation_attempts_request_status", "request_id", "status"),
+        Index(
+            "ix_venmo_confirmation_attempts_delivery_due",
+            "status",
+            "next_retry_at",
+            "delivery_lease_until",
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -181,6 +187,17 @@ class VenmoConfirmationAttempt(Base):
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivery_lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
 
 class VenmoConfirmationInquiry(Base):

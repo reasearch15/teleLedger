@@ -63,6 +63,16 @@ function formatBytes(value: number): string {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function attemptStatusLabel(attempt: VenmoConfirmationAttempt): string {
+  if (
+    attempt.status === "pending" &&
+    (attempt.next_retry_at || attempt.delivery_lease_until || attempt.delivery_attempts > 0)
+  ) {
+    return attempt.next_retry_at ? "Retrying" : "Sending";
+  }
+  return statusLabels[attempt.status];
+}
+
 export default function VenmoConfirmationDetailPage() {
   const params = useParams<{ requestId: string }>();
   const { user } = useAuth();
@@ -420,6 +430,7 @@ function AttemptsTable({
               <th className="px-3 py-2">Created</th>
               <th className="px-3 py-2">Posted</th>
               <th className="px-3 py-2">Resolved</th>
+              <th className="px-3 py-2">Retries</th>
               <th className="px-3 py-2">Actions</th>
             </tr>
           </thead>
@@ -430,10 +441,17 @@ function AttemptsTable({
               return (
                 <tr key={attempt.id}>
                   <td className="px-3 py-2">#{attempt.attempt_number}</td>
-                  <td className="px-3 py-2">{statusLabels[attempt.status]}</td>
+                  <td className="px-3 py-2">{attemptStatusLabel(attempt)}</td>
                   <td className="px-3 py-2">{formatDate(attempt.created_at)}</td>
                   <td className="px-3 py-2">{formatDate(attempt.posted_at)}</td>
                   <td className="px-3 py-2">{formatDate(attempt.resolved_at)}</td>
+                  <td className="px-3 py-2">
+                    {attempt.delivery_attempts > 1
+                      ? attempt.delivery_attempts - 1
+                      : attempt.next_retry_at
+                        ? 1
+                        : 0}
+                  </td>
                   <td className="px-3 py-2">
                     {canMutate ? (
                       <div className="flex gap-2">

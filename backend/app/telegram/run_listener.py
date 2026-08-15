@@ -23,6 +23,7 @@ from app.telegram.inquiry_ingestion import (
     retry_pending_inquiry_media,
 )
 from app.telegram.peer_ids import normalize_telegram_chat_id
+from app.telegram.venmo_confirmation_delivery import run_venmo_confirmation_delivery_worker
 
 logger = get_logger(__name__)
 TerminalReporter = Callable[[str], None]
@@ -140,6 +141,7 @@ async def _run_listener_session(
         event_type="message_edited",
     )
     delivery_task: asyncio.Task[None] | None = None
+    venmo_delivery_task: asyncio.Task[None] | None = None
     bot_update_task: asyncio.Task[None] | None = None
     bot_gateway: TelegramBotApiGateway | None = None
 
@@ -234,10 +236,15 @@ async def _run_listener_session(
             ),
             name="cashout-delivery",
         )
+        venmo_delivery_task = asyncio.create_task(
+            run_venmo_confirmation_delivery_worker(),
+            name="venmo-confirmation-delivery",
+        )
         bot_update_task = asyncio.create_task(
             run_cashout_bot_update_loop(bot_gateway, report=report),
             name="cashout-bot-updates",
         )
+        venmo_delivery_task.add_done_callback(_log_background_task_failure)
         bot_update_task.add_done_callback(_log_background_task_failure)
         report("Listening for new text messages and cashout bot actions. Press Ctrl+C to stop.")
         logger.info(
@@ -250,11 +257,15 @@ async def _run_listener_session(
         await client.run_until_disconnected()
     finally:
         listener_health.mark_disconnected()
-        for task in (delivery_task, bot_update_task):
+        for task in (delivery_task, venmo_delivery_task, bot_update_task):
             if task is not None:
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (delivery_task, bot_update_task) if task is not None),
+            *(
+                task
+                for task in (delivery_task, venmo_delivery_task, bot_update_task)
+                if task is not None
+            ),
             return_exceptions=True,
         )
         if bot_gateway is not None:
