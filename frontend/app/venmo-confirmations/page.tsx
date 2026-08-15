@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { useLiveUpdates } from "@/components/live-updates-provider";
@@ -13,6 +13,8 @@ import {
   listVenmoConfirmations,
 } from "@/services/venmo-confirmations";
 import type { VenmoConfirmationSummary } from "@/types/api";
+
+const PAGE_SIZE = 30;
 
 const statusLabels: Record<string, string> = {
   pending: "Pending",
@@ -46,25 +48,61 @@ function formatDate(value: string | null): string {
 export default function VenmoConfirmationsPage() {
   const [items, setItems] = useState<VenmoConfirmationSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
+  const [loadMoreError, setLoadMoreError] = useState("");
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
   const [creating, setCreating] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [paymentNote, setPaymentNote] = useState("");
   const [createStatus, setCreateStatus] = useState("");
   const [createError, setCreateError] = useState("");
+  const loadingMoreRef = useRef(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError("");
+    setLoadMoreError("");
     try {
-      setItems((await listVenmoConfirmations()).items);
+      const response = await listVenmoConfirmations({ limit: PAGE_SIZE });
+      setItems(response.items);
+      setHasMore(response.has_more);
+      setNextCursor(response.next_cursor);
     } catch (loadError) {
       setError(friendlyError(loadError));
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current || !hasMore || !nextCursor) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    setLoadMoreError("");
+    try {
+      const response = await listVenmoConfirmations({
+        limit: PAGE_SIZE,
+        cursor: nextCursor,
+      });
+      setItems((current) => {
+        const seen = new Set(current.map((item) => item.id));
+        return [
+          ...current,
+          ...response.items.filter((item) => !seen.has(item.id)),
+        ];
+      });
+      setHasMore(response.has_more);
+      setNextCursor(response.next_cursor);
+    } catch (loadError) {
+      setLoadMoreError(friendlyError(loadError));
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [hasMore, nextCursor]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -109,6 +147,7 @@ export default function VenmoConfirmationsPage() {
         },
         ...current.filter((item) => item.id !== created.id),
       ]);
+      setLoadMoreError("");
       setCreateStatus(`Confirmation request #${created.id} created.`);
       setSelectedFile(null);
       setPreviewUrl("");
@@ -144,7 +183,7 @@ export default function VenmoConfirmationsPage() {
           <button
             type="button"
             onClick={() => void refresh()}
-            disabled={loading}
+            disabled={loading || loadingMore}
             className="text-sm font-bold text-indigo-600 disabled:opacity-50"
           >
             Refresh
@@ -267,6 +306,23 @@ export default function VenmoConfirmationsPage() {
             </p>
           </Link>
         ))}
+        {loadMoreError ? (
+          <p role="alert" className="text-sm font-bold text-red-700">
+            {loadMoreError}
+          </p>
+        ) : null}
+        {hasMore ? (
+          <div className="flex justify-center pt-1">
+            <button
+              type="button"
+              onClick={() => void loadMore()}
+              disabled={loadingMore}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-black text-slate-800 shadow-sm hover:border-indigo-300 disabled:opacity-50"
+            >
+              {loadingMore ? "Loading..." : "Load More"}
+            </button>
+          </div>
+        ) : null}
       </section>
     </AppShell>
   );

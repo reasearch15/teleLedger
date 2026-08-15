@@ -4,8 +4,22 @@ import type {
   VenmoConfirmationListResponse,
 } from "@/types/api";
 
-export function listVenmoConfirmations(): Promise<VenmoConfirmationListResponse> {
-  return apiRequest<VenmoConfirmationListResponse>("/api/venmo-confirmations");
+type ListVenmoConfirmationOptions = {
+  limit?: number;
+  cursor?: string | null;
+};
+
+export function listVenmoConfirmations(
+  options: ListVenmoConfirmationOptions = {},
+): Promise<VenmoConfirmationListResponse> {
+  const params = new URLSearchParams();
+  params.set("limit", String(options.limit ?? 30));
+  if (options.cursor) {
+    params.set("cursor", options.cursor);
+  }
+  return apiRequest<VenmoConfirmationListResponse>(
+    `/api/venmo-confirmations?${params.toString()}`,
+  );
 }
 
 export function createVenmoConfirmation(

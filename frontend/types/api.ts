@@ -512,4 +512,6 @@ export type VenmoConfirmationDetail = VenmoConfirmationSummary & {
 
 export type VenmoConfirmationListResponse = {
   items: VenmoConfirmationSummary[];
+  has_more: boolean;
+  next_cursor: string | null;
 };

@@ -72,6 +72,13 @@ class VenmoConfirmationRequest(Base):
     __table_args__ = (
         Index("ix_venmo_confirmation_requests_coadmin_status", "coadmin_id", "status"),
         Index(
+            "ix_venmo_confirmation_requests_coadmin_created_id",
+            "coadmin_id",
+            "created_at",
+            "id",
+        ),
+        Index("ix_venmo_confirmation_requests_created_id", "created_at", "id"),
+        Index(
             "ix_venmo_confirmation_requests_staff_created",
             "requested_by_staff_id",
             "created_at",

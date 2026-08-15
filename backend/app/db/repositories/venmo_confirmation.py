@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from datetime import datetime
+
+from sqlalchemy import and_, func, or_, select
 
 from app.db.repositories.base import BaseRepository
 from app.models.venmo_confirmation import (
@@ -48,17 +50,28 @@ class VenmoConfirmationRepository(BaseRepository[VenmoConfirmationRequest]):
         coadmin_id: int,
         *,
         limit: int = 50,
-        offset: int = 0,
+        cursor_created_at: datetime | None = None,
+        cursor_id: int | None = None,
     ) -> list[VenmoConfirmationRequest]:
+        conditions = [VenmoConfirmationRequest.coadmin_id == coadmin_id]
+        if cursor_created_at is not None and cursor_id is not None:
+            conditions.append(
+                or_(
+                    VenmoConfirmationRequest.created_at < cursor_created_at,
+                    and_(
+                        VenmoConfirmationRequest.created_at == cursor_created_at,
+                        VenmoConfirmationRequest.id < cursor_id,
+                    ),
+                )
+            )
         statement = (
             select(VenmoConfirmationRequest)
-            .where(VenmoConfirmationRequest.coadmin_id == coadmin_id)
+            .where(*conditions)
             .order_by(
                 VenmoConfirmationRequest.created_at.desc(),
                 VenmoConfirmationRequest.id.desc(),
             )
             .limit(limit)
-            .offset(offset)
         )
         return list((await self._session.scalars(statement)).all())
 
@@ -66,16 +79,28 @@ class VenmoConfirmationRepository(BaseRepository[VenmoConfirmationRequest]):
         self,
         *,
         limit: int = 50,
-        offset: int = 0,
+        cursor_created_at: datetime | None = None,
+        cursor_id: int | None = None,
     ) -> list[VenmoConfirmationRequest]:
+        conditions = []
+        if cursor_created_at is not None and cursor_id is not None:
+            conditions.append(
+                or_(
+                    VenmoConfirmationRequest.created_at < cursor_created_at,
+                    and_(
+                        VenmoConfirmationRequest.created_at == cursor_created_at,
+                        VenmoConfirmationRequest.id < cursor_id,
+                    ),
+                )
+            )
         statement = (
             select(VenmoConfirmationRequest)
+            .where(*conditions)
             .order_by(
                 VenmoConfirmationRequest.created_at.desc(),
                 VenmoConfirmationRequest.id.desc(),
             )
             .limit(limit)
-            .offset(offset)
         )
         return list((await self._session.scalars(statement)).all())
 

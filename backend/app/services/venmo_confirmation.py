@@ -55,6 +55,19 @@ class VenmoConfirmationTelegramActionResult:
     attempt_id: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class VenmoConfirmationCursor:
+    created_at: datetime
+    row_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class VenmoConfirmationRequestPage:
+    items: list[VenmoConfirmationRequest]
+    has_more: bool
+    next_cursor: str | None
+
+
 class VenmoConfirmationService(ApplicationService):
     """Data-layer operations for Venmo confirmation workflows."""
 
@@ -419,15 +432,34 @@ class VenmoConfirmationService(ApplicationService):
         *,
         actor: User,
         limit: int = 50,
-        offset: int = 0,
-    ) -> list[VenmoConfirmationRequest]:
+        cursor: str | None = None,
+    ) -> VenmoConfirmationRequestPage:
+        parsed_cursor = self._parse_request_cursor(cursor)
+        query_limit = limit + 1
         if actor.role == UserRole.ADMIN:
-            return await self._repository.list_requests(limit=limit, offset=offset)
-        coadmin_id = self._actor_coadmin_id(actor)
-        return await self._repository.list_requests_for_coadmin(
-            coadmin_id,
-            limit=limit,
-            offset=offset,
+            requests = await self._repository.list_requests(
+                limit=query_limit,
+                cursor_created_at=parsed_cursor.created_at if parsed_cursor else None,
+                cursor_id=parsed_cursor.row_id if parsed_cursor else None,
+            )
+        else:
+            coadmin_id = self._actor_coadmin_id(actor)
+            requests = await self._repository.list_requests_for_coadmin(
+                coadmin_id,
+                limit=query_limit,
+                cursor_created_at=parsed_cursor.created_at if parsed_cursor else None,
+                cursor_id=parsed_cursor.row_id if parsed_cursor else None,
+            )
+        has_more = len(requests) > limit
+        items = requests[:limit]
+        next_cursor = None
+        if has_more and items:
+            last = items[-1]
+            next_cursor = self._next_request_cursor(last.created_at, last.id)
+        return VenmoConfirmationRequestPage(
+            items=items,
+            has_more=has_more,
+            next_cursor=next_cursor,
         )
 
     async def get_request_for_actor(
@@ -764,6 +796,21 @@ class VenmoConfirmationService(ApplicationService):
         if actor.role == UserRole.STAFF and actor.coadmin_id == coadmin_id:
             return
         raise VenmoConfirmationAuthorizationError("Venmo confirmation is not accessible.")
+
+    @staticmethod
+    def _parse_request_cursor(cursor: str | None) -> VenmoConfirmationCursor | None:
+        if not cursor:
+            return None
+        try:
+            raw_created_at, raw_row_id = cursor.split("|", 1)
+            created_at = datetime.fromisoformat(raw_created_at)
+            return VenmoConfirmationCursor(created_at=created_at, row_id=int(raw_row_id))
+        except (TypeError, ValueError) as error:
+            raise VenmoConfirmationStateConflictError("Invalid cursor.") from error
+
+    @staticmethod
+    def _next_request_cursor(created_at: datetime, row_id: int) -> str:
+        return f"{created_at.isoformat()}|{row_id}"
 
 
 async def _answer_gateway_callback(

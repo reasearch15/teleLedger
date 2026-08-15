@@ -57,6 +57,8 @@ const listResponse: VenmoConfirmationListResponse = {
       media: null,
     },
   ],
+  has_more: false,
+  next_cursor: null,
 };
 
 describe("VenmoConfirmationsPage", () => {
@@ -104,6 +106,8 @@ describe("VenmoConfirmationsPage", () => {
           confirmed_at: null,
         },
       ],
+      has_more: false,
+      next_cursor: null,
     });
 
     render(<VenmoConfirmationsPage />);
@@ -126,7 +130,11 @@ describe("VenmoConfirmationsPage", () => {
       "Something went wrong. Please try again.",
     );
 
-    vi.mocked(listVenmoConfirmations).mockResolvedValueOnce({ items: [] });
+    vi.mocked(listVenmoConfirmations).mockResolvedValueOnce({
+      items: [],
+      has_more: false,
+      next_cursor: null,
+    });
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
     await waitFor(() =>
@@ -139,7 +147,11 @@ describe("VenmoConfirmationsPage", () => {
   });
 
   it("shows New Confirmation on an empty list and submits image evidence", async () => {
-    vi.mocked(listVenmoConfirmations).mockResolvedValueOnce({ items: [] });
+    vi.mocked(listVenmoConfirmations).mockResolvedValueOnce({
+      items: [],
+      has_more: false,
+      next_cursor: null,
+    });
     vi.mocked(createVenmoConfirmation).mockResolvedValue({
       ...listResponse.items[0],
       id: 88,
@@ -177,5 +189,47 @@ describe("VenmoConfirmationsPage", () => {
     ));
     expect(await screen.findByText("Confirmation request #88 created.")).toBeInTheDocument();
     expect(await screen.findByText("Request #88")).toBeInTheDocument();
+  });
+
+  it("loads additional confirmation requests in cursor batches", async () => {
+    vi.mocked(listVenmoConfirmations)
+      .mockResolvedValueOnce({
+        items: [listResponse.items[0]],
+        has_more: true,
+        next_cursor: "2026-07-15T15:45:00Z|77",
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            ...listResponse.items[0],
+            id: 76,
+            payment_note: "Older reference",
+          },
+          {
+            ...listResponse.items[0],
+            id: 77,
+            payment_note: "Duplicate skipped",
+          },
+        ],
+        has_more: false,
+        next_cursor: null,
+      });
+
+    render(<VenmoConfirmationsPage />);
+
+    expect(await screen.findByText("Request #77")).toBeInTheDocument();
+    const loadMore = await screen.findByRole("button", { name: "Load More" });
+    fireEvent.click(loadMore);
+
+    expect(await screen.findByText("Request #76")).toBeInTheDocument();
+    expect(screen.getAllByText("Request #77")).toHaveLength(1);
+    expect(listVenmoConfirmations).toHaveBeenNthCalledWith(1, { limit: 30 });
+    expect(listVenmoConfirmations).toHaveBeenNthCalledWith(2, {
+      limit: 30,
+      cursor: "2026-07-15T15:45:00Z|77",
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Load More" })).not.toBeInTheDocument(),
+    );
   });
 });

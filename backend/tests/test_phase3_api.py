@@ -438,6 +438,57 @@ async def test_staff_can_create_generic_confirmation_with_image_and_note(
 
 
 @pytest.mark.asyncio
+async def test_venmo_confirmation_list_uses_cursor_pagination() -> None:
+    timestamp = datetime(2026, 7, 15, 15, 45)
+    async with TestSessionFactory() as session:
+        session.add(
+            MediaAsset(
+                id=10,
+                coadmin_id=10,
+                storage_key="evidence/page.png",
+                original_filename="page.png",
+                mime_type="image/png",
+                size_bytes=10,
+                checksum_sha256="c" * 64,
+                created_by_user_id=42,
+            )
+        )
+        session.add_all(
+            [
+                VenmoConfirmationRequest(
+                    id=request_id,
+                    coadmin_id=10,
+                    requested_by_staff_id=42,
+                    screenshot_media_asset_id=10,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+                for request_id in range(1, 36)
+            ]
+        )
+        await session.commit()
+
+    async with api_client_for(STAFF) as client:
+        first = await client.get("/api/venmo-confirmations")
+        first_body = first.json()
+        second = await client.get(
+            "/api/venmo-confirmations",
+            params={"cursor": first_body["next_cursor"]},
+        )
+
+    assert first.status_code == 200
+    assert [item["id"] for item in first_body["items"]] == list(range(35, 5, -1))
+    assert first_body["has_more"] is True
+    assert first_body["next_cursor"].endswith("|6")
+
+    assert second.status_code == 200
+    second_body = second.json()
+    assert [item["id"] for item in second_body["items"]] == [5, 4, 3, 2, 1]
+    assert second_body["has_more"] is False
+    assert second_body["next_cursor"] is None
+
+
+@pytest.mark.asyncio
 async def test_coadmin_can_create_confirmation_without_payment_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

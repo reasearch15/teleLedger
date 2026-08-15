@@ -126,6 +126,8 @@ class VenmoRequestDetailResponse(VenmoRequestSummaryResponse):
 
 class VenmoRequestListResponse(BaseModel):
     items: list[VenmoRequestSummaryResponse]
+    has_more: bool
+    next_cursor: str | None
 
 
 @router.post("", response_model=VenmoRequestDetailResponse, status_code=status.HTTP_201_CREATED)
@@ -176,21 +178,23 @@ async def create_venmo_confirmation(
 async def list_venmo_confirmations(
     session: DatabaseSession,
     current_user: CurrentUser,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    cursor: str | None = None,
 ) -> VenmoRequestListResponse:
     service = VenmoConfirmationService(session)
     try:
-        requests = await service.list_requests_for_actor(
+        page = await service.list_requests_for_actor(
             actor=current_user,
             limit=limit,
-            offset=offset,
+            cursor=cursor,
         )
-    except VenmoConfirmationAuthorizationError as error:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
-    usernames = await _usernames(session, requests)
+    except Exception as error:
+        _raise_venmo_error(error)
+    usernames = await _usernames(session, page.items)
     return VenmoRequestListResponse(
-        items=[_serialize_summary(request, usernames=usernames) for request in requests]
+        items=[_serialize_summary(request, usernames=usernames) for request in page.items],
+        has_more=page.has_more,
+        next_cursor=page.next_cursor,
     )
 
 
