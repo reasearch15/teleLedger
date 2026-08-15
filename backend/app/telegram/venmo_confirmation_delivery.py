@@ -47,6 +47,61 @@ class VenmoConfirmationDeliveryResult:
     last_error: str | None = None
 
 
+def classify_legacy_venmo_delivery_error(error_text: str | None) -> str:
+    """Classify stored legacy send errors without retrying unknown failures."""
+    if not error_text:
+        return TelegramBotFailureClass.NON_RETRYABLE.value
+    normalized = error_text.casefold()
+    permanent_markers = (
+        "bad request",
+        "chat not found",
+        "forbidden",
+        "bot was blocked",
+        "bot was kicked",
+        "not enough rights",
+        "unauthorized",
+        "invalid token",
+        "malformed",
+        "wrong file identifier",
+        "file is too big",
+        "telegram_cashout_group_id is required",
+        "telegram_bot_token is required",
+        "media is not available",
+    )
+    if any(marker in normalized for marker in permanent_markers):
+        if any(marker in normalized for marker in ("unauthorized", "forbidden", "token")):
+            return TelegramBotFailureClass.CONFIGURATION.value
+        return TelegramBotFailureClass.NON_RETRYABLE.value
+    retryable_markers = (
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "temporary failure",
+        "transport error",
+        "network",
+        "connection reset",
+        "connection aborted",
+        "socket",
+        "dns",
+        "name resolution",
+        "rate limit",
+        "rate limited",
+        "too many requests",
+        "retry_after",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        " 500",
+        " 502",
+        " 503",
+        " 504",
+    )
+    if any(marker in normalized for marker in retryable_markers):
+        return TelegramBotFailureClass.RETRYABLE.value
+    return TelegramBotFailureClass.NON_RETRYABLE.value
+
+
 async def send_confirmation_attempt_with_retries(
     *,
     service: VenmoConfirmationService,

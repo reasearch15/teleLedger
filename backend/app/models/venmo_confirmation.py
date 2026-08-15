@@ -63,6 +63,7 @@ class VenmoConfirmationEventType(StrEnum):
     RESEND_POSTED = "resend_posted"
     PAYMENT_SCREENSHOT_UPLOADED = "payment_screenshot_uploaded"
     FAILURE = "failure"
+    LEGACY_RECOVERY = "legacy_recovery"
 
 
 class VenmoConfirmationRequest(Base):
