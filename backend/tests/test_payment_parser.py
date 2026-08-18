@@ -3,7 +3,11 @@ from decimal import Decimal
 
 import pytest
 
-from app.parser.payment import UNKNOWN_RECIPIENT_TAG, parse_payment_message
+from app.parser.payment import (
+    CHIME_PAYMENT_METHOD,
+    UNKNOWN_RECIPIENT_TAG,
+    parse_payment_message,
+)
 
 VALID_PAYMENT_MESSAGE = """Hi Stephen_Mckinney_21,
 
@@ -207,3 +211,133 @@ You received $10.0 from Emily S.
     assert parsed is not None
     assert parsed.total_in == Decimal("517.7")
     assert parsed.total_out == Decimal("0")
+
+
+def _chime_notification(
+    *,
+    amount: str,
+    name: str,
+    received_at: str = "18 Aug 2026, 6:17 AM",
+    header: str = "",
+    title: str = "🟢 New Chime Payment",
+    amount_label: str = "💵 Amount Received",
+    name_label: str = "👤 Payment Name",
+    received_label: str = "🕘 Received At",
+) -> str:
+    prefix = f"{header.strip()}\n\n" if header.strip() else ""
+    return (
+        f"{prefix}{title}\n"
+        f"\n"
+        f"{amount_label}: {amount}\n"
+        f"{name_label}: {name}\n"
+        f"{received_label}: {received_at}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("amount", "name", "expected_amount"),
+    [
+        ("$5.00", "mariah f.", Decimal("5.00")),
+        ("$10.00", "Calvin M.", Decimal("10.00")),
+        ("$20.00", "Calvin M.", Decimal("20.00")),
+        ("$16.50", "Calvin M.", Decimal("16.50")),
+        ("$10.72", "Edward M.", Decimal("10.72")),
+        ("$15.00", "Cayce P.", Decimal("15.00")),
+        ("$4.98", "Kayla W.", Decimal("4.98")),
+    ],
+)
+def test_new_chime_notification_amounts_and_names(
+    amount: str,
+    name: str,
+    expected_amount: Decimal,
+) -> None:
+    parsed = parse_payment_message(_chime_notification(amount=amount, name=name))
+
+    assert parsed is not None
+    assert parsed.amount == expected_amount
+    assert parsed.payment_sender_name == name
+    assert parsed.payment_method == CHIME_PAYMENT_METHOD
+    assert parsed.recipient_tag == UNKNOWN_RECIPIENT_TAG
+    assert parsed.payment_datetime == datetime(2026, 8, 18, 6, 17)
+    assert parsed.total_in is None
+    assert parsed.total_out is None
+
+
+def test_new_chime_notification_with_lulla_header() -> None:
+    parsed = parse_payment_message(
+        _chime_notification(
+            amount="$5.00",
+            name="Calvin M.",
+            header="Lulla Cash In",
+        )
+    )
+
+    assert parsed is not None
+    assert parsed.amount == Decimal("5.00")
+    assert parsed.payment_sender_name == "Calvin M."
+    assert parsed.payment_method == CHIME_PAYMENT_METHOD
+
+
+def test_new_chime_notification_whitespace_and_missing_emoji() -> None:
+    message = """
+    Lulla Cash In
+
+    New Chime Payment
+
+    Amount   Received :  $16.50
+    Payment  Name:   Calvin M.
+    Received  At : 18 Aug 2026, 6:40 AM
+    """
+
+    parsed = parse_payment_message(message)
+
+    assert parsed is not None
+    assert parsed.amount == Decimal("16.50")
+    assert parsed.payment_sender_name == "Calvin M."
+    assert parsed.payment_datetime == datetime(2026, 8, 18, 6, 40)
+
+
+def test_new_chime_notification_clock_emoji_variants() -> None:
+    parsed = parse_payment_message(
+        _chime_notification(
+            amount="$10.72",
+            name="Edward M.",
+            received_at="18 Aug 2026, 7:17 AM",
+            received_label="🕒 Received At",
+        )
+    )
+
+    assert parsed is not None
+    assert parsed.amount == Decimal("10.72")
+    assert parsed.payment_datetime == datetime(2026, 8, 18, 7, 17)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        _chime_notification(amount="$not-a-number", name="Calvin M."),
+        _chime_notification(amount="$10.999", name="Calvin M."),
+        _chime_notification(amount="$", name="Calvin M."),
+        """🟢 New Chime Payment
+
+💵 Amount Received: $5.00
+🕘 Received At: 18 Aug 2026, 6:17 AM
+""",
+        """🟢 New Chime Payment
+
+💵 Amount Received: $5.00
+👤 Payment Name:
+🕘 Received At: 18 Aug 2026, 6:17 AM
+""",
+        """🟢 New Chime Payment
+
+👤 Payment Name: Calvin M.
+🕘 Received At: 18 Aug 2026, 6:17 AM
+""",
+        "Hi team, are we ready for today's reconciliation?",
+        "Lulla Cash In posted in the cash-in group.",
+        "Amount Received: $5.00 from someone in chat.",
+    ],
+)
+def test_new_chime_notification_rejects_incomplete_or_unrelated(message: str) -> None:
+    assert parse_payment_message(message) is None

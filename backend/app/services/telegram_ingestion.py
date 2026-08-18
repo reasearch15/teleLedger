@@ -108,7 +108,12 @@ class TelegramIngestionService(ApplicationService):
             # themselves when a later Telegram edit or backfill sees payment text.
             parsed = parse_payment_message(message.raw_text)
             if parsed is None:
-                if "you received" in message.raw_text.lower():
+                raw_lower = message.raw_text.lower()
+                if (
+                    "you received" in raw_lower
+                    or "new chime payment" in raw_lower
+                    or "amount received" in raw_lower
+                ):
                     logger.warning(
                         "telegram_payment_like_message_rejected",
                         extra={

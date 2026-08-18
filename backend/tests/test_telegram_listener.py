@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -33,6 +34,13 @@ You received $36.28 from Krista R.
 03:08 PM - 29 Jun 2026
 Total In: 5709.59$
 Total Out: 1881.66$"""
+
+CHIME_PAYMENT_MESSAGE = """🟢 New Chime Payment
+
+💵 Amount Received: $10.72
+👤 Payment Name: Edward M.
+🕘 Received At: 18 Aug 2026, 7:17 AM
+"""
 
 test_engine = create_async_engine(
     "sqlite+aiosqlite://",
@@ -152,6 +160,29 @@ async def test_duplicate_event_does_not_create_duplicate_rows(
     assert await row_counts() == (1, 1)
     assert "telegram_duplicate_skipped" in caplog.messages
     assert reports[-1] == "Message 103: duplicate skipped"
+
+
+@pytest.mark.asyncio
+async def test_chime_payment_event_is_idempotent_on_duplicate_update(
+    caplog: LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.telegram.events")
+    reports: list[str] = []
+    handler = create_new_message_handler(ingest_message, reports.append)
+    event = MockTelethonEvent(203, CHIME_PAYMENT_MESSAGE)
+
+    await handler(event)
+    await handler(event)
+
+    assert await row_counts() == (1, 1)
+    assert "telegram_payment_parsed" in caplog.messages
+    assert "telegram_duplicate_skipped" in caplog.messages
+    async with TestSessionFactory() as session:
+        payment = await session.scalar(select(PaymentEvent))
+        assert payment is not None
+        assert payment.amount == Decimal("10.72")
+        assert payment.payment_sender_name == "Edward M."
+        assert payment.payment_datetime == datetime(2026, 8, 18, 7, 17)
 
 
 @pytest.mark.asyncio
