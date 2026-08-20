@@ -183,7 +183,8 @@ class InquiryService(ApplicationService):
             raise InquiryAuthorizationError("Staff access required")
 
     def _cashout_chat_id(self) -> int:
-        chat_id = self._settings.shared_telegram_supergroup_id
+        """Inquiry chat follows the cashout group, not the Venmo confirmation group."""
+        chat_id = self._settings.telegram_cashout_group_id
         if chat_id is None:
             raise InquiryValidationError("Inquiry delivery channel is not configured")
         normalized = normalize_telegram_chat_id(chat_id)

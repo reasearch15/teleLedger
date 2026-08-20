@@ -26,7 +26,6 @@ from app.services.venmo_confirmation import (
 from app.services.workflow_settings import (
     WorkflowSettingsAuthorizationError,
     WorkflowSettingsService,
-    WorkflowSettingsValidationError,
 )
 
 test_engine = create_async_engine(
@@ -123,16 +122,18 @@ async def test_coadmin_telegram_settings_are_scoped_by_owner() -> None:
 
 
 @pytest.mark.asyncio
-async def test_coadmin_telegram_settings_reject_split_workflow_groups() -> None:
+async def test_coadmin_telegram_settings_allow_split_workflow_groups() -> None:
     async with TestSessionFactory() as session, session.begin():
         service = WorkflowSettingsService(session)
-        with pytest.raises(WorkflowSettingsValidationError):
-            await service.upsert_for_coadmin(
-                coadmin_id=10,
-                cashout_group_id=-1001,
-                venmo_confirmation_group_id=-1002,
-                actor=ADMIN,
-            )
+        stored = await service.upsert_for_coadmin(
+            coadmin_id=10,
+            cashout_group_id=-1001,
+            venmo_confirmation_group_id=-1002,
+            actor=ADMIN,
+        )
+
+    assert stored.cashout_group_id == -1001
+    assert stored.venmo_confirmation_group_id == -1002
 
 
 @pytest.mark.asyncio

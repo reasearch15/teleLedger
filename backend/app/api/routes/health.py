@@ -98,8 +98,8 @@ async def _database_ready() -> ReadinessCheck:
 def _telegram_workflow_config_ready() -> ReadinessCheck:
     settings = get_settings()
     missing = []
-    if settings.shared_telegram_supergroup_id is None:
-        missing.append("shared_supergroup_id")
+    if settings.telegram_cashout_group_id is None:
+        missing.append("cashout_group_id")
     if settings.telegram_bot_token is None:
         missing.append("bot_token")
     if missing:

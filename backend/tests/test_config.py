@@ -26,7 +26,7 @@ async def test_enabled_listener_requires_cashout_group_id(
 
     with pytest.raises(
         RuntimeError,
-        match="TELEGRAM_CASHOUT_GROUP_ID is required for the shared cashout/Venmo supergroup",
+        match="TELEGRAM_CASHOUT_GROUP_ID is required for cashout Telegram delivery",
     ):
         await run_listener.run_listener(report=lambda _: None)
     run_listener.get_settings.cache_clear()
@@ -57,3 +57,37 @@ def test_cashout_group_id_accepts_supergroup_integer(
     assert settings.telegram_group_id == -1001234567890
     assert settings.telegram_cashout_group_id == -1009876543210
     assert settings.shared_telegram_supergroup_id == -1009876543210
+    assert settings.telegram_venmo_group_id is None
+    assert settings.resolved_venmo_telegram_group_id == -1009876543210
+    assert settings.venmo_group_falls_back_to_cashout is True
+
+
+def test_venmo_group_id_is_independent_of_cashout_and_payment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_enabled_telegram_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-1009876543210")
+    monkeypatch.setenv("TELEGRAM_VENMO_GROUP_ID", "-5198735527")
+
+    settings = Settings()
+
+    assert settings.telegram_group_id == -1001234567890
+    assert settings.telegram_cashout_group_id == -1009876543210
+    assert settings.telegram_venmo_group_id == -5198735527
+    assert settings.resolved_venmo_telegram_group_id == -5198735527
+    assert settings.venmo_group_falls_back_to_cashout is False
+    assert settings.telegram_group_target == -1001234567890
+
+
+def test_blank_venmo_group_id_falls_back_to_cashout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_enabled_telegram_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-1009876543210")
+    monkeypatch.setenv("TELEGRAM_VENMO_GROUP_ID", "")
+
+    settings = Settings()
+
+    assert settings.telegram_venmo_group_id is None
+    assert settings.resolved_venmo_telegram_group_id == -1009876543210
+    assert settings.venmo_group_falls_back_to_cashout is True

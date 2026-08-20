@@ -36,7 +36,11 @@ from app.telegram.cashout_bot.messages import (
     format_completed_cashout_message,
     format_partial_prompt_message,
 )
-from app.telegram.peer_ids import chat_ids_equivalent, normalize_telegram_chat_id
+from app.telegram.peer_ids import (
+    authorize_configured_or_persisted_chat,
+    chat_ids_equivalent,
+    normalize_telegram_chat_id,
+)
 
 logger = get_logger(__name__)
 
@@ -530,10 +534,11 @@ class CashoutTelegramService:
         if cashout.coadmin_id is None:
             raise CashoutAuthorizationError("cashout missing coadmin")
 
-        expected_chat_id = await self._expected_chat_for_coadmin(cashout.coadmin_id)
-        if expected_chat_id is None or not chat_ids_equivalent(
-            normalized_chat,
-            expected_chat_id,
+        configured_chat_id = await self._expected_chat_for_coadmin(cashout.coadmin_id)
+        if not authorize_configured_or_persisted_chat(
+            incoming_chat_id=normalized_chat,
+            configured_chat_id=configured_chat_id,
+            persisted_chat_id=cashout.telegram_chat_id,
         ):
             raise CashoutAuthorizationError("wrong group")
 
@@ -546,14 +551,14 @@ class CashoutTelegramService:
         return _CallbackContext(
             cashout=cashout,
             coadmin_id=cashout.coadmin_id,
-            expected_chat_id=expected_chat_id,
+            expected_chat_id=normalized_chat,
         )
 
     async def _expected_chat_for_coadmin(self, coadmin_id: int) -> int | None:
         settings_row = await self._workflow.get_for_coadmin(coadmin_id)
         if settings_row is not None and settings_row.cashout_group_id is not None:
             return normalize_telegram_chat_id(settings_row.cashout_group_id)
-        return normalize_telegram_chat_id(get_settings().shared_telegram_supergroup_id)
+        return normalize_telegram_chat_id(get_settings().telegram_cashout_group_id)
 
     async def sync_terminal_task(
         self,

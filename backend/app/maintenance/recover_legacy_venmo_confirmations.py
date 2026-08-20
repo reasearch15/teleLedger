@@ -140,7 +140,7 @@ async def _find_local_reconciled_message(
     request_id: int,
     attempt_number: int,
 ) -> InquiryMessage | None:
-    chat_id = normalize_telegram_chat_id(get_settings().shared_telegram_supergroup_id)
+    chat_id = normalize_telegram_chat_id(get_settings().resolved_venmo_telegram_group_id)
     if chat_id is None:
         return None
     request_marker = f"Confirmation request #{request_id}"
@@ -255,8 +255,8 @@ def _skip_reason(
     classification: str,
     now: datetime,
 ) -> str | None:
-    if normalize_telegram_chat_id(get_settings().shared_telegram_supergroup_id) is None:
-        return "shared_telegram_supergroup_not_configured"
+    if normalize_telegram_chat_id(get_settings().resolved_venmo_telegram_group_id) is None:
+        return "venmo_telegram_group_not_configured"
     if coadmin.role != UserRole.COADMIN or not coadmin.is_active:
         return "coadmin_inactive_or_invalid"
     if request.status != VenmoConfirmationStatus.PENDING or request.confirmed_at is not None:

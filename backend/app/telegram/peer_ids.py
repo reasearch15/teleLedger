@@ -36,6 +36,29 @@ def chat_ids_equivalent(left: int | None, right: int | None) -> bool:
     return normalize_telegram_chat_id(left) == normalize_telegram_chat_id(right)
 
 
+def authorize_configured_or_persisted_chat(
+    *,
+    incoming_chat_id: int | None,
+    configured_chat_id: int | None,
+    persisted_chat_id: int | None,
+) -> bool:
+    """Authorize a callback chat without allowing arbitrary groups.
+
+    If the record already has a stored posting chat, the incoming callback
+    must match that stored identity so outstanding legacy messages remain
+    usable after the configured destination changes. New records without a
+    stored chat are accepted only from the current configured group.
+    """
+    incoming = normalize_telegram_chat_id(incoming_chat_id)
+    if incoming is None:
+        return False
+    persisted = normalize_telegram_chat_id(persisted_chat_id)
+    if persisted is not None:
+        return persisted == incoming
+    configured = normalize_telegram_chat_id(configured_chat_id)
+    return configured is not None and configured == incoming
+
+
 def marked_channel_id(channel_id: int) -> int:
     """Build a marked channel/supergroup ID from a bare channel ID."""
     if channel_id < 0:

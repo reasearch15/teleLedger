@@ -636,9 +636,9 @@ async def _delete_cancelled_cashout_telegram_message(
         from telethon.tl import types  # type: ignore[import-untyped]
 
         from app.telegram.client import create_telegram_client
-        delete_chat_id = chat_id if chat_id is not None else settings.shared_telegram_supergroup_id
+        delete_chat_id = chat_id if chat_id is not None else settings.telegram_cashout_group_id
         if delete_chat_id is None:
-            error = "missing_shared_supergroup_id"
+            error = "missing_cashout_group_id"
             logger.warning(
                 "cashout_telegram_delete_failed",
                 extra={

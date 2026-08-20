@@ -154,6 +154,8 @@ TELEGRAM_SESSION_NAME=telegram-ledger
 TELEGRAM_GROUP_USERNAME=@your_group_username
 # Or use TELEGRAM_GROUP_ID=-1001234567890 instead.
 TELEGRAM_CASHOUT_GROUP_ID=-1009876543210
+# Optional. When unset, Venmo confirmations fall back to TELEGRAM_CASHOUT_GROUP_ID.
+TELEGRAM_VENMO_GROUP_ID=-1009876543211
 TELEGRAM_ENABLED=true
 TELEGRAM_BACKFILL_LIMIT=500
 # Completion reactions (comma-separated). Use * or any for legacy "any reaction".
@@ -167,10 +169,16 @@ Set exactly one payment group selector:
 - `TELEGRAM_GROUP_USERNAME` is the public group username, including `@`.
 - `TELEGRAM_GROUP_ID` is the full Telegram chat ID, normally beginning with `-100`.
 
-Set `TELEGRAM_CASHOUT_GROUP_ID` to the separate cashout Telegram group ID. Cashout
-requests are sent only to this group, and cashout completion reactions are accepted
-only from this group. If it is missing while the listener is enabled, startup fails
+Set `TELEGRAM_CASHOUT_GROUP_ID` to the cashout Telegram group ID. Cashout
+requests, claim/full/partial/done/cancel buttons, and the inquiry chat panel
+use this group. If it is missing while the listener is enabled, startup fails
 instead of falling back to the payment group.
+
+Set `TELEGRAM_VENMO_GROUP_ID` to the Venmo screenshot confirmation group.
+Venmo photo delivery and Confirm / Not Received callbacks use this group.
+If it is unset, Venmo temporarily falls back to `TELEGRAM_CASHOUT_GROUP_ID`
+and the listener logs that fallback. This does not change `TELEGRAM_GROUP_ID`,
+which remains the Chime/payment source listener.
 
 `CASHOUT_COMPLETION_REACTIONS` controls which Telegram reactions mark a cashout
 completed (default `✅,👍`). Set to `*` or `any` to accept any active reaction.
@@ -193,6 +201,7 @@ the group by title, copy its full marked ID, then update `backend/.env`:
 TELEGRAM_GROUP_ID=-1001234567890
 # TELEGRAM_GROUP_USERNAME must be removed or commented out.
 TELEGRAM_CASHOUT_GROUP_ID=-1009876543210
+TELEGRAM_VENMO_GROUP_ID=-1009876543211
 ```
 
 Configured payment ID or username matches are marked with `>>> TARGET GROUP`. Use

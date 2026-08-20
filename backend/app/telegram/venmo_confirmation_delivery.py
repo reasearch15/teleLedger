@@ -68,6 +68,7 @@ def classify_legacy_venmo_delivery_error(error_text: str | None) -> str:
         "wrong file identifier",
         "file is too big",
         "telegram_cashout_group_id is required",
+        "telegram_venmo_group_id is required",
         "telegram_bot_token is required",
         "media is not available",
     )
@@ -118,12 +119,16 @@ async def send_confirmation_attempt_with_retries(
     jitter_ratio: float = 0.2,
     stop_after_scheduling_retry: bool = False,
 ) -> VenmoConfirmationDeliveryResult:
-    chat_id = normalize_telegram_chat_id(get_settings().shared_telegram_supergroup_id)
+    settings = get_settings()
+    chat_id = normalize_telegram_chat_id(settings.resolved_venmo_telegram_group_id)
     if chat_id is None:
         await service.mark_attempt_failed(
             attempt_id=attempt.id,
             coadmin_id=request.coadmin_id,
-            error="TELEGRAM_CASHOUT_GROUP_ID is required to send confirmation requests.",
+            error=(
+                "TELEGRAM_VENMO_GROUP_ID or TELEGRAM_CASHOUT_GROUP_ID is required "
+                "to send confirmation requests."
+            ),
         )
         logger.error(
             "venmo_confirmation_delivery_configuration_failed",
@@ -165,8 +170,24 @@ async def send_confirmation_attempt_with_retries(
         try:
             logger.info(
                 "venmo_confirmation_delivery_send_started",
-                extra=_log_extra(request, attempt, retry_number=retry_index),
+                extra={
+                    **_log_extra(request, attempt, retry_number=retry_index),
+                    "telegram_chat_id": chat_id,
+                    "venmo_group_fallback_to_cashout": (
+                        settings.venmo_group_falls_back_to_cashout
+                    ),
+                },
             )
+            if retry_index == 0 and settings.venmo_group_falls_back_to_cashout:
+                logger.warning(
+                    "venmo_telegram_group_falling_back_to_cashout_group",
+                    extra={
+                        "telegram_chat_id": chat_id,
+                        "venmo_confirmation_request_id": request.id,
+                        "venmo_confirmation_attempt_id": attempt.id,
+                        "venmo_group_fallback_to_cashout": True,
+                    },
+                )
             async with gateway_factory() as gateway:
                 message_id = await gateway.send_photo(
                     chat_id=chat_id,

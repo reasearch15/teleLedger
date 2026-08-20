@@ -52,13 +52,22 @@ def _print_startup_configuration(
         )
     else:
         report("  Payment group configured: no")
-    if settings.shared_telegram_supergroup_id is not None:
+    if settings.telegram_cashout_group_id is not None:
+        report(f"  Cashout group configured: yes (ID: {settings.telegram_cashout_group_id})")
+    else:
+        report("  Cashout group configured: no")
+    if settings.telegram_venmo_group_id is not None:
         report(
-            "  Shared cashout/Venmo supergroup configured: yes "
-            f"(ID: {settings.shared_telegram_supergroup_id})"
+            "  Venmo confirmation group configured: yes "
+            f"(ID: {settings.telegram_venmo_group_id})"
+        )
+    elif settings.venmo_group_falls_back_to_cashout:
+        report(
+            "  Venmo confirmation group: FALLBACK to TELEGRAM_CASHOUT_GROUP_ID "
+            f"(ID: {settings.telegram_cashout_group_id})"
         )
     else:
-        report("  Shared cashout/Venmo supergroup configured: no")
+        report("  Venmo confirmation group configured: no")
     report("  Cashout completion reactions: disabled")
     report(f"  Cashout bot configured: {'yes' if settings.telegram_bot_token else 'no'}")
 
@@ -79,14 +88,27 @@ async def run_listener(report: TerminalReporter = print) -> None:
         raise RuntimeError(
             "TELEGRAM_GROUP_ID or TELEGRAM_GROUP_USERNAME is required when the listener is enabled"
         )
-    shared_supergroup_target = settings.shared_telegram_supergroup_id
-    if shared_supergroup_target is None:
+    cashout_group_target = settings.telegram_cashout_group_id
+    if cashout_group_target is None:
         logger.error(
-            "Telegram cashout/Venmo workflow not configured",
-            extra={"reason_ignored": "shared_supergroup_missing"},
+            "Telegram cashout workflow not configured",
+            extra={"reason_ignored": "cashout_group_missing"},
         )
         raise RuntimeError(
-            "TELEGRAM_CASHOUT_GROUP_ID is required for the shared cashout/Venmo supergroup"
+            "TELEGRAM_CASHOUT_GROUP_ID is required for cashout Telegram delivery"
+        )
+    if settings.venmo_group_falls_back_to_cashout:
+        logger.warning(
+            "venmo_telegram_group_falling_back_to_cashout_group",
+            extra={
+                "telegram_chat_id": settings.telegram_cashout_group_id,
+                "venmo_group_fallback_to_cashout": True,
+            },
+        )
+    elif settings.resolved_venmo_telegram_group_id is not None:
+        logger.info(
+            "venmo_telegram_group_configured",
+            extra={"telegram_chat_id": settings.resolved_venmo_telegram_group_id},
         )
     if settings.telegram_bot_token is None:
         logger.error(
@@ -101,7 +123,7 @@ async def run_listener(report: TerminalReporter = print) -> None:
             await _run_listener_session(
                 settings,
                 payment_group_target=payment_group_target,
-                cashout_group_target=shared_supergroup_target,
+                cashout_group_target=cashout_group_target,
                 report=report,
             )
             reconnect_delay = RECONNECT_BASE_SECONDS
@@ -159,7 +181,7 @@ async def _run_listener_session(
             f"{telegram_display_name(payment_group)} (id={telegram_entity_id(payment_group)})"
         )
         report(
-            "Connected shared cashout/Venmo supergroup: "
+            "Connected cashout group: "
             f"{telegram_display_name(cashout_group)} (id={telegram_entity_id(cashout_group)})"
         )
         report(f"Session file: {_session_file_name(settings.telegram_session_name)}")
@@ -252,6 +274,10 @@ async def _run_listener_session(
             extra={
                 "telegram_group": payment_group_chat_id,
                 "cashout_telegram_group": cashout_group_chat_id,
+                "venmo_telegram_group": settings.resolved_venmo_telegram_group_id,
+                "venmo_group_fallback_to_cashout": (
+                    settings.venmo_group_falls_back_to_cashout
+                ),
             },
         )
         await client.run_until_disconnected()

@@ -56,6 +56,6 @@ async def test_readiness_reports_partial_telegram_workflow_config(
     body = response.json()
     assert body["checks"]["telegram_workflow_config"] == {
         "status": "not_configured",
-        "detail": "shared_supergroup_id",
+        "detail": "cashout_group_id",
     }
     assert "123:test-token" not in str(body)

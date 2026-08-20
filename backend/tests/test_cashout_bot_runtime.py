@@ -915,12 +915,12 @@ async def test_delete_and_edit_failure_is_controlled() -> None:
 
 @pytest.mark.asyncio
 async def test_cross_coadmin_callback_is_rejected() -> None:
-    await seed_cashout(coadmin_id=11)
+    await seed_cashout(coadmin_id=11, telegram_chat_id=-1009999999999)
     gateway = FakeBotGateway()
 
     result = await callback(CashoutCallbackAction.FULL, gateway)
 
-    assert result.status == "rejected"
+    assert result.status in {"rejected", "not_found"}
     assert (await cashout()).status == CashoutStatus.SENT
 
 

@@ -79,6 +79,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="TELEGRAM_CASHOUT_GROUP_ID",
     )
+    telegram_venmo_group_id: int | None = Field(
+        default=None,
+        validation_alias="TELEGRAM_VENMO_GROUP_ID",
+    )
     telegram_bot_token: SecretStr | None = Field(
         default=None,
         validation_alias="TELEGRAM_BOT_TOKEN",
@@ -183,6 +187,7 @@ class Settings(BaseSettings):
         "telegram_api_id",
         "telegram_group_id",
         "telegram_cashout_group_id",
+        "telegram_venmo_group_id",
         mode="before",
     )
     @classmethod
@@ -254,12 +259,32 @@ class Settings(BaseSettings):
 
     @property
     def shared_telegram_supergroup_id(self) -> int | None:
-        """Return the configured Cashout + Venmo operational supergroup ID.
+        """Return the cashout Telegram group ID.
 
-        ``TELEGRAM_CASHOUT_GROUP_ID`` is retained for compatibility with the
-        Phase 2 runtime, but it now represents the shared workflow supergroup.
+        Historically this also routed Venmo confirmations. Venmo now uses
+        ``resolved_venmo_telegram_group_id``; this alias remains cashout-only.
         """
         return self.telegram_cashout_group_id
+
+    @property
+    def resolved_venmo_telegram_group_id(self) -> int | None:
+        """Return the Venmo confirmation destination chat ID.
+
+        Uses ``TELEGRAM_VENMO_GROUP_ID`` when set. Otherwise falls back to
+        ``TELEGRAM_CASHOUT_GROUP_ID`` so existing deployments keep working
+        until the Venmo group is configured separately.
+        """
+        if self.telegram_venmo_group_id is not None:
+            return self.telegram_venmo_group_id
+        return self.telegram_cashout_group_id
+
+    @property
+    def venmo_group_falls_back_to_cashout(self) -> bool:
+        """True when Venmo is still sharing the cashout group selector."""
+        return (
+            self.telegram_venmo_group_id is None
+            and self.telegram_cashout_group_id is not None
+        )
 
     @property
     def cashout_completion_reaction_allowlist(self) -> frozenset[str] | None:

@@ -13,7 +13,7 @@ class WorkflowSettingsAuthorizationError(Exception):
 
 
 class WorkflowSettingsValidationError(Exception):
-    """Raised when workflow settings would split the shared Telegram group."""
+    """Raised when workflow settings are invalid."""
 
 
 class WorkflowSettingsService(ApplicationService):
@@ -41,41 +41,20 @@ class WorkflowSettingsService(ApplicationService):
         actor: User,
     ) -> CoadminTelegramWorkflowSettings:
         self._require_admin(actor)
-        shared_supergroup_id = self._resolve_shared_supergroup_id(
-            cashout_group_id,
-            venmo_confirmation_group_id,
-        )
         settings = await self._repository.get_for_coadmin(coadmin_id)
         if settings is None:
             settings = await self._repository.add(
                 CoadminTelegramWorkflowSettings(
                     coadmin_id=coadmin_id,
-                    cashout_group_id=shared_supergroup_id,
-                    venmo_confirmation_group_id=shared_supergroup_id,
+                    cashout_group_id=cashout_group_id,
+                    venmo_confirmation_group_id=venmo_confirmation_group_id,
                 )
             )
         else:
-            settings.cashout_group_id = shared_supergroup_id
-            settings.venmo_confirmation_group_id = shared_supergroup_id
+            settings.cashout_group_id = cashout_group_id
+            settings.venmo_confirmation_group_id = venmo_confirmation_group_id
             await self._session.flush()
         return settings
-
-    @staticmethod
-    def _resolve_shared_supergroup_id(
-        cashout_group_id: int | None,
-        venmo_confirmation_group_id: int | None,
-    ) -> int | None:
-        if (
-            cashout_group_id is not None
-            and venmo_confirmation_group_id is not None
-            and cashout_group_id != venmo_confirmation_group_id
-        ):
-            raise WorkflowSettingsValidationError(
-                "Cashout tasks and Venmo confirmations must use the shared Telegram supergroup."
-            )
-        if cashout_group_id is not None:
-            return cashout_group_id
-        return venmo_confirmation_group_id
 
     @staticmethod
     def _require_admin(actor: User) -> None:

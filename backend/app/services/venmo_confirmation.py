@@ -27,7 +27,11 @@ from app.models.venmo_confirmation import (
 from app.services.base import ApplicationService
 from app.services.notification import NotificationService
 from app.telegram.cashout_bot.api import TelegramBotApiError
-from app.telegram.peer_ids import chat_ids_equivalent, normalize_telegram_chat_id
+from app.telegram.peer_ids import (
+    authorize_configured_or_persisted_chat,
+    chat_ids_equivalent,
+    normalize_telegram_chat_id,
+)
 from app.telegram.venmo_confirmation import (
     VenmoConfirmationCallbackAction,
     decode_venmo_confirmation_callback,
@@ -259,6 +263,15 @@ class VenmoConfirmationService(ApplicationService):
             return None
         if attempt.telegram_message_id is not None:
             return attempt
+        configured_chat_id = normalize_telegram_chat_id(
+            get_settings().resolved_venmo_telegram_group_id
+        )
+        if not authorize_configured_or_persisted_chat(
+            incoming_chat_id=telegram_chat_id,
+            configured_chat_id=configured_chat_id,
+            persisted_chat_id=attempt.telegram_chat_id,
+        ):
+            return None
         return await self.mark_attempt_posted(
             attempt_id=attempt.id,
             coadmin_id=request.coadmin_id,
@@ -324,11 +337,14 @@ class VenmoConfirmationService(ApplicationService):
                 status="not_found",
                 attempt_id=attempt_id,
             )
-        expected_chat_id = normalize_telegram_chat_id(get_settings().shared_telegram_supergroup_id)
+        configured_chat_id = normalize_telegram_chat_id(
+            get_settings().resolved_venmo_telegram_group_id
+        )
         normalized_chat_id = normalize_telegram_chat_id(telegram_chat_id)
-        if expected_chat_id is None or not chat_ids_equivalent(
-            normalized_chat_id,
-            expected_chat_id,
+        if not authorize_configured_or_persisted_chat(
+            incoming_chat_id=normalized_chat_id,
+            configured_chat_id=configured_chat_id,
+            persisted_chat_id=attempt.telegram_chat_id,
         ):
             await _answer_gateway_callback(
                 gateway,
