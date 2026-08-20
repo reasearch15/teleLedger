@@ -213,6 +213,7 @@ class CashoutService(ApplicationService):
             LiveEventType.CASHOUT_NOTES_UPDATED,
             cashout_id=cashout.id,
         )
+        await _sync_cashout_telegram_from_persisted_state(cashout)
         return cashout
 
     async def complete(self, cashout_id: int, actor: User) -> CashoutRequest:
@@ -588,6 +589,39 @@ class CashoutService(ApplicationService):
             f"{staff_id}:{idempotency_key}".encode()
         ).digest()
         return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1) or 1
+
+
+async def _sync_cashout_telegram_from_persisted_state(cashout: CashoutRequest) -> None:
+    """Best-effort Telegram rebuild after a canonical DB change such as notes."""
+    if cashout.telegram_chat_id is None or cashout.telegram_message_id is None:
+        return
+    try:
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        if settings.telegram_bot_token is None:
+            return
+        from app.db.session import SessionFactory
+        from app.services.cashout_telegram import CashoutTelegramService
+        from app.telegram.cashout_bot.api import TelegramBotApiGateway
+
+        async with TelegramBotApiGateway() as gateway:
+            async with SessionFactory() as session:
+                attached = await session.get(CashoutRequest, cashout.id)
+                if attached is None:
+                    return
+                await CashoutTelegramService(session, gateway=gateway).sync_persisted_task(
+                    attached
+                )
+    except Exception:
+        logger.exception(
+            "cashout_telegram_notes_sync_failed",
+            extra={
+                "cashout_request_id": cashout.id,
+                "telegram_chat_id": cashout.telegram_chat_id,
+                "telegram_message_id": cashout.telegram_message_id,
+            },
+        )
 
 
 async def _delete_cancelled_cashout_telegram_message(

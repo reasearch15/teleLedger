@@ -594,7 +594,10 @@ async def test_venmo_telegram_confirm_callback_marks_request_confirmed(
     assert "✅✅ CONFIRMATION COMPLETED ✅✅" in caption
     assert "🟢 CONFIRMED" in caption
     assert "✅ EVIDENCE CONFIRMED" in caption
+    assert "Requested By: sarah" in caption
     assert "Confirmed By: receiver" in caption
+    assert "Note: Player paid" in caption
+    assert caption.count("Note:") == 1
 
 
 @pytest.mark.asyncio
@@ -785,6 +788,9 @@ async def test_venmo_telegram_not_received_callback_records_inquiry(
     assert "⚠️ CONFIRMATION NOT RECEIVED" in caption
     assert "🟡 FOLLOW-UP REQUIRED" in caption
     assert "The evidence was marked Not Received." in caption
+    assert "Requested By: sarah" in caption
+    assert "Not Received By: receiver" in caption
+    assert "Note: Player paid" in caption
 
 
 @pytest.mark.asyncio
@@ -893,8 +899,11 @@ async def test_venmo_reconciliation_repairs_confirmed_terminal_message(
         "\n"
         "✅ EVIDENCE CONFIRMED\n"
         "\n"
+        "Requested By: sarah\n"
         "Confirmed By: receiver\n"
-        "Confirmed At: 2026-07-15 16:00 UTC"
+        "Confirmed At: 2026-07-15 16:00 UTC\n"
+        "\n"
+        "Note: Player paid"
     )
 
 
@@ -1187,3 +1196,48 @@ async def test_venmo_screenshot_upload_does_not_alter_ledger_totals(tmp_path: Pa
     assert uploaded.status_code == 200
     assert after.status_code == 200
     assert after.json()["summary"] == before.json()["summary"]
+
+
+@pytest.mark.asyncio
+async def test_venmo_edit_retry_reconstructs_note_from_db(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await seed_venmo(tmp_path)
+    reset_fake_gateway()
+    FakeConfirmationGateway.fail_edit = True
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-100123")
+    get_settings.cache_clear()
+    gateway = FakeConfirmationGateway()
+    await handle_cashout_bot_update(
+        TelegramBotUpdate(
+            update_id=1,
+            payload={
+                "callback_query": {
+                    "id": "callback-retry-note",
+                    "data": encode_venmo_confirmation_callback(
+                        501,
+                        VenmoConfirmationCallbackAction.CONFIRM,
+                    ),
+                    "from": {"id": 700, "username": "receiver"},
+                    "message": {
+                        "message_id": 777,
+                        "chat": {"id": -100123, "type": "supergroup"},
+                    },
+                }
+            },
+        ),
+        gateway=gateway,
+        session_factory=TestSessionFactory,
+        report=lambda _: None,
+    )
+    FakeConfirmationGateway.fail_edit = False
+    result = await reconcile_venmo_confirmation_telegram_state(
+        request_id=100,
+        gateway=FakeConfirmationGateway(),
+    )
+    caption = str(FakeConfirmationGateway.edits[-1]["caption"])
+    assert result.sync_result == "edited_terminal"
+    assert "Note: Player paid" in caption
+    assert "Confirmed By: receiver" in caption
+    assert caption.count("Note:") == 1

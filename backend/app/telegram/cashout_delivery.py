@@ -27,7 +27,7 @@ from app.telegram.cashout_bot.api import TelegramBotApiError, TelegramBotFailure
 from app.telegram.cashout_bot.messages import (
     CashoutTaskView,
     build_active_task_markup,
-    format_active_cashout_message,
+    format_cashout_task_card,
 )
 from app.telegram.inquiry_ingestion import register_cashout_panel_message
 from app.websocket.events import LiveEventType, event_broker
@@ -122,7 +122,7 @@ async def deliver_next_cashout(
                 raise RuntimeError("telegram_chat_id is required for bot delivery")
             message_id = await bot_gateway.send_cashout_task_message(
                 chat_id=telegram_chat_id,
-                text=format_active_cashout_message(
+                text=format_cashout_task_card(
                     CashoutTaskView(
                         cashout_id=delivery.cashout_id,
                         request_number=delivery.request_number,

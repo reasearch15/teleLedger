@@ -476,3 +476,51 @@ async def test_message_caption_reconciliation_links_ambiguous_timeout(
     assert attempt.status == VenmoConfirmationAttemptStatus.POSTED
     assert attempt.telegram_message_id == 8801
     assert attempt.next_retry_at is None
+
+
+@pytest.mark.asyncio
+async def test_initial_venmo_card_preserves_note(tmp_path: Path) -> None:
+    request_id, attempt_id = await seed_attempt(tmp_path)
+    SequencedGateway.outcomes = [9001]
+    await run_delivery(request_id, attempt_id, retry_delays_seconds=(0,))
+    caption = str(SequencedGateway.sent[-1]["caption"])
+    assert "Note: Player paid" in caption
+    assert "Requested By: sarah" in caption
+    assert caption.count("Note:") == 1
+
+
+@pytest.mark.asyncio
+async def test_send_again_preserves_note_from_db(tmp_path: Path) -> None:
+    request_id, attempt_id = await seed_attempt(tmp_path)
+    SequencedGateway.outcomes = [9001, 9002]
+    await run_delivery(request_id, attempt_id, retry_delays_seconds=(0,))
+    async with TestSessionFactory() as session, session.begin():
+        service = VenmoConfirmationService(session)
+        await service.mark_attempt_not_received(
+            attempt_id=attempt_id,
+            coadmin_id=10,
+            telegram_user_id=700,
+            telegram_username="ayush",
+            display_name="Ayush",
+        )
+        request = await session.get(VenmoConfirmationRequest, request_id)
+        media = await session.get(MediaAsset, 1)
+        assert request is not None
+        assert media is not None
+        attempt_two = await service.create_attempt(request_id=request.id, coadmin_id=10)
+        await send_confirmation_attempt_with_retries(
+            service=service,
+            request=request,
+            media=media,
+            attempt=attempt_two,
+            event_type=VenmoConfirmationEventType.RESEND_POSTED,
+            gateway_factory=gateway_factory,
+            sleep=no_sleep,
+            retry_delays_seconds=(0,),
+            jitter_ratio=0,
+        )
+    caption = str(SequencedGateway.sent[-1]["caption"])
+    assert "Attempt #2" in caption
+    assert "Note: Player paid" in caption
+    assert "Requested By: sarah" in caption
+    assert caption.count("Note: Player paid") == 1

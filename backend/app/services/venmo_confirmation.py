@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -32,11 +33,12 @@ from app.telegram.peer_ids import (
     chat_ids_equivalent,
     normalize_telegram_chat_id,
 )
+from app.telegram.staff_labels import format_actor_label
 from app.telegram.venmo_confirmation import (
     VenmoConfirmationCallbackAction,
+    VenmoConfirmationCardView,
     decode_venmo_confirmation_callback,
-    format_venmo_confirmation_confirmed_caption,
-    format_venmo_confirmation_not_received_caption,
+    format_venmo_confirmation_card,
 )
 from app.websocket.events import LiveEventType, event_broker
 
@@ -415,6 +417,9 @@ class VenmoConfirmationService(ApplicationService):
             await self.mark_attempt_not_received(
                 attempt_id=attempt.id,
                 coadmin_id=request.coadmin_id,
+                telegram_user_id=telegram_user_id,
+                telegram_username=telegram_username,
+                display_name=display_name,
             )
             request = await self._repository.get_by_id(request.id)
             assert request is not None
@@ -481,14 +486,13 @@ class VenmoConfirmationService(ApplicationService):
             or attempt.telegram_message_id is None
         ):
             return "no_linked_message"
-        if request.status == VenmoConfirmationStatus.CONFIRMED:
-            caption = format_venmo_confirmation_confirmed_caption(
-                request_id=request.id,
-                confirmed_by=request.confirmed_by_display_name or fallback_display_name,
-                confirmed_at=request.confirmed_at,
+        caption = (
+            await self.render_venmo_confirmation_card(
+                request,
+                attempt,
+                fallback_display_name=fallback_display_name,
             )
-        else:
-            caption = format_venmo_confirmation_not_received_caption(request_id=request.id)
+        ).caption
         edit = getattr(gateway, "edit_message_caption", None)
         if edit is None:
             return "no_gateway_caption_edit"
@@ -745,6 +749,10 @@ class VenmoConfirmationService(ApplicationService):
         *,
         attempt_id: int,
         coadmin_id: int,
+        actor: User | None = None,
+        telegram_user_id: int | None = None,
+        telegram_username: str | None = None,
+        display_name: str | None = None,
     ) -> VenmoConfirmationInquiry:
         attempt = await self._repository.get_attempt_for_coadmin(
             attempt_id,
@@ -778,6 +786,21 @@ class VenmoConfirmationService(ApplicationService):
             request_id=request.id,
             attempt_id=attempt.id,
             event_type=VenmoConfirmationEventType.NOT_RECEIVED,
+            actor=actor,
+            actor_source="telegram" if telegram_user_id is not None else (
+                "atlas" if actor is not None else "system"
+            ),
+            actor_identifier=(
+                str(telegram_user_id)
+                if telegram_user_id is not None
+                else (str(actor.id) if actor is not None else None)
+            ),
+            payload={
+                "telegram_user_id": telegram_user_id,
+                "telegram_username": telegram_username,
+                "display_name": display_name,
+                "actor_username": actor.username if actor is not None else None,
+            },
         )
         await self._record_event(
             request_id=request.id,
@@ -786,6 +809,76 @@ class VenmoConfirmationService(ApplicationService):
             event_type=VenmoConfirmationEventType.INQUIRY_CREATED,
         )
         return inquiry
+
+    async def render_venmo_confirmation_card(
+        self,
+        request: VenmoConfirmationRequest,
+        attempt: VenmoConfirmationAttempt | None = None,
+        *,
+        fallback_display_name: str | None = None,
+    ):
+        requested_by = await self._staff_actor_label(request.requested_by_staff_id)
+        confirmed_by = format_actor_label(
+            display_name=request.confirmed_by_display_name or fallback_display_name,
+            telegram_username=request.confirmed_by_telegram_username,
+            telegram_user_id=request.confirmed_by_telegram_user_id,
+        )
+        not_received_by = await self._not_received_actor_label(
+            request.id,
+            fallback_display_name=fallback_display_name,
+        )
+        status = request.status.value
+        if attempt is not None and attempt.status not in (
+            VenmoConfirmationAttemptStatus.CONFIRMED,
+            VenmoConfirmationAttemptStatus.NOT_RECEIVED,
+        ):
+            status = "pending"
+        return format_venmo_confirmation_card(
+            VenmoConfirmationCardView(
+                request_id=request.id,
+                attempt_number=None if attempt is None else attempt.attempt_number,
+                status=status,
+                note=request.payment_note,
+                requested_by=requested_by,
+                confirmed_by=confirmed_by,
+                confirmed_at=request.confirmed_at,
+                not_received_by=not_received_by,
+            )
+        )
+
+    async def _staff_actor_label(self, staff_id: int | None) -> str | None:
+        if staff_id is None:
+            return None
+        username = await self._session.scalar(select(User.username).where(User.id == staff_id))
+        return format_actor_label(username=username)
+
+    async def _not_received_actor_label(
+        self,
+        request_id: int,
+        *,
+        fallback_display_name: str | None = None,
+    ) -> str | None:
+        events = await self._repository.list_events(request_id)
+        for event in reversed(events):
+            if event.event_type != VenmoConfirmationEventType.NOT_RECEIVED:
+                continue
+            payload = event.payload or {}
+            staff_label = await self._staff_actor_label(event.actor_user_id)
+            return format_actor_label(
+                display_name=(
+                    str(payload.get("display_name") or payload.get("actor_username") or "")
+                    or fallback_display_name
+                    or staff_label
+                ),
+                username=staff_label,
+                telegram_username=str(payload.get("telegram_username") or "") or None,
+                telegram_user_id=(
+                    payload.get("telegram_user_id")
+                    if payload.get("telegram_user_id") is not None
+                    else event.actor_identifier
+                ),
+            )
+        return format_actor_label(display_name=fallback_display_name)
 
     async def dismiss_inquiry(
         self,

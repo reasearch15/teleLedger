@@ -422,7 +422,10 @@ async def test_full_payment_uses_authoritative_service_and_renders_completed() -
     assert "Requested Amount: $250.00" in gateway.edits[-1]["text"]
     assert "Paid Amount: $250.00" in gateway.edits[-1]["text"]
     assert "✅ NO BALANCE REMAINING" in gateway.edits[-1]["text"]
+    assert "Requested By: sarah" in gateway.edits[-1]["text"]
     assert "Completed By: @operator" in gateway.edits[-1]["text"]
+    assert "Optional Notes:\nVIP Player" in gateway.edits[-1]["text"]
+    assert gateway.edits[-1]["text"].count("Optional Notes:") == 1
     assert gateway.answers[-1]["text"] == "Cashout completed (Full Payment)."
 
 
@@ -756,6 +759,10 @@ async def test_valid_partial_amount_uses_authoritative_service() -> None:
     assert "Paid Amount: $100.00" in gateway.edits[-1]["text"]
     assert "Remaining Amount: $150.00" in gateway.edits[-1]["text"]
     assert "⚠️ $150.00 STILL UNPAID" in gateway.edits[-1]["text"]
+    assert "Requested By: sarah" in gateway.edits[-1]["text"]
+    assert "Completed By: @operator" in gateway.edits[-1]["text"]
+    assert "Optional Notes:\nVIP Player" in gateway.edits[-1]["text"]
+    assert gateway.edits[-1]["text"].count("VIP Player") == 1
 
 
 @pytest.mark.asyncio
@@ -898,6 +905,8 @@ async def test_delete_failure_falls_back_to_cancelled_edit() -> None:
 
     assert status == "edited_cancelled"
     assert "CASHOUT CANCELLED" in gateway.edits[-1]["text"]
+    assert "Requested By: sarah" in gateway.edits[-1]["text"]
+    assert "Optional Notes:\nVIP Player" in gateway.edits[-1]["text"]
 
 
 @pytest.mark.asyncio
@@ -1051,6 +1060,126 @@ async def test_operational_reconciliation_repairs_completed_terminal_message() -
         "\n"
         "✅ NO BALANCE REMAINING\n"
         "\n"
+        "Requested By: sarah\n"
         "Completed By: Telegram bot\n"
-        "Completed At: 2026-07-06 20:45 UTC"
+        "Completed At: 2026-07-06 20:45 UTC\n"
+        "\n"
+        "Optional Notes:\n"
+        "VIP Player"
     )
+
+
+@pytest.mark.asyncio
+async def test_initial_cashout_card_includes_creator_identity() -> None:
+    await seed_cashout(
+        status=CashoutStatus.PENDING,
+        telegram_status=CashoutTelegramStatus.PENDING,
+        telegram_message_id=None,
+    )
+    gateway = FakeBotGateway()
+
+    await cashout_delivery.deliver_next_cashout(
+        object(),
+        "group",
+        telegram_chat_id=-1001234567890,
+        bot_gateway=gateway,
+    )
+
+    text = gateway.sent_cashouts[0]["text"]
+    assert "Requested By:\nsarah" in text
+    assert "Optional Notes:\nVIP Player" in text
+    assert "Unknown" not in text
+
+
+@pytest.mark.asyncio
+async def test_claim_edit_preserves_note() -> None:
+    await seed_cashout()
+    async with TestSessionFactory() as session, session.begin():
+        stored = await session.get(CashoutRequest, 1)
+        assert stored is not None
+        stored.notes = "Waiting for player"
+    gateway = FakeBotGateway()
+
+    async with TestSessionFactory() as session:
+        status = await CashoutTelegramService(session, gateway=gateway).sync_persisted_task(
+            await session.get(CashoutRequest, 1)
+        )
+
+    assert status == "edited_active"
+    text = gateway.edits[-1]["text"]
+    assert "Optional Notes:\nWaiting for player" in text
+    assert "Requested By:\nsarah" in text
+    assert gateway.edits[-1]["buttons"] == build_active_task_markup(1)
+
+
+@pytest.mark.asyncio
+async def test_done_edit_preserves_note_and_creator() -> None:
+    await seed_cashout()
+    gateway = FakeBotGateway()
+    await callback(CashoutCallbackAction.FULL, gateway)
+
+    text = gateway.edits[-1]["text"]
+    assert "Optional Notes:\nVIP Player" in text
+    assert "Requested By: sarah" in text
+    assert "Completed By: @operator" in text
+
+
+@pytest.mark.asyncio
+async def test_multiple_staff_actors_do_not_erase_creator_identity() -> None:
+    await seed_cashout()
+    gateway = FakeBotGateway()
+    await callback(CashoutCallbackAction.PARTIAL, gateway)
+    await submit_partial_amount(gateway)
+
+    async with TestSessionFactory() as session:
+        refreshed = await session.get(CashoutRequest, 1)
+        assert refreshed is not None
+        status = await CashoutTelegramService(session, gateway=gateway).sync_persisted_task(
+            refreshed
+        )
+
+    stored = await cashout()
+    assert stored.created_by_staff_id == 42
+    assert status == "edited_terminal"
+    text = gateway.edits[-1]["text"]
+    assert "Requested By: sarah" in text
+    assert "Completed By: @operator" in text
+    assert "Optional Notes:\nVIP Player" in text
+    assert text.count("Optional Notes:") == 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_edit_retry_reconstructs_note_from_db() -> None:
+    await seed_completed_cashout(telegram_last_error="terminal_sync_failed: edit failed")
+    gateway = FakeBotGateway()
+
+    async with TestSessionFactory() as session:
+        stored = await session.get(CashoutRequest, 1)
+        status = await CashoutTelegramService(session, gateway=gateway).sync_persisted_task(
+            stored
+        )
+
+    assert status == "edited_terminal"
+    assert "Optional Notes:\nVIP Player" in gateway.edits[-1]["text"]
+    assert (await cashout()).telegram_last_error is None
+
+
+@pytest.mark.asyncio
+async def test_missing_display_name_falls_back_to_telegram_user_id() -> None:
+    await seed_cashout()
+    gateway = FakeBotGateway()
+
+    async with TestSessionFactory() as session:
+        result = await CashoutTelegramService(session, gateway=gateway).handle_callback_query(
+            query_id="q1",
+            callback_data=encode_callback_data(1, CashoutCallbackAction.FULL),
+            telegram_chat_id=-1001234567890,
+            telegram_user_id=9001,
+            telegram_username=None,
+            message_id=555,
+        )
+
+    assert result.status == "completed_full"
+    assert "Completed By: Telegram user 9001" in gateway.edits[-1]["text"]
+    assert "Unknown" not in gateway.edits[-1]["text"]
+    assert "Optional Notes:\nVIP Player" in gateway.edits[-1]["text"]

@@ -31,6 +31,8 @@ class CashoutTaskView:
     actual_paid_amount: Decimal | None = None
     completed_by_label: str | None = None
     completed_at: datetime | None = None
+    cancelled_by_label: str | None = None
+    cancelled_at: datetime | None = None
 
 
 def encode_callback_data(cashout_id: int, action: CashoutCallbackAction) -> str:
@@ -64,6 +66,15 @@ def build_active_task_markup(cashout_id: int) -> list[list[tuple[str, str]]]:
     ]
 
 
+def format_cashout_task_card(view: CashoutTaskView) -> str:
+    """Render a cashout Telegram card from persisted state only."""
+    if view.status == CashoutStatus.COMPLETED:
+        return format_completed_cashout_message(view)
+    if view.status == CashoutStatus.CANCELLED:
+        return format_cancelled_cashout_message(view)
+    return format_active_cashout_message(view)
+
+
 def format_active_cashout_message(view: CashoutTaskView) -> str:
     lines = [
         "CASHOUT REQUEST",
@@ -76,15 +87,17 @@ def format_active_cashout_message(view: CashoutTaskView) -> str:
         "",
         "Requested Amount:",
         f"${view.requested_amount:,.2f}",
-        "",
-        "Requested By:",
-        view.requested_by,
-        "",
-        "Time:",
-        view.created_at.strftime("%Y-%m-%d %H:%M UTC"),
     ]
-    if view.notes:
-        lines.extend(["", "Optional Notes:", view.notes])
+    if view.requested_by:
+        lines.extend(["", "Requested By:", view.requested_by])
+    lines.extend(
+        [
+            "",
+            "Time:",
+            view.created_at.strftime("%Y-%m-%d %H:%M UTC"),
+        ]
+    )
+    _append_notes(lines, view.notes)
     return "\n".join(lines)
 
 
@@ -118,10 +131,14 @@ def format_completed_cashout_message(view: CashoutTaskView) -> str:
             "",
             "✅ NO BALANCE REMAINING",
         ]
-    if view.completed_by_label:
-        lines.extend(["", f"Completed By: {view.completed_by_label}"])
+    _append_cashout_actor_lines(
+        lines,
+        requested_by=view.requested_by,
+        completed_by=view.completed_by_label,
+    )
     if view.completed_at is not None:
         lines.append(f"Completed At: {view.completed_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    _append_notes(lines, view.notes)
     return "\n".join(lines)
 
 
@@ -138,6 +155,14 @@ def format_cancelled_cashout_message(view: CashoutTaskView) -> str:
         "Requested Amount:",
         f"${view.requested_amount:,.2f}",
     ]
+    _append_cashout_actor_lines(
+        lines,
+        requested_by=view.requested_by,
+        cancelled_by=view.cancelled_by_label,
+    )
+    if view.cancelled_at is not None:
+        lines.append(f"Cancelled At: {view.cancelled_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    _append_notes(lines, view.notes)
     return "\n".join(lines)
 
 
@@ -146,3 +171,28 @@ def format_partial_prompt_message(request_number: str) -> str:
         f"Enter the amount actually paid for Cashout {request_number}.\n"
         "Reply with a numeric amount, or send cancel to abort."
     )
+
+
+def _append_cashout_actor_lines(
+    lines: list[str],
+    *,
+    requested_by: str | None = None,
+    completed_by: str | None = None,
+    cancelled_by: str | None = None,
+) -> None:
+    extras: list[str] = []
+    if requested_by:
+        extras.append(f"Requested By: {requested_by}")
+    if completed_by:
+        extras.append(f"Completed By: {completed_by}")
+    if cancelled_by:
+        extras.append(f"Cancelled By: {cancelled_by}")
+    if extras:
+        lines.extend(["", *extras])
+
+
+def _append_notes(lines: list[str], notes: str | None) -> None:
+    text = notes.strip() if notes else ""
+    if not text:
+        return
+    lines.extend(["", "Optional Notes:", text])

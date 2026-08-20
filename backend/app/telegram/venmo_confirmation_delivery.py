@@ -28,7 +28,7 @@ from app.telegram.cashout_bot.api import (
     TelegramBotFailureClass,
 )
 from app.telegram.peer_ids import normalize_telegram_chat_id
-from app.telegram.venmo_confirmation import venmo_confirmation_buttons, venmo_confirmation_caption
+from app.telegram.venmo_confirmation import venmo_confirmation_buttons
 from app.websocket.events import LiveEventType, event_broker
 
 logger = get_logger(__name__)
@@ -189,18 +189,30 @@ async def send_confirmation_attempt_with_retries(
                     },
                 )
             async with gateway_factory() as gateway:
+                caption = await service.render_venmo_confirmation_card(request, attempt)
                 message_id = await gateway.send_photo(
                     chat_id=chat_id,
                     photo_path=_media_path(media.storage_key),
-                    caption=venmo_confirmation_caption(
-                        request_id=request.id,
-                        attempt_number=attempt.attempt_number,
-                        note=request.payment_note,
-                    ),
+                    caption=caption.caption,
                     buttons=venmo_confirmation_buttons(attempt.id),
                     mime_type=media.mime_type,
                     filename=media.original_filename,
                 )
+                if caption.overflow_text:
+                    send_overflow = getattr(gateway, "send_message", None)
+                    if callable(send_overflow):
+                        try:
+                            await send_overflow(
+                                chat_id=chat_id,
+                                text=caption.overflow_text,
+                                reply_to_message_id=message_id,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "venmo_confirmation_note_overflow_followup_failed",
+                                extra=_log_extra(request, attempt, retry_number=retry_index),
+                                exc_info=True,
+                            )
             if message_id is None:
                 raise TelegramBotApiError(
                     "Telegram Bot API did not return a message_id.",

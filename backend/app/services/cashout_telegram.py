@@ -13,6 +13,7 @@ from app.db.repositories.cashout import CashoutRepository
 from app.db.repositories.cashout_partial_pending import CashoutPartialPendingRepository
 from app.db.repositories.workflow_settings import CoadminTelegramWorkflowSettingsRepository
 from app.models.cashout import (
+    CashoutAuditAction,
     CashoutCompletionType,
     CashoutRequest,
     CashoutStatus,
@@ -31,9 +32,7 @@ from app.telegram.cashout_bot.messages import (
     CashoutTaskView,
     build_active_task_markup,
     decode_callback_data,
-    format_active_cashout_message,
-    format_cancelled_cashout_message,
-    format_completed_cashout_message,
+    format_cashout_task_card,
     format_partial_prompt_message,
 )
 from app.telegram.peer_ids import (
@@ -41,6 +40,7 @@ from app.telegram.peer_ids import (
     chat_ids_equivalent,
     normalize_telegram_chat_id,
 )
+from app.telegram.staff_labels import format_actor_label
 
 logger = get_logger(__name__)
 
@@ -360,17 +360,12 @@ class CashoutTelegramService:
                 )
                 return "deleted"
 
-        requested_by = await self._lookup_requested_by(cashout.created_by_staff_id)
-        view = self._build_view(
-            cashout,
-            requested_by=requested_by,
-            completed_by_label=None,
-        )
+        view = await self._build_persisted_view(cashout)
         try:
             await gateway.edit_cashout_task_message(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=format_cancelled_cashout_message(view),
+                text=format_cashout_task_card(view),
                 buttons=None,
             )
         except Exception:
@@ -401,9 +396,12 @@ class CashoutTelegramService:
         *,
         requested_by: str,
     ) -> tuple[str, list[list[tuple[str, str]]]]:
-        view = self._build_view(cashout, requested_by=requested_by, completed_by_label=None)
+        view = await self._build_persisted_view(
+            cashout,
+            requested_by=requested_by,
+        )
         return (
-            format_active_cashout_message(view),
+            format_cashout_task_card(view),
             build_active_task_markup(cashout.id),
         )
 
@@ -567,41 +565,46 @@ class CashoutTelegramService:
         telegram_user_id: int | None = None,
         telegram_username: str | None = None,
     ) -> str:
+        return await self.sync_persisted_task(
+            cashout,
+            telegram_user_id=telegram_user_id,
+            telegram_username=telegram_username,
+        )
+
+    async def sync_persisted_task(
+        self,
+        cashout: CashoutRequest | None,
+        *,
+        telegram_user_id: int | None = None,
+        telegram_username: str | None = None,
+    ) -> str:
+        """Rebuild the Telegram cashout card from canonical persisted state."""
         if cashout is None:
             return "not_found"
         if cashout.telegram_chat_id is None or cashout.telegram_message_id is None:
             return "no_linked_message"
-        requested_by = await self._lookup_requested_by(cashout.created_by_staff_id)
-        if cashout.status == CashoutStatus.COMPLETED:
-            completed_by = await self._format_completed_by(
-                cashout,
-                fallback_telegram_user_id=telegram_user_id,
-                fallback_telegram_username=telegram_username,
-            )
-            view = self._build_view(
-                cashout,
-                requested_by=requested_by,
-                completed_by_label=completed_by,
-            )
-            text = format_completed_cashout_message(view)
-        else:
-            view = self._build_view(
-                cashout,
-                requested_by=requested_by,
-                completed_by_label=None,
-            )
-            text = format_cancelled_cashout_message(view)
+        view = await self._build_persisted_view(
+            cashout,
+            fallback_telegram_user_id=telegram_user_id,
+            fallback_telegram_username=telegram_username,
+        )
+        text = format_cashout_task_card(view)
+        buttons = (
+            None
+            if cashout.status in (CashoutStatus.COMPLETED, CashoutStatus.CANCELLED)
+            else build_active_task_markup(cashout.id)
+        )
         try:
             await self._require_gateway().edit_cashout_task_message(
                 chat_id=cashout.telegram_chat_id,
                 message_id=cashout.telegram_message_id,
                 text=text,
-                buttons=None,
+                buttons=buttons,
             )
         except Exception as error:
             await self._record_terminal_sync_error(cashout, error)
             logger.exception(
-                "cashout_telegram_terminal_sync_failed",
+                "cashout_telegram_persisted_sync_failed",
                 extra={
                     "cashout_request_id": cashout.id,
                     "telegram_chat_id": cashout.telegram_chat_id,
@@ -612,7 +615,7 @@ class CashoutTelegramService:
             return "failed"
         await self._clear_terminal_sync_error(cashout)
         logger.info(
-            "cashout_telegram_terminal_sync_succeeded",
+            "cashout_telegram_persisted_sync_succeeded",
             extra={
                 "cashout_request_id": cashout.id,
                 "telegram_chat_id": cashout.telegram_chat_id,
@@ -620,13 +623,19 @@ class CashoutTelegramService:
                 "cashout_status": cashout.status.value,
             },
         )
-        return "edited_terminal"
+        if cashout.status in (CashoutStatus.COMPLETED, CashoutStatus.CANCELLED):
+            return "edited_terminal"
+        return "edited_active"
 
     async def _lookup_requested_by(self, staff_id: int | None) -> str:
+        label = await self._staff_actor_label(staff_id)
+        return label or ""
+
+    async def _staff_actor_label(self, staff_id: int | None) -> str | None:
         if staff_id is None:
-            return "Unknown"
+            return None
         username = await self._session.scalar(select(User.username).where(User.id == staff_id))
-        return username or "Unknown"
+        return format_actor_label(username=username)
 
     async def _format_completed_by(
         self,
@@ -635,17 +644,82 @@ class CashoutTelegramService:
         fallback_telegram_user_id: int | None,
         fallback_telegram_username: str | None = None,
     ) -> str:
-        if cashout.completed_by_staff_id is not None:
-            username = await self._session.scalar(
-                select(User.username).where(User.id == cashout.completed_by_staff_id)
+        staff_label = await self._staff_actor_label(cashout.completed_by_staff_id)
+        if staff_label:
+            return staff_label
+        audit_label = await self._completed_by_from_audit(
+            cashout.id,
+            fallback_telegram_user_id=fallback_telegram_user_id,
+            fallback_telegram_username=fallback_telegram_username,
+        )
+        if audit_label:
+            return audit_label
+        live_label = format_actor_label(
+            telegram_username=fallback_telegram_username,
+            telegram_user_id=fallback_telegram_user_id,
+        )
+        return live_label or "Telegram bot"
+
+    async def _completed_by_from_audit(
+        self,
+        cashout_id: int,
+        *,
+        fallback_telegram_user_id: int | None,
+        fallback_telegram_username: str | None,
+    ) -> str | None:
+        records = await self._cashouts.list_audit(cashout_id)
+        for record in reversed(records):
+            if record.audit.action != CashoutAuditAction.TELEGRAM_BOT_COMPLETED:
+                continue
+            payload = record.audit.new_value or {}
+            return format_actor_label(
+                username=record.actor_username,
+                telegram_username=(
+                    str(payload.get("telegram_username") or "")
+                    or fallback_telegram_username
+                ),
+                telegram_user_id=(
+                    payload.get("telegram_user_id")
+                    if payload.get("telegram_user_id") is not None
+                    else fallback_telegram_user_id
+                ),
             )
-            if username:
-                return username
-        if fallback_telegram_username:
-            return f"@{fallback_telegram_username}"
-        if fallback_telegram_user_id is not None:
-            return f"Telegram user {fallback_telegram_user_id}"
-        return "Telegram bot"
+        return None
+
+    async def _lookup_cancelled_by(self, cashout_id: int) -> str | None:
+        records = await self._cashouts.list_audit(cashout_id)
+        for record in reversed(records):
+            if record.audit.action == CashoutAuditAction.CANCELLED:
+                return format_actor_label(username=record.actor_username)
+        return None
+
+    async def _build_persisted_view(
+        self,
+        cashout: CashoutRequest,
+        *,
+        requested_by: str | None = None,
+        fallback_telegram_user_id: int | None = None,
+        fallback_telegram_username: str | None = None,
+    ) -> CashoutTaskView:
+        creator = requested_by if requested_by is not None else await self._lookup_requested_by(
+            cashout.created_by_staff_id
+        )
+        completed_by = None
+        if cashout.status == CashoutStatus.COMPLETED:
+            completed_by = await self._format_completed_by(
+                cashout,
+                fallback_telegram_user_id=fallback_telegram_user_id,
+                fallback_telegram_username=fallback_telegram_username,
+            )
+        cancelled_by = None
+        if cashout.status == CashoutStatus.CANCELLED:
+            cancelled_by = await self._lookup_cancelled_by(cashout.id)
+        return self._build_view(
+            cashout,
+            requested_by=creator,
+            completed_by_label=completed_by,
+            cancelled_by_label=cancelled_by,
+        )
 
     @staticmethod
     def _build_view(
@@ -653,6 +727,7 @@ class CashoutTelegramService:
         *,
         requested_by: str,
         completed_by_label: str | None,
+        cancelled_by_label: str | None = None,
     ) -> CashoutTaskView:
         if cashout.request_number is None:
             raise RuntimeError("Cashout request_number is required for Telegram rendering")
@@ -673,6 +748,8 @@ class CashoutTelegramService:
             ),
             completed_by_label=completed_by_label,
             completed_at=cashout.completed_at,
+            cancelled_by_label=cancelled_by_label,
+            cancelled_at=cashout.cancelled_at,
         )
 
     @staticmethod

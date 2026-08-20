@@ -241,7 +241,12 @@ async def mark_venmo_attempt_not_received(
         )
         if attempt is None:
             raise VenmoConfirmationNotFoundError("Venmo confirmation attempt was not found.")
-        await service.mark_attempt_not_received(attempt_id=attempt_id, coadmin_id=coadmin_id)
+        await service.mark_attempt_not_received(
+            attempt_id=attempt_id,
+            coadmin_id=coadmin_id,
+            actor=current_user,
+            display_name=current_user.username,
+        )
         await session.commit()
         await _publish_venmo_confirmation_update(attempt.request_id)
         return await get_venmo_confirmation(attempt.request_id, session, current_user)
