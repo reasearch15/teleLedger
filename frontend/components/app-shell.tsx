@@ -100,10 +100,10 @@ export function AppShell({
   };
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen w-full min-w-0 bg-slate-50">
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
-          <Link href="/dashboard" className="flex items-center gap-3">
+        <div className="mx-auto flex max-w-7xl min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3 sm:gap-4 sm:px-6">
+          <Link href="/dashboard" className="flex min-w-0 shrink items-center gap-3">
             <span className="grid h-9 w-9 place-items-center rounded-xl bg-indigo-600 text-sm font-black text-white">
               L
             </span>
@@ -116,25 +116,26 @@ export function AppShell({
               </span>
             </span>
           </Link>
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 sm:gap-3">
             <NotificationMenu />
             <button
               type="button"
               onClick={() => setMenuOpen(true)}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 lg:hidden"
+              className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 sm:px-3 lg:hidden"
               aria-controls="mobile-admin-navigation"
               aria-expanded={menuOpen}
             >
-              <span aria-hidden="true">&#9776;</span> Menu
+              <span aria-hidden="true">&#9776;</span>{" "}
+              <span className="hidden min-[360px]:inline">Menu</span>
             </button>
-            <div className="hidden text-right sm:block">
-              <p className="text-sm font-semibold text-slate-800">{user.username}</p>
+            <div className="hidden min-w-0 text-right sm:block">
+              <p className="truncate text-sm font-semibold text-slate-800">{user.username}</p>
               <p className="text-xs capitalize text-slate-500">{user.role}</p>
             </div>
             <button
               type="button"
               onClick={handleLogout}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+              className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 sm:px-3"
             >
               Logout
             </button>
@@ -210,16 +211,16 @@ export function AppShell({
         </div>
       ) : null}
 
-      <main className="mx-auto max-w-7xl px-4 py-7 sm:px-6 sm:py-10">
-        <div className="mb-7">
+      <main className="mx-auto w-full min-w-0 max-w-7xl px-4 py-7 sm:px-6 sm:py-10">
+        <div className="mb-7 min-w-0">
           <p className="mb-1 text-xs font-bold uppercase tracking-[0.18em] text-indigo-600">
             Operations
           </p>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">
+          <h1 className="break-words text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">
             {title}
           </h1>
           {description ? (
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+            <p className="mt-2 max-w-2xl break-words text-sm leading-6 text-slate-600">
               {description}
             </p>
           ) : null}
@@ -287,10 +288,11 @@ function NotificationMenu() {
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
-        className="relative rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+        className="relative max-w-full rounded-lg border border-slate-300 px-2.5 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 sm:px-3"
         aria-expanded={open}
       >
-        Notifications
+        <span className="hidden min-[390px]:inline">Notifications</span>
+        <span className="min-[390px]:hidden">Alerts</span>
         {unreadCount > 0 ? (
           <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs text-white">
             {unreadCount}

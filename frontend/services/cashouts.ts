@@ -47,11 +47,13 @@ export function createCashout(input: {
 
 export function createQrCashout(input: {
   amount: string;
+  notes: string;
   idempotencyKey: string;
   qrImage: File;
 }): Promise<Cashout> {
   const formData = new FormData();
   formData.set("amount", input.amount);
+  formData.set("notes", input.notes);
   formData.set("idempotency_key", input.idempotencyKey);
   formData.set("qr_image", input.qrImage);
   return apiRequest<Cashout>("/api/cashouts/qr", {

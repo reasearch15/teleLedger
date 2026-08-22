@@ -183,12 +183,12 @@ def format_qr_cashout_caption(view: CashoutTaskView) -> str:
 
 
 def _format_qr_active_caption(view: CashoutTaskView) -> str:
-    return "\n".join(
-        [
-            f"💸 Cash Out — {view.request_number}",
-            f"Amount: ${view.requested_amount:,.2f}",
-        ]
-    )
+    lines = [
+        f"💸 Cash Out — {view.request_number}",
+        f"Amount: ${view.requested_amount:,.2f}",
+    ]
+    _append_qr_note(lines, view.notes)
+    return "\n".join(lines)
 
 
 def _format_qr_completed_caption(view: CashoutTaskView) -> str:
@@ -198,6 +198,7 @@ def _format_qr_completed_caption(view: CashoutTaskView) -> str:
         f"💸 Cash Out — {view.request_number}",
         f"Amount: ${view.requested_amount:,.2f}",
     ]
+    _append_qr_note(lines, view.notes)
     if view.completion_type == CashoutCompletionType.PARTIAL:
         lines.extend(
             [
@@ -219,13 +220,20 @@ def _format_qr_cancelled_caption(view: CashoutTaskView) -> str:
     lines = [
         f"💸 Cash Out — {view.request_number}",
         f"Amount: ${view.requested_amount:,.2f}",
-        "Status: Cancelled",
     ]
+    _append_qr_note(lines, view.notes)
+    lines.append("Status: Cancelled")
     if view.cancelled_by_label:
         lines.append(f"Cancelled By: {view.cancelled_by_label}")
     if view.cancelled_at is not None:
         lines.append(f"Cancelled At: {view.cancelled_at.strftime('%Y-%m-%d %H:%M UTC')}")
     return "\n".join(lines)
+
+
+def _append_qr_note(lines: list[str], notes: str | None) -> None:
+    text = notes.strip() if notes else ""
+    if text:
+        lines.append(f"Note: {text}")
 
 
 def _append_cashout_actor_lines(

@@ -80,10 +80,17 @@ async def create_qr_cashout(
     current_user: CurrentUser,
     service: CashoutServiceDependency,
     amount: Annotated[Decimal, Form(gt=0, max_digits=18, decimal_places=2)],
+    notes: Annotated[str, Form(min_length=1, max_length=2000)],
     idempotency_key: Annotated[UUID, Form()],
     qr_image: Annotated[UploadFile | None, File()] = None,
 ) -> CashoutResponse:
-    """Create one QR cash-out with amount and uploaded QR image only."""
+    """Create one QR cash-out with amount, note, and uploaded QR image."""
+    normalized_notes = notes.strip()
+    if not normalized_notes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Note is required",
+        )
     upload: PreparedQrCashoutUpload | None = None
     if qr_image is not None:
         content = await qr_image.read(1)
@@ -102,6 +109,7 @@ async def create_qr_cashout(
     try:
         cashout = await service.create_qr(
             amount=amount,
+            notes=normalized_notes,
             idempotency_key=idempotency_key,
             upload=upload,
             actor=current_user,

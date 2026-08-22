@@ -163,6 +163,10 @@ export default function CashoutPage() {
       setError("Player Tag is required.");
       return;
     }
+    if (cashoutType === "qr" && !notes.trim()) {
+      setError("Note is required.");
+      return;
+    }
     if (cashoutType === "qr" && !qrImage) {
       setError("QR image is required.");
       return;
@@ -184,6 +188,7 @@ export default function CashoutPage() {
         cashoutType === "qr"
           ? await createQrCashout({
               amount,
+              notes: notes.trim(),
               idempotencyKey: idempotencyKey.current,
               qrImage: qrImage as File,
             })
@@ -302,7 +307,7 @@ export default function CashoutPage() {
       {user?.role === "staff" ? (
         <form
           onSubmit={submitCashout}
-          className="mb-8 grid gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+          className="mb-8 grid min-w-0 max-w-full gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5"
         >
           <div>
             <h2 className="text-lg font-black text-slate-950">
@@ -312,7 +317,7 @@ export default function CashoutPage() {
               Your request is saved before delivery is attempted.
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex min-w-0 flex-wrap gap-2">
             <button
               type="button"
               onClick={() => setCashoutType("standard")}
@@ -338,19 +343,19 @@ export default function CashoutPage() {
           </div>
           {cashoutType === "standard" ? (
             <>
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+              <div className="grid min-w-0 gap-4 md:grid-cols-2">
+                <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-slate-700">
                   Player Tag
                   <input
                     required
                     maxLength={128}
                     value={playerTag}
                     onChange={(event) => setPlayerTag(event.target.value)}
-                    className="rounded-lg border border-slate-300 px-3 py-2.5"
+                    className="w-full min-w-0 max-w-full rounded-lg border border-slate-300 px-3 py-2.5"
                     placeholder="ABC12345"
                   />
                 </label>
-                <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+                <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-slate-700">
                   Amount
                   <input
                     required
@@ -359,26 +364,26 @@ export default function CashoutPage() {
                     type="number"
                     value={amount}
                     onChange={(event) => setAmount(event.target.value)}
-                    className="rounded-lg border border-slate-300 px-3 py-2.5"
+                    className="w-full min-w-0 max-w-full rounded-lg border border-slate-300 px-3 py-2.5"
                     placeholder="250.00"
                   />
                 </label>
               </div>
-              <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+              <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-slate-700">
                 Optional Notes
                 <textarea
                   maxLength={2000}
                   rows={3}
                   value={notes}
                   onChange={(event) => setNotes(event.target.value)}
-                  className="rounded-lg border border-slate-300 px-3 py-2.5"
+                  className="w-full min-w-0 max-w-full rounded-lg border border-slate-300 px-3 py-2.5"
                   placeholder="VIP Player"
                 />
               </label>
             </>
           ) : (
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+            <div className="grid min-w-0 gap-4">
+              <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-slate-700">
                 Amount
                 <input
                   required
@@ -387,20 +392,30 @@ export default function CashoutPage() {
                   type="number"
                   value={amount}
                   onChange={(event) => setAmount(event.target.value)}
-                  className="rounded-lg border border-slate-300 px-3 py-2.5"
+                  className="w-full min-w-0 max-w-full rounded-lg border border-slate-300 px-3 py-2.5"
                   placeholder="250.00"
                 />
               </label>
-              <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+              <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-slate-700">
+                Note
+                <textarea
+                  maxLength={2000}
+                  rows={3}
+                  value={notes}
+                  onChange={(event) => setNotes(event.target.value)}
+                  className="w-full min-w-0 max-w-full rounded-lg border border-slate-300 px-3 py-2.5"
+                  placeholder="Player or payout details"
+                />
+              </label>
+              <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-slate-700">
                 QR Code Image
                 <input
-                  required
                   type="file"
                   accept="image/jpeg,image/png,image/webp"
                   onChange={(event) =>
                     setQrImage(event.target.files?.[0] ?? null)
                   }
-                  className="rounded-lg border border-slate-300 px-3 py-2.5"
+                  className="w-full min-w-0 max-w-full rounded-lg border border-slate-300 px-3 py-2.5 file:mr-3 file:max-w-full"
                 />
               </label>
             </div>
@@ -418,7 +433,7 @@ export default function CashoutPage() {
       {user?.role === "admin" ? (
         <form
           onSubmit={applyFilters}
-          className="mb-6 grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-4"
+          className="mb-6 grid min-w-0 max-w-full gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-2 lg:grid-cols-4"
         >
           <input
             value={draftFilters.search ?? ""}
@@ -429,7 +444,7 @@ export default function CashoutPage() {
               }))
             }
             placeholder="Request, tag, or notes"
-            className="rounded-lg border border-slate-300 px-3 py-2.5 text-sm"
+            className="min-w-0 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm"
           />
           <select
             aria-label="Cashout status"
@@ -440,7 +455,7 @@ export default function CashoutPage() {
                 status: event.target.value as CashoutStatus | "",
               }))
             }
-            className="rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"
+            className="min-w-0 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"
           >
             <option value="">All statuses</option>
             {Object.entries(statusLabels).map(([value, label]) => (
@@ -459,14 +474,14 @@ export default function CashoutPage() {
                   .value as CashoutTelegramStatus | "",
               }))
             }
-            className="rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"
+            className="min-w-0 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"
           >
             <option value="">All delivery statuses</option>
             <option value="pending">Pending</option>
             <option value="sent">Sent</option>
             <option value="failed_to_send">Failed</option>
           </select>
-          <div className="flex gap-2">
+          <div className="flex min-w-0 flex-wrap gap-2 md:col-span-2 lg:col-span-1">
             <button
               type="submit"
               className="rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-bold text-white"
@@ -504,7 +519,7 @@ export default function CashoutPage() {
         </div>
       ) : null}
 
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex min-w-0 flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-black text-slate-950">
             {user?.role === "admin" ? "All Cashout Requests" : "Cashout History"}
@@ -530,7 +545,7 @@ export default function CashoutPage() {
           <p className="font-bold text-slate-800">No cashout requests found</p>
         </div>
       ) : (
-        <section className="grid gap-4">
+        <section className="grid min-w-0 max-w-full gap-4">
           {cashouts.map((cashout) => {
             const busy = actionId === cashout.id;
             const immutable =
@@ -540,11 +555,11 @@ export default function CashoutPage() {
             return (
               <article
                 key={cashout.id}
-                className={`rounded-2xl border p-5 shadow-sm ${statusColors[cashout.status]}`}
+                className={`min-w-0 max-w-full overflow-hidden rounded-2xl border p-4 shadow-sm sm:p-5 ${statusColors[cashout.status]}`}
               >
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
+                <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <span className="rounded-full border border-current px-2.5 py-1 text-xs font-black">
                         {statusLabels[cashout.status]}
                       </span>
@@ -568,10 +583,10 @@ export default function CashoutPage() {
                         </span>
                       ) : null}
                     </div>
-                    <p className="mt-4 text-xs font-bold uppercase tracking-wider opacity-70">
+                    <p className="mt-4 break-all text-xs font-bold uppercase tracking-wider opacity-70">
                       {cashout.request_number}
                     </p>
-                    <div className="mt-1 flex flex-wrap items-baseline gap-3">
+                    <div className="mt-1 flex min-w-0 flex-wrap items-baseline gap-3">
                       <strong className="text-2xl font-black">
                         {formatMoney(
                           cashout.status === "completed"
@@ -589,9 +604,8 @@ export default function CashoutPage() {
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex min-w-0 flex-wrap gap-2">
                     {!immutable || user?.role === "admin" ? (
-                      cashout.cashout_type === "standard" ? (
                         <button
                           type="button"
                           disabled={busy}
@@ -603,7 +617,6 @@ export default function CashoutPage() {
                         >
                           Edit notes
                         </button>
-                      ) : null
                     ) : null}
                     {user?.role === "admin" && !immutable ? (
                       <>
@@ -674,29 +687,45 @@ export default function CashoutPage() {
                     </button>
                   </div>
                 ) : cashout.notes ? (
-                  <p className="mt-4 border-t border-current/20 pt-4 text-sm">
+                  <p className="mt-4 break-words border-t border-current/20 pt-4 text-sm [overflow-wrap:anywhere]">
                     <strong>Notes:</strong> {cashout.notes}
                   </p>
                 ) : null}
 
-                <div className="mt-4 grid gap-2 border-t border-current/20 pt-4 text-xs sm:grid-cols-2 lg:grid-cols-4">
-                  <span>Requested: {formatMoney(String(payment.requested))}</span>
-                  <span>Actual paid: {formatMoney(String(payment.actual))}</span>
-                  <span>Unpaid difference: {formatMoney(String(payment.difference))}</span>
-                  <span>Completion type: {cashout.status === "completed" ? payment.label : "-"}</span>
-                  <span>
+                <div className="mt-4 grid min-w-0 gap-2 border-t border-current/20 pt-4 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                    Requested: {formatMoney(String(payment.requested))}
+                  </span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                    Actual paid: {formatMoney(String(payment.actual))}
+                  </span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                    Unpaid difference: {formatMoney(String(payment.difference))}
+                  </span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                    Completion type: {cashout.status === "completed" ? payment.label : "-"}
+                  </span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
                     Completed by:{" "}
                     {cashout.completed_by?.username ??
                       (cashout.status === "completed" ? "Telegram bot" : "-")}
                   </span>
-                  <span>Created: {formatDate(cashout.created_at)}</span>
-                  <span>Delivery sent: {formatDate(cashout.telegram_sent_at)}</span>
-                  <span>Completed: {formatDate(cashout.completed_at)}</span>
-                  <span>Cancelled: {formatDate(cashout.cancelled_at)}</span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                    Created: {formatDate(cashout.created_at)}
+                  </span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                    Delivery sent: {formatDate(cashout.telegram_sent_at)}
+                  </span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                    Completed: {formatDate(cashout.completed_at)}
+                  </span>
+                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                    Cancelled: {formatDate(cashout.cancelled_at)}
+                  </span>
                 </div>
 
                 {cashout.telegram_last_error ? (
-                  <p className="mt-3 text-xs">
+                  <p className="mt-3 break-words text-xs [overflow-wrap:anywhere]">
                     <strong>Last delivery error:</strong>{" "}
                     {providerNeutralText(cashout.telegram_last_error)}
                   </p>

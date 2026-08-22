@@ -10,8 +10,14 @@
   box-sizing: border-box;
 }
 
+html {
+  width: 100%;
+}
+
 body {
   margin: 0;
+  width: 100%;
+  min-width: 0;
   background: var(--background);
   color: var(--foreground);
   font-family:
@@ -20,16 +26,26 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+img,
+video,
+canvas,
+svg {
+  max-width: 100%;
+  height: auto;
+}
+
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: 3px solid rgb(99 102 241 / 30%);
   outline-offset: 2px;
 }

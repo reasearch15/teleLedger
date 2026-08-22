@@ -41,7 +41,9 @@ from app.telegram import cashout_delivery
 from app.telegram.cashout_bot.api import TelegramBotApiError, TelegramBotFailureClass
 from app.telegram.cashout_bot.messages import (
     CashoutCallbackAction,
+    CashoutTaskView,
     encode_callback_data,
+    format_qr_cashout_caption,
 )
 
 test_engine = create_async_engine(
@@ -303,6 +305,7 @@ async def _seed_qr_cashout(
     telegram_status: CashoutTelegramStatus = CashoutTelegramStatus.PENDING,
     telegram_message_id: int | None = None,
     storage_key: str = "cashout/10/qr/test-qr.png",
+    notes: str = "Pay player via QR",
 ) -> int:
     async with TestSessionFactory() as session:
         media = MediaAsset(
@@ -326,6 +329,7 @@ async def _seed_qr_cashout(
                 cashout_type=CashoutType.QR,
                 qr_media_asset_id=media.id,
                 amount=Decimal("250.00"),
+                notes=notes,
                 status=CashoutStatus.PENDING,
                 telegram_status=telegram_status,
                 telegram_message_id=telegram_message_id,
@@ -361,22 +365,36 @@ async def test_normal_cashout_create_still_works() -> None:
 
 
 @pytest.mark.asyncio
-async def test_qr_cashout_requires_amount_and_image() -> None:
+async def test_qr_cashout_requires_amount_image_and_note() -> None:
     async with staff_client() as client:
         missing_image = await client.post(
             "/api/cashouts/qr",
             data={
                 "amount": "250.00",
+                "notes": "Player payout",
                 "idempotency_key": "22222222-2222-2222-2222-222222222222",
             },
         )
         assert missing_image.status_code == 400
         assert "QR image is required" in missing_image.json()["detail"]
 
+        missing_note = await client.post(
+            "/api/cashouts/qr",
+            data={
+                "amount": "250.00",
+                "notes": "   ",
+                "idempotency_key": "22222222-2222-2222-2222-222222222223",
+            },
+            files={"qr_image": ("qr.png", PNG_BYTES, "image/png")},
+        )
+        assert missing_note.status_code == 400
+        assert "Note is required" in missing_note.json()["detail"]
+
         invalid_image = await client.post(
             "/api/cashouts/qr",
             data={
                 "amount": "250.00",
+                "notes": "Player payout",
                 "idempotency_key": "33333333-3333-3333-3333-333333333333",
             },
             files={"qr_image": ("bad.txt", b"not-an-image", "text/plain")},
@@ -391,6 +409,7 @@ async def test_qr_cashout_persists_media_and_single_record(tmp_path: Path) -> No
             "/api/cashouts/qr",
             data={
                 "amount": "250.00",
+                "notes": "Venmo QR for John",
                 "idempotency_key": "44444444-4444-4444-4444-444444444444",
             },
             files={"qr_image": ("qr.png", PNG_BYTES, "image/png")},
@@ -399,6 +418,7 @@ async def test_qr_cashout_persists_media_and_single_record(tmp_path: Path) -> No
     payload = response.json()
     assert payload["cashout_type"] == "qr"
     assert payload["qr_media_asset_id"] is not None
+    assert payload["notes"] == "Venmo QR for John"
 
     async with TestSessionFactory() as session:
         count = await session.scalar(select(func.count()).select_from(CashoutRequest))
@@ -432,6 +452,7 @@ async def test_qr_delivery_sends_photo_with_caption_and_buttons(tmp_path: Path) 
     assert photo["photo_path"].is_file()
     assert "💸 Cash Out — CR-000005" in photo["caption"]
     assert "Amount: $250.00" in photo["caption"]
+    assert "Note: Pay player via QR" in photo["caption"]
     assert photo["buttons"] == [
         [
             ("Full Payment", encode_callback_data(5, CashoutCallbackAction.FULL)),
@@ -472,6 +493,7 @@ async def test_qr_full_payment_updates_caption_not_text(tmp_path: Path) -> None:
     assert result.status == "completed_full"
     assert len(gateway.caption_edits) == 1
     assert "Paid in Full" in gateway.caption_edits[0]["caption"]
+    assert "Note: Pay player via QR" in gateway.caption_edits[0]["caption"]
     assert len(gateway.text_edits) == 0
 
 
@@ -508,9 +530,12 @@ async def test_qr_partial_payment_updates_caption(tmp_path: Path) -> None:
     assert result is not None
     assert result.status == "completed_partial"
     partial_edits = [
-        edit for edit in gateway.caption_edits if "Partial Payment" in edit["caption"]
+        edit
+        for edit in gateway.caption_edits
+        if "Partial Payment" in edit["caption"]
     ]
     assert partial_edits
+    assert "Note: Pay player via QR" in partial_edits[-1]["caption"]
 
 
 @pytest.mark.asyncio
@@ -534,6 +559,7 @@ async def test_qr_cancel_updates_caption() -> None:
     assert status == "edited_cancelled"
     assert gateway.caption_edits
     assert "Cancelled" in gateway.caption_edits[-1]["caption"]
+    assert "Note: Pay player via QR" in gateway.caption_edits[-1]["caption"]
 
 
 @pytest.mark.asyncio
@@ -567,6 +593,50 @@ async def test_qr_retry_resends_same_cashout_without_duplicate_record(
         assert cashout is not None
         assert cashout.telegram_message_id == 1001
     assert len(gateway.sent_photos) == 1
+    assert "Note: Pay player via QR" in gateway.sent_photos[0]["caption"]
+
+
+def test_qr_caption_includes_note_through_lifecycle() -> None:
+    view = CashoutTaskView(
+        cashout_id=5,
+        request_number="CR-000005",
+        player_tag="QR",
+        requested_amount=Decimal("250.00"),
+        status=CashoutStatus.PENDING,
+        requested_by="sarah",
+        created_at=datetime(2026, 7, 6, tzinfo=UTC),
+        notes="Pay player via QR",
+    )
+    assert "Note: Pay player via QR" in format_qr_cashout_caption(view)
+
+    completed = CashoutTaskView(
+        cashout_id=5,
+        request_number="CR-000005",
+        player_tag="QR",
+        requested_amount=Decimal("250.00"),
+        status=CashoutStatus.COMPLETED,
+        requested_by="sarah",
+        created_at=datetime(2026, 7, 6, tzinfo=UTC),
+        notes="Pay player via QR",
+        actual_paid_amount=Decimal("250.00"),
+        completion_type=CashoutCompletionType.FULL,
+    )
+    completed_caption = format_qr_cashout_caption(completed)
+    assert "Note: Pay player via QR" in completed_caption
+    assert "Paid in Full" in completed_caption
+
+    cancelled = CashoutTaskView(
+        cashout_id=5,
+        request_number="CR-000005",
+        player_tag="QR",
+        requested_amount=Decimal("250.00"),
+        status=CashoutStatus.CANCELLED,
+        requested_by="sarah",
+        created_at=datetime(2026, 7, 6, tzinfo=UTC),
+        notes="Pay player via QR",
+    )
+    assert "Note: Pay player via QR" in format_qr_cashout_caption(cancelled)
+    assert "Cancelled" in format_qr_cashout_caption(cancelled)
 
 
 @pytest.mark.asyncio

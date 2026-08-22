@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import CashoutPage from "@/app/cashout/page";
-import { createCashout, listCashouts } from "@/services/cashouts";
+import { createCashout, createQrCashout, listCashouts } from "@/services/cashouts";
 import type { Cashout, CashoutPage as CashoutPageResponse } from "@/types/api";
 
 vi.mock("@/components/app-shell", () => ({
@@ -34,6 +34,7 @@ vi.mock("@/services/cashouts", () => ({
   CASHOUT_PAGE_SIZE: 20,
   listCashouts: vi.fn(),
   createCashout: vi.fn(),
+  createQrCashout: vi.fn(),
   updateCashoutNotes: vi.fn(),
   completeCashout: vi.fn(),
   cancelCashout: vi.fn(),
@@ -45,6 +46,8 @@ const createdCashout: Cashout = {
   id: 1,
   request_number: "CR-000001",
   player_tag: "ABC12345",
+  cashout_type: "standard",
+  qr_media_asset_id: null,
   amount: "250.00",
   actual_paid_amount: null,
   completion_type: null,
@@ -103,6 +106,7 @@ describe("CashoutPage", () => {
   beforeEach(() => {
     vi.mocked(listCashouts).mockReset();
     vi.mocked(createCashout).mockReset();
+    vi.mocked(createQrCashout).mockReset();
     vi.mocked(listCashouts).mockResolvedValue(emptyPage);
   });
 
@@ -206,5 +210,36 @@ describe("CashoutPage", () => {
     expect(screen.getAllByText("Actual paid: $125.00").length).toBeGreaterThan(0);
     expect(screen.getByText("Unpaid difference: $0.00")).toBeInTheDocument();
     expect(screen.getByText("Completed by: Telegram bot")).toBeInTheDocument();
+  });
+
+  it("requires QR image when note and amount are provided", async () => {
+    render(<CashoutPage />);
+    await waitFor(() => expect(listCashouts).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "QR Cash Out" }));
+    fireEvent.change(screen.getByLabelText("Amount"), {
+      target: { value: "250.00" },
+    });
+    fireEvent.change(screen.getByLabelText("Note"), {
+      target: { value: "Player payout" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Submit Cashout" }));
+
+    expect(createQrCashout).not.toHaveBeenCalled();
+    expect(screen.getByText("QR image is required.")).toBeInTheDocument();
+  });
+
+  it("requires note for QR cashouts", async () => {
+    render(<CashoutPage />);
+    await waitFor(() => expect(listCashouts).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "QR Cash Out" }));
+    fireEvent.change(screen.getByLabelText("Amount"), {
+      target: { value: "250.00" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Submit Cashout" }));
+
+    expect(createQrCashout).not.toHaveBeenCalled();
+    expect(screen.getByText("Note is required.")).toBeInTheDocument();
   });
 });

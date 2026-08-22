@@ -186,6 +186,7 @@ async def deliver_next_cashout(
                     status=CashoutStatus.PENDING,
                     requested_by=delivery.requested_by,
                     created_at=delivery.created_at.astimezone(UTC),
+                    notes=delivery.notes,
                 )
                 message_id = await bot_gateway.send_photo(
                     chat_id=telegram_chat_id,

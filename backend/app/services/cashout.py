@@ -169,6 +169,7 @@ class CashoutService(ApplicationService):
         self,
         *,
         amount: Decimal,
+        notes: str,
         idempotency_key: UUID,
         upload: PreparedQrCashoutUpload | None,
         actor: User,
@@ -178,6 +179,9 @@ class CashoutService(ApplicationService):
             raise CashoutAuthorizationError(
                 "Staff must be assigned to a coadmin before creating cashouts."
             )
+        normalized_notes = notes.strip()
+        if not normalized_notes:
+            raise CashoutValidationError("Note is required")
         key = str(idempotency_key)
         cashout: CashoutRequest
         created = False
@@ -185,7 +189,11 @@ class CashoutService(ApplicationService):
             async with self._session.begin():
                 existing = await self._repository.get_by_idempotency_key(actor.id, key)
                 if existing is not None:
-                    self._verify_qr_idempotent_payload(existing, amount=amount)
+                    self._verify_qr_idempotent_payload(
+                        existing,
+                        amount=amount,
+                        notes=normalized_notes,
+                    )
                     cashout = existing
                 else:
                     if upload is None:
@@ -209,7 +217,7 @@ class CashoutService(ApplicationService):
                             cashout_type=CashoutType.QR,
                             qr_media_asset_id=media.id,
                             amount=amount,
-                            notes=None,
+                            notes=normalized_notes,
                             status=CashoutStatus.PENDING,
                             telegram_status=CashoutTelegramStatus.PENDING,
                             telegram_random_id=self._telegram_random_id(actor.id, key),
@@ -229,6 +237,7 @@ class CashoutService(ApplicationService):
                                 "cashout_type": cashout.cashout_type.value,
                                 "player_tag": cashout.player_tag,
                                 "amount": str(cashout.amount),
+                                "notes": cashout.notes,
                                 "qr_media_asset_id": media.id,
                                 "status": cashout.status.value,
                                 "telegram_status": cashout.telegram_status.value,
@@ -244,7 +253,11 @@ class CashoutService(ApplicationService):
             existing = await self._repository.get_by_idempotency_key(actor.id, key)
             if existing is None:
                 raise
-            self._verify_qr_idempotent_payload(existing, amount=amount)
+            self._verify_qr_idempotent_payload(
+                existing,
+                amount=amount,
+                notes=normalized_notes,
+            )
             cashout = existing
             created = False
         if created:
@@ -667,8 +680,13 @@ class CashoutService(ApplicationService):
         cashout: CashoutRequest,
         *,
         amount: Decimal,
+        notes: str,
     ) -> None:
-        if cashout.cashout_type != CashoutType.QR or cashout.amount != amount:
+        if (
+            cashout.cashout_type != CashoutType.QR
+            or cashout.amount != amount
+            or cashout.notes != notes
+        ):
             raise CashoutIdempotencyConflictError(
                 "This submission key was already used for another cashout."
             )

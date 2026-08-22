@@ -102,6 +102,16 @@ describe("AppShell navigation", () => {
     expect(screen.queryByRole("link", { name: "Ledger" })).not.toBeInTheDocument();
   });
 
+  it("uses mobile-safe header layout classes", () => {
+    mockState.role = "staff";
+
+    const { container } = render(<AppShell title="Dashboard">content</AppShell>);
+    const shell = container.firstElementChild;
+    expect(shell).toHaveClass("min-w-0");
+    expect(shell?.querySelector("header div.flex-wrap")).not.toBeNull();
+    expect(shell?.querySelector("main")?.className).toMatch(/min-w-0/);
+  });
+
   it("keeps unread notifications visible and opens linked records", async () => {
     mockState.role = "staff";
     vi.mocked(listNotifications).mockResolvedValue({
@@ -127,7 +137,7 @@ describe("AppShell navigation", () => {
     render(<AppShell title="Dashboard">content</AppShell>);
 
     const button = await screen.findByRole("button", {
-      name: /Notifications\s*1/,
+      name: /(?:Notifications|Alerts)\s*1/,
     });
     fireEvent.click(button);
     fireEvent.click(screen.getByText("Venmo confirmed"));
