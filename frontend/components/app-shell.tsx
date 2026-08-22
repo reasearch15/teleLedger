@@ -45,6 +45,9 @@ const adminNavigation = [
 
 const staffNavigation = [...navigation, { href: "/settings", label: "Settings" }];
 
+const headerActionButtonClass =
+  "rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50";
+
 export function AppShell({
   title,
   description,
@@ -102,45 +105,54 @@ export function AppShell({
   return (
     <div className="min-h-screen w-full min-w-0 bg-slate-50">
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl min-w-0 flex-wrap items-center justify-between gap-3 px-4 py-3 sm:gap-4 sm:px-6">
-          <Link href="/dashboard" className="flex min-w-0 shrink items-center gap-3">
-            <span className="grid h-9 w-9 place-items-center rounded-xl bg-indigo-600 text-sm font-black text-white">
-              L
-            </span>
-            <span>
-              <span className="block text-sm font-bold text-slate-950">
-                Ledger
-              </span>
-              <span className="block text-xs text-slate-500">
-                Payment operations
-              </span>
-            </span>
-          </Link>
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 sm:gap-3">
-            <NotificationMenu />
-            <button
-              type="button"
-              onClick={() => setMenuOpen(true)}
-              className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 sm:px-3 lg:hidden"
-              aria-controls="mobile-admin-navigation"
-              aria-expanded={menuOpen}
+        <div className="mx-auto max-w-7xl min-w-0 px-4 py-3 sm:px-6">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] grid-rows-[auto_auto] gap-3 lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:grid-rows-1 lg:items-center">
+            <Link
+              href="/dashboard"
+              className="col-start-1 row-start-1 flex min-w-0 shrink items-center gap-3 lg:col-start-1"
             >
-              <span aria-hidden="true">&#9776;</span>{" "}
-              <span className="hidden min-[360px]:inline">Menu</span>
-            </button>
-            <div className="hidden min-w-0 text-right sm:block">
-              <p className="truncate text-sm font-semibold text-slate-800">{user.username}</p>
-              <p className="text-xs capitalize text-slate-500">{user.role}</p>
-            </div>
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-indigo-600 text-sm font-black text-white">
+                L
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-bold text-slate-950">Ledger</span>
+                <span className="block text-xs text-slate-500">Payment operations</span>
+              </span>
+            </Link>
+
             <button
               type="button"
               onClick={handleLogout}
-              className="rounded-lg border border-slate-300 px-2.5 py-2 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 sm:px-3"
+              className={`${headerActionButtonClass} col-start-2 row-start-1 shrink-0 px-2.5 py-1.5 text-xs lg:col-start-3 lg:row-start-1 lg:px-3 lg:py-2 lg:text-sm lg:font-semibold`}
             >
               Logout
             </button>
+
+            <div className="col-span-2 row-start-2 grid min-w-0 grid-cols-2 gap-2 lg:col-span-1 lg:col-start-2 lg:row-start-1 lg:flex lg:items-center lg:justify-end lg:gap-3">
+              <NotificationMenu
+                mobileLabel="Alerts"
+                desktopLabel="Notifications"
+                buttonClassName="w-full justify-center lg:w-auto lg:justify-start"
+              />
+              <button
+                type="button"
+                onClick={() => setMenuOpen(true)}
+                className={`${headerActionButtonClass} inline-flex w-full items-center justify-center lg:hidden`}
+                aria-controls="mobile-admin-navigation"
+                aria-expanded={menuOpen}
+              >
+                <span aria-hidden="true">&#9776;</span> Menu
+              </button>
+              <div className="hidden min-w-0 text-right lg:block">
+                <p className="truncate text-sm font-semibold text-slate-800">
+                  {user.username}
+                </p>
+                <p className="text-xs capitalize text-slate-500">{user.role}</p>
+              </div>
+            </div>
           </div>
         </div>
+
         <nav className="mx-auto hidden max-w-7xl gap-1 overflow-x-auto px-3 sm:px-5 lg:flex">
           {links.map((link) => {
             const active = pathname === link.href;
@@ -179,12 +191,12 @@ export function AppShell({
                 <p className="text-xs font-bold uppercase tracking-[0.18em] text-indigo-600">
                   Navigation
                 </p>
-                <p className="mt-1 font-black text-slate-950">Admin Menu</p>
+                <p className="mt-1 font-black text-slate-950">Menu</p>
               </div>
               <button
                 type="button"
                 onClick={() => setMenuOpen(false)}
-                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700"
+                className={headerActionButtonClass}
               >
                 Close
               </button>
@@ -234,7 +246,17 @@ export function AppShell({
   );
 }
 
-function NotificationMenu() {
+type NotificationMenuProps = {
+  mobileLabel: string;
+  desktopLabel: string;
+  buttonClassName?: string;
+};
+
+function NotificationMenu({
+  mobileLabel,
+  desktopLabel,
+  buttonClassName = "",
+}: NotificationMenuProps) {
   const router = useRouter();
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
@@ -267,6 +289,15 @@ function NotificationMenu() {
 
   useLiveUpdates(NOTIFICATION_EVENTS, refresh, Boolean(user));
 
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
+
   const openNotification = async (notification: PersistentNotification) => {
     setError("");
     try {
@@ -283,68 +314,92 @@ function NotificationMenu() {
     }
   };
 
+  const panelPositionClass = "lg:left-auto lg:right-0";
+
   return (
-    <div className="relative">
+    <div className="relative min-w-0">
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
-        className="relative max-w-full rounded-lg border border-slate-300 px-2.5 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 sm:px-3"
+        className={`relative inline-flex min-w-0 max-w-full items-center ${headerActionButtonClass} ${buttonClassName}`}
         aria-expanded={open}
+        aria-haspopup="dialog"
+        {...(unreadCount > 0
+          ? { "aria-label": `${desktopLabel}, ${unreadCount} unread` }
+          : {})}
       >
-        <span className="hidden min-[390px]:inline">Notifications</span>
-        <span className="min-[390px]:hidden">Alerts</span>
+        <span className="truncate lg:hidden">{mobileLabel}</span>
+        <span className="hidden truncate lg:inline">{desktopLabel}</span>
         {unreadCount > 0 ? (
-          <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs text-white">
+          <span className="ml-2 shrink-0 rounded-full bg-red-600 px-2 py-0.5 text-xs text-white">
             {unreadCount}
           </span>
         ) : null}
       </button>
       {open ? (
-        <div className="absolute right-0 top-full z-30 mt-2 w-[min(24rem,calc(100vw-2rem))] rounded-lg border border-slate-200 bg-white p-3 shadow-xl">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <p className="text-sm font-black text-slate-950">Notifications</p>
-            <button
-              type="button"
-              onClick={() => void refresh()}
-              className="text-xs font-bold text-indigo-600 disabled:opacity-50"
-              disabled={loading}
-            >
-              Refresh
-            </button>
-          </div>
-          {error ? <p className="mb-2 text-xs font-semibold text-red-700">{error}</p> : null}
-          {loading && items.length === 0 ? (
-            <p className="py-6 text-center text-sm text-slate-500">Loading...</p>
-          ) : null}
-          {!loading && items.length === 0 ? (
-            <p className="py-6 text-center text-sm text-slate-500">
-              No notifications.
-            </p>
-          ) : null}
-          <div className="max-h-80 overflow-y-auto">
-            {items.map((notification) => (
+        <>
+          <button
+            type="button"
+            aria-label="Close notifications"
+            className="fixed inset-0 z-20 bg-transparent lg:hidden"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            role="dialog"
+            aria-label="Notifications"
+            className={`fixed z-30 rounded-lg border border-slate-200 bg-white p-3 shadow-xl max-lg:inset-x-4 max-lg:top-24 max-lg:max-h-[min(24rem,calc(100dvh-7rem))] max-lg:overflow-y-auto lg:absolute lg:top-full lg:mt-2 lg:max-h-80 lg:w-[min(24rem,calc(100vw-2rem))] ${panelPositionClass}`}
+          >
+            <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+              <p className="truncate text-sm font-black text-slate-950">
+                Notifications
+              </p>
               <button
-                key={notification.id}
                 type="button"
-                onClick={() => void openNotification(notification)}
-                className={`mb-2 block w-full rounded-lg border px-3 py-2 text-left text-sm transition hover:bg-slate-50 ${
-                  notification.read_at
-                    ? "border-slate-200 bg-white"
-                    : "border-indigo-200 bg-indigo-50"
-                }`}
+                onClick={() => void refresh()}
+                className="shrink-0 text-xs font-bold text-indigo-600 disabled:opacity-50"
+                disabled={loading}
               >
-                <span className="block font-bold text-slate-950">
-                  {notification.title}
-                </span>
-                {notification.body ? (
-                  <span className="mt-1 block text-xs text-slate-600">
-                    {notification.body}
-                  </span>
-                ) : null}
+                Refresh
               </button>
-            ))}
+            </div>
+            {error ? (
+              <p className="mb-2 break-words text-xs font-semibold text-red-700 [overflow-wrap:anywhere]">
+                {error}
+              </p>
+            ) : null}
+            {loading && items.length === 0 ? (
+              <p className="py-6 text-center text-sm text-slate-500">Loading...</p>
+            ) : null}
+            {!loading && items.length === 0 ? (
+              <p className="py-6 text-center text-sm text-slate-500">
+                No notifications.
+              </p>
+            ) : null}
+            <div className="max-h-80 overflow-y-auto">
+              {items.map((notification) => (
+                <button
+                  key={notification.id}
+                  type="button"
+                  onClick={() => void openNotification(notification)}
+                  className={`mb-2 block w-full min-w-0 rounded-lg border px-3 py-2 text-left text-sm transition hover:bg-slate-50 ${
+                    notification.read_at
+                      ? "border-slate-200 bg-white"
+                      : "border-indigo-200 bg-indigo-50"
+                  }`}
+                >
+                  <span className="block break-words font-bold text-slate-950 [overflow-wrap:anywhere]">
+                    {notification.title}
+                  </span>
+                  {notification.body ? (
+                    <span className="mt-1 block break-words text-xs text-slate-600 [overflow-wrap:anywhere]">
+                      {notification.body}
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+        </>
       ) : null}
     </div>
   );

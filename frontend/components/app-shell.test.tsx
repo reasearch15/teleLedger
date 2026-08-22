@@ -102,14 +102,16 @@ describe("AppShell navigation", () => {
     expect(screen.queryByRole("link", { name: "Ledger" })).not.toBeInTheDocument();
   });
 
-  it("uses mobile-safe header layout classes", () => {
+  it("uses two-row mobile header with logout in the top row", () => {
     mockState.role = "staff";
 
     const { container } = render(<AppShell title="Dashboard">content</AppShell>);
     const shell = container.firstElementChild;
     expect(shell).toHaveClass("min-w-0");
-    expect(shell?.querySelector("header div.flex-wrap")).not.toBeNull();
-    expect(shell?.querySelector("main")?.className).toMatch(/min-w-0/);
+    expect(shell?.querySelector(".grid.grid-cols-2")).not.toBeNull();
+    expect(screen.getAllByRole("button", { name: "Logout" })).toHaveLength(1);
+    expect(screen.getByText("Alerts")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Menu/ })).toBeInTheDocument();
   });
 
   it("keeps unread notifications visible and opens linked records", async () => {
@@ -137,9 +139,12 @@ describe("AppShell navigation", () => {
     render(<AppShell title="Dashboard">content</AppShell>);
 
     const button = await screen.findByRole("button", {
-      name: /(?:Notifications|Alerts)\s*1/,
+      name: /Notifications, 1 unread/,
     });
     fireEvent.click(button);
+
+    const panel = screen.getByRole("dialog", { name: "Notifications" });
+    expect(panel.className).toMatch(/max-lg:inset-x-4/);
     fireEvent.click(screen.getByText("Venmo confirmed"));
 
     await waitFor(() => expect(markNotificationRead).toHaveBeenCalledWith(99));
