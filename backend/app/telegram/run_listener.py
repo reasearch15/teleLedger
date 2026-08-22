@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from telethon import events  # type: ignore[import-untyped]
 
@@ -249,23 +249,34 @@ async def _run_listener_session(
             extra={"telegram_group": cashout_group_chat_id},
         )
         bot_gateway = await TelegramBotApiGateway().__aenter__()
-        delivery_task = asyncio.create_task(
-            run_cashout_delivery_worker(
+
+        async def run_delivery() -> None:
+            await run_cashout_delivery_worker(
                 client,
                 cashout_group_input,
                 telegram_chat_id=cashout_group_chat_id,
                 bot_gateway=bot_gateway,
-            ),
+            )
+
+        async def run_venmo_delivery() -> None:
+            await run_venmo_confirmation_delivery_worker()
+
+        delivery_task = asyncio.create_task(
+            _run_supervised_background_task("cashout-delivery", run_delivery),
             name="cashout-delivery",
         )
         venmo_delivery_task = asyncio.create_task(
-            run_venmo_confirmation_delivery_worker(),
+            _run_supervised_background_task(
+                "venmo-confirmation-delivery",
+                run_venmo_delivery,
+            ),
             name="venmo-confirmation-delivery",
         )
         bot_update_task = asyncio.create_task(
             run_cashout_bot_update_loop(bot_gateway, report=report),
             name="cashout-bot-updates",
         )
+        delivery_task.add_done_callback(_log_background_task_failure)
         venmo_delivery_task.add_done_callback(_log_background_task_failure)
         bot_update_task.add_done_callback(_log_background_task_failure)
         report("Listening for new text messages and cashout bot actions. Press Ctrl+C to stop.")
@@ -298,6 +309,29 @@ async def _run_listener_session(
             await bot_gateway.__aexit__(None, None, None)
         await client.disconnect()
         logger.info("telegram_listener_stopped")
+
+
+async def _run_supervised_background_task(
+    name: str,
+    factory: Callable[[], Awaitable[None]],
+) -> None:
+    """Restart a listener background worker after unexpected failure."""
+    while True:
+        try:
+            await factory()
+            logger.warning(
+                "telegram_listener_background_task_exited",
+                extra={"task_name": name},
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "telegram_listener_background_task_failed",
+                extra={"task_name": name},
+            )
+            await asyncio.sleep(RECONNECT_BASE_SECONDS)
 
 
 def _log_background_task_failure(task: asyncio.Task[None]) -> None:

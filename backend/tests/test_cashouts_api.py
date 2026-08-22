@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -91,6 +92,15 @@ OTHER_COADMIN = make_user(11, "other_coadmin", UserRole.COADMIN)
 STAFF = make_user(42, "sarah", UserRole.STAFF, coadmin_id=10)
 OTHER_STAFF = make_user(84, "alex", UserRole.STAFF, coadmin_id=11)
 ADMIN = make_user(1, "admin", UserRole.ADMIN)
+
+
+@pytest.fixture(autouse=True)
+def stub_immediate_telegram_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cashout_service,
+        "_attempt_immediate_cashout_delivery",
+        AsyncMock(return_value=None),
+    )
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -641,3 +651,100 @@ async def test_completed_cashout_notes_are_immutable(
     )
 
     assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_journal_create_invokes_canonical_telegram_delivery(
+    staff_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    async def spy(cashout_id: int) -> None:
+        calls.append(cashout_id)
+
+    monkeypatch.setattr(cashout_service, "_attempt_immediate_cashout_delivery", spy)
+    payload = {
+        "player_tag": "ABC12345",
+        "amount": "250.00",
+        "notes": "VIP Player",
+        "idempotency_key": "9b3e7304-f4df-44b6-b5d7-267defbe7813",
+    }
+
+    first = await staff_client.post("/api/cashouts", json=payload)
+    repeated = await staff_client.post("/api/cashouts", json=payload)
+
+    assert first.status_code == 201
+    assert repeated.status_code == 201
+    assert calls == [first.json()["id"]]
+    async with TestSessionFactory() as session:
+        assert await session.scalar(select(func.count(CashoutRequest.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_failure_on_create_keeps_single_pending_cashout(
+    staff_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail(cashout_id: int) -> None:
+        async with TestSessionFactory() as session:
+            cashout = await session.get(CashoutRequest, cashout_id)
+            assert cashout is not None
+            cashout.telegram_last_error = "chat not found"
+            cashout.telegram_status = CashoutTelegramStatus.FAILED_TO_SEND
+            cashout.status = CashoutStatus.FAILED_TO_SEND
+            await session.commit()
+
+    monkeypatch.setattr(cashout_service, "_attempt_immediate_cashout_delivery", fail)
+    response = await staff_client.post(
+        "/api/cashouts",
+        json={
+            "player_tag": "ABC12345",
+            "amount": "250.00",
+            "notes": "VIP Player",
+            "idempotency_key": "9b3e7304-f4df-44b6-b5d7-267defbe7813",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["id"] is not None
+    async with TestSessionFactory() as session:
+        assert await session.scalar(select(func.count(CashoutRequest.id))) == 1
+        stored = await session.get(CashoutRequest, response.json()["id"])
+        assert stored is not None
+        assert stored.telegram_message_id is None
+        assert stored.telegram_last_error == "chat not found"
+        assert stored.telegram_status == CashoutTelegramStatus.FAILED_TO_SEND
+
+
+@pytest.mark.asyncio
+async def test_retry_sends_existing_cashout_and_is_idempotent(
+    admin_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await seed_cashout(1, staff_id=42, tag="RETRY-ME")
+    sent: list[int] = []
+
+    async def deliver(cashout_id: int) -> None:
+        sent.append(cashout_id)
+        async with TestSessionFactory() as session:
+            cashout = await session.get(CashoutRequest, cashout_id)
+            assert cashout is not None
+            cashout.status = CashoutStatus.SENT
+            cashout.telegram_status = CashoutTelegramStatus.SENT
+            cashout.telegram_message_id = 555
+            cashout.telegram_chat_id = -1004373307239
+            await session.commit()
+
+    monkeypatch.setattr(cashout_service, "_attempt_immediate_cashout_delivery", deliver)
+
+    first = await admin_client.post("/api/cashouts/1/retry-telegram")
+    second = await admin_client.post("/api/cashouts/1/retry-telegram")
+
+    assert first.status_code == 200
+    assert first.json()["telegram_status"] == "sent"
+    assert first.json()["telegram_message_id"] == 555
+    assert second.status_code == 409
+    assert sent == [1]
+    async with TestSessionFactory() as session:
+        assert await session.scalar(select(func.count(CashoutRequest.id))) == 1

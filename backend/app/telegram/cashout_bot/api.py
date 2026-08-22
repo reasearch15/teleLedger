@@ -343,6 +343,14 @@ class TelegramBotApiGateway:
                 if status_code in (401, 403, 409)
                 else TelegramBotFailureClass.NON_RETRYABLE
             )
+            parameters = body.get("parameters")
+            migrate_to = (
+                parameters.get("migrate_to_chat_id")
+                if isinstance(parameters, dict)
+                else None
+            )
+            if migrate_to is not None:
+                message = f"{message} (migrate_to_chat_id={migrate_to})"
             return TelegramBotApiError(
                 message,
                 failure_class=failure_class,

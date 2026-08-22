@@ -51,6 +51,7 @@ class CashoutDelivery:
     created_at: datetime
     random_id: int
     attempt: int
+    telegram_message_id: int | None = None
 
 
 def format_cashout_message(delivery: CashoutDelivery) -> str:
@@ -92,16 +93,44 @@ async def run_cashout_delivery_worker(
     )
     try:
         while True:
-            processed = await deliver_next_cashout(
-                client,
-                group_input,
-                telegram_chat_id=telegram_chat_id,
-                bot_gateway=bot_gateway,
-            )
+            try:
+                processed = await deliver_next_cashout(
+                    client,
+                    group_input,
+                    telegram_chat_id=telegram_chat_id,
+                    bot_gateway=bot_gateway,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "cashout_delivery_worker_iteration_failed",
+                    extra={"telegram_chat_id": telegram_chat_id},
+                )
+                await asyncio.sleep(DELIVERY_POLL_SECONDS)
+                continue
             if not processed:
                 await asyncio.sleep(DELIVERY_POLL_SECONDS)
     finally:
         logger.info("cashout_delivery_worker_stopped")
+
+
+async def deliver_cashout_by_id(
+    cashout_id: int,
+    *,
+    telegram_chat_id: int,
+    bot_gateway: Any,
+    client: Any | None = None,
+    group_input: Any | None = None,
+) -> bool:
+    """Claim and deliver one already-persisted cashout without creating another."""
+    return await deliver_next_cashout(
+        client if client is not None else object(),
+        group_input,
+        telegram_chat_id=telegram_chat_id,
+        bot_gateway=bot_gateway,
+        cashout_id=cashout_id,
+    )
 
 
 async def deliver_next_cashout(
@@ -110,13 +139,30 @@ async def deliver_next_cashout(
     *,
     telegram_chat_id: int | None = None,
     bot_gateway: Any | None = None,
+    cashout_id: int | None = None,
 ) -> bool:
     """Claim and deliver one due outbox row."""
-    delivery = await _claim_delivery()
+    delivery = await _claim_delivery(cashout_id=cashout_id)
     if delivery is None:
         return False
 
+    logger.info(
+        "cashout_telegram_send_started",
+        extra={
+            "cashout_request_id": delivery.cashout_id,
+            "cashout_attempt": delivery.attempt,
+            "telegram_chat_id": telegram_chat_id,
+            "already_has_telegram_message": delivery.telegram_message_id is not None,
+        },
+    )
     try:
+        if delivery.telegram_message_id is not None:
+            await _record_success(
+                delivery,
+                delivery.telegram_message_id,
+                telegram_chat_id=telegram_chat_id,
+            )
+            return True
         if bot_gateway is not None:
             if telegram_chat_id is None:
                 raise RuntimeError("telegram_chat_id is required for bot delivery")
@@ -176,6 +222,7 @@ async def deliver_next_cashout(
             extra={
                 "cashout_request_id": delivery.cashout_id,
                 "cashout_attempt": delivery.attempt,
+                "telegram_chat_id": telegram_chat_id,
                 "failure_class": _failure_class(error),
                 "telegram_status_code": _telegram_status_code(error),
                 "retry_after_seconds": _retry_after_seconds(error),
@@ -184,11 +231,11 @@ async def deliver_next_cashout(
     return True
 
 
-async def _claim_delivery() -> CashoutDelivery | None:
+async def _claim_delivery(cashout_id: int | None = None) -> CashoutDelivery | None:
     now = datetime.now(UTC)
     async with SessionFactory() as session, session.begin():
         repository = CashoutRepository(session)
-        cashout = await repository.claim_next_delivery(now)
+        cashout = await repository.claim_next_delivery(now, cashout_id=cashout_id)
         if cashout is None:
             return None
 
@@ -214,7 +261,18 @@ async def _claim_delivery() -> CashoutDelivery | None:
             select(User.username).where(User.id == cashout.created_by_staff_id)
         )
         if username is None or cashout.request_number is None:
-            raise RuntimeError("Cashout delivery references incomplete request data")
+            cashout.telegram_status = CashoutTelegramStatus.FAILED_TO_SEND
+            if cashout.status == CashoutStatus.PENDING:
+                cashout.status = CashoutStatus.FAILED_TO_SEND
+            cashout.telegram_last_error = (
+                "Cashout delivery references incomplete request data"
+            )
+            cashout.telegram_next_attempt_at = None
+            logger.error(
+                "cashout_telegram_claim_incomplete",
+                extra={"cashout_request_id": cashout.id},
+            )
+            return None
         return CashoutDelivery(
             cashout_id=cashout.id,
             request_number=cashout.request_number,
@@ -225,6 +283,7 @@ async def _claim_delivery() -> CashoutDelivery | None:
             created_at=cashout.created_at,
             random_id=cashout.telegram_random_id,
             attempt=cashout.telegram_attempts,
+            telegram_message_id=cashout.telegram_message_id,
         )
 
 

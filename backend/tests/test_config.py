@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.core.config import Settings
@@ -91,3 +93,28 @@ def test_blank_venmo_group_id_falls_back_to_cashout(
     assert settings.telegram_venmo_group_id is None
     assert settings.resolved_venmo_telegram_group_id == -1009876543210
     assert settings.venmo_group_falls_back_to_cashout is True
+
+
+@pytest.mark.asyncio
+async def test_supervised_background_task_restarts_after_failure() -> None:
+    attempts = 0
+
+    async def factory() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionRefusedError("Connect call failed ('127.0.0.1', 5432)")
+        raise asyncio.CancelledError
+
+    task = asyncio.create_task(
+        run_listener._run_supervised_background_task("cashout-delivery", factory)
+    )
+    try:
+        for _ in range(80):
+            if attempts >= 2:
+                break
+            await asyncio.sleep(0.02)
+        assert attempts >= 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

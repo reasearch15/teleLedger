@@ -492,6 +492,19 @@ async def test_update_loop_survives_terminal_edit_failure_and_continues() -> Non
 
 
 @pytest.mark.asyncio
+async def test_bot_api_error_includes_migration_hint() -> None:
+    gateway = TelegramBotApiGateway(token="123:test-token")
+    error = gateway._classified_error(
+        400,
+        {
+            "description": "Bad Request: group chat was upgraded to a supergroup chat",
+            "parameters": {"migrate_to_chat_id": -1004373307239},
+        },
+    )
+    assert "migrate_to_chat_id=-1004373307239" in str(error)
+
+
+@pytest.mark.asyncio
 async def test_gateway_get_updates_read_timeout_returns_empty_poll() -> None:
     calls = 0
 

@@ -156,6 +156,8 @@ class CashoutService(ApplicationService):
                 LiveEventType.CASHOUT_CREATED,
                 cashout_id=cashout.id,
             )
+            await _attempt_immediate_cashout_delivery(cashout.id)
+            await self._session.refresh(cashout)
         return cashout
 
     async def list_requests(
@@ -487,6 +489,8 @@ class CashoutService(ApplicationService):
                 },
             )
             await self._session.refresh(cashout)
+        await _attempt_immediate_cashout_delivery(cashout.id)
+        await self._session.refresh(cashout)
         return cashout
 
     async def list_audit(
@@ -589,6 +593,36 @@ class CashoutService(ApplicationService):
             f"{staff_id}:{idempotency_key}".encode()
         ).digest()
         return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1) or 1
+
+
+async def _attempt_immediate_cashout_delivery(cashout_id: int) -> None:
+    """Send one already-persisted cashout through the canonical Telegram path."""
+    from app.core.config import get_settings
+    from app.telegram.cashout_bot.api import TelegramBotApiGateway
+    from app.telegram.cashout_delivery import deliver_cashout_by_id
+    from app.telegram.peer_ids import normalize_telegram_chat_id
+
+    settings = get_settings()
+    chat_id = normalize_telegram_chat_id(settings.telegram_cashout_group_id)
+    extra = {
+        "cashout_request_id": cashout_id,
+        "telegram_chat_id": chat_id,
+    }
+    if chat_id is None:
+        logger.error("cashout_telegram_delivery_missing_group", extra=extra)
+        return
+    if settings.telegram_bot_token is None:
+        logger.error("cashout_telegram_delivery_missing_bot_token", extra=extra)
+        return
+    try:
+        async with TelegramBotApiGateway() as gateway:
+            await deliver_cashout_by_id(
+                cashout_id,
+                telegram_chat_id=chat_id,
+                bot_gateway=gateway,
+            )
+    except Exception:
+        logger.exception("cashout_telegram_immediate_delivery_failed", extra=extra)
 
 
 async def _sync_cashout_telegram_from_persisted_state(cashout: CashoutRequest) -> None:

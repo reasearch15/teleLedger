@@ -322,9 +322,16 @@ async def run_venmo_confirmation_delivery_worker(
     logger.info("venmo_confirmation_delivery_worker_started")
     try:
         while True:
-            processed = await deliver_next_due_venmo_confirmation(
-                gateway_factory=gateway_factory
-            )
+            try:
+                processed = await deliver_next_due_venmo_confirmation(
+                    gateway_factory=gateway_factory
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("venmo_confirmation_delivery_worker_iteration_failed")
+                await asyncio.sleep(VENMO_CONFIRMATION_WORKER_POLL_SECONDS)
+                continue
             if not processed:
                 await asyncio.sleep(VENMO_CONFIRMATION_WORKER_POLL_SECONDS)
     finally:

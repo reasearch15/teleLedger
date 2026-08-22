@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -9,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -61,6 +62,22 @@ class FakeTelegramClient:
 
     async def get_messages(self, group: Any, *, limit: int = 25) -> list[object]:
         return self.recovery_messages[:limit]
+
+
+class RecordingBotGateway:
+    def __init__(self, *, message_id: int = 555) -> None:
+        self.message_id = message_id
+        self.sent_cashouts: list[dict[str, Any]] = []
+
+    async def send_cashout_task_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        buttons: list[list[tuple[str, str]]],
+    ) -> int:
+        self.sent_cashouts.append({"chat_id": chat_id, "text": text, "buttons": buttons})
+        return self.message_id
 
 
 class FailingBotGateway:
@@ -297,7 +314,9 @@ async def test_bot_rate_limit_retry_after_is_recorded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalid_bot_group_failure_is_terminal() -> None:
+async def test_invalid_bot_group_failure_is_terminal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     gateway = FailingBotGateway(
         TelegramBotApiError(
             "chat not found",
@@ -306,12 +325,13 @@ async def test_invalid_bot_group_failure_is_terminal() -> None:
         )
     )
 
-    await cashout_delivery.deliver_next_cashout(
-        object(),
-        "group",
-        telegram_chat_id=-1001234567890,
-        bot_gateway=gateway,
-    )
+    with caplog.at_level("ERROR"):
+        await cashout_delivery.deliver_next_cashout(
+            object(),
+            "group",
+            telegram_chat_id=-1004373307239,
+            bot_gateway=gateway,
+        )
 
     async with TestSessionFactory() as session:
         cashout = await session.get(CashoutRequest, 1)
@@ -319,3 +339,116 @@ async def test_invalid_bot_group_failure_is_terminal() -> None:
         assert cashout.status == CashoutStatus.FAILED_TO_SEND
         assert cashout.telegram_status == CashoutTelegramStatus.FAILED_TO_SEND
         assert cashout.telegram_next_attempt_at is None
+        assert cashout.telegram_last_error == "chat not found"
+        assert await session.scalar(select(func.count(CashoutRequest.id))) == 1
+    assert any(
+        record.message == "cashout_telegram_send_failed" for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_bot_delivery_uses_configured_cashout_group() -> None:
+    gateway = RecordingBotGateway()
+
+    processed = await cashout_delivery.deliver_next_cashout(
+        object(),
+        "group",
+        telegram_chat_id=-1004373307239,
+        bot_gateway=gateway,
+    )
+
+    assert processed is True
+    assert gateway.sent_cashouts[0]["chat_id"] == -1004373307239
+    assert "Optional Notes:\nVIP Player" in gateway.sent_cashouts[0]["text"]
+    assert "Requested By:\nsarah" in gateway.sent_cashouts[0]["text"]
+    async with TestSessionFactory() as session:
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        assert cashout.telegram_status == CashoutTelegramStatus.SENT
+        assert cashout.telegram_message_id == 555
+        assert cashout.telegram_chat_id == -1004373307239
+
+
+@pytest.mark.asyncio
+async def test_deliver_by_id_retries_existing_row_without_creating_another() -> None:
+    gateway = RecordingBotGateway()
+
+    processed = await cashout_delivery.deliver_cashout_by_id(
+        1,
+        telegram_chat_id=-1004373307239,
+        bot_gateway=gateway,
+    )
+    repeated = await cashout_delivery.deliver_cashout_by_id(
+        1,
+        telegram_chat_id=-1004373307239,
+        bot_gateway=gateway,
+    )
+
+    assert processed is True
+    assert repeated is False
+    assert len(gateway.sent_cashouts) == 1
+    async with TestSessionFactory() as session:
+        assert await session.scalar(select(func.count(CashoutRequest.id))) == 1
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        assert cashout.telegram_message_id == 555
+
+
+@pytest.mark.asyncio
+async def test_existing_telegram_message_id_is_not_sent_again() -> None:
+    async with TestSessionFactory() as session:
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        cashout.telegram_message_id = 777
+        await session.commit()
+    gateway = RecordingBotGateway()
+
+    processed = await cashout_delivery.deliver_next_cashout(
+        object(),
+        "group",
+        telegram_chat_id=-1004373307239,
+        bot_gateway=gateway,
+    )
+
+    assert processed is True
+    assert gateway.sent_cashouts == []
+    async with TestSessionFactory() as session:
+        cashout = await session.get(CashoutRequest, 1)
+        assert cashout is not None
+        assert cashout.telegram_status == CashoutTelegramStatus.SENT
+        assert cashout.telegram_message_id == 777
+        assert await session.scalar(select(func.count(CashoutRequest.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_delivery_worker_survives_transient_iteration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def fail_once(*args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionRefusedError("Connect call failed ('127.0.0.1', 5432)")
+        return False
+
+    monkeypatch.setattr(cashout_delivery, "deliver_next_cashout", fail_once)
+    monkeypatch.setattr(cashout_delivery, "DELIVERY_POLL_SECONDS", 0.01)
+    task = asyncio.create_task(
+        cashout_delivery.run_cashout_delivery_worker(
+            object(),
+            "group",
+            telegram_chat_id=-1004373307239,
+        )
+    )
+    try:
+        for _ in range(80):
+            if calls >= 2:
+                break
+            await asyncio.sleep(0.02)
+        assert calls >= 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

@@ -275,17 +275,22 @@ class CashoutRepository(BaseRepository[CashoutRequest]):
     async def claim_next_delivery(
         self,
         now: datetime,
+        *,
+        cashout_id: int | None = None,
     ) -> CashoutRequest | None:
+        conditions = [
+            CashoutRequest.telegram_status != CashoutTelegramStatus.SENT,
+            CashoutRequest.status != CashoutStatus.CANCELLED,
+            or_(
+                CashoutRequest.telegram_next_attempt_at.is_(None),
+                CashoutRequest.telegram_next_attempt_at <= now,
+            ),
+        ]
+        if cashout_id is not None:
+            conditions.append(CashoutRequest.id == cashout_id)
         statement = (
             select(CashoutRequest)
-            .where(
-                CashoutRequest.telegram_status != CashoutTelegramStatus.SENT,
-                CashoutRequest.status != CashoutStatus.CANCELLED,
-                or_(
-                    CashoutRequest.telegram_next_attempt_at.is_(None),
-                    CashoutRequest.telegram_next_attempt_at <= now,
-                ),
-            )
+            .where(*conditions)
             .order_by(CashoutRequest.created_at.asc(), CashoutRequest.id.asc())
             .with_for_update(skip_locked=True)
             .limit(1)
