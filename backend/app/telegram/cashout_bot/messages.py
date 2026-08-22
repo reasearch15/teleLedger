@@ -173,6 +173,61 @@ def format_partial_prompt_message(request_number: str) -> str:
     )
 
 
+def format_qr_cashout_caption(view: CashoutTaskView) -> str:
+    """Render a QR cash-out Telegram photo caption from persisted state."""
+    if view.status == CashoutStatus.COMPLETED:
+        return _format_qr_completed_caption(view)
+    if view.status == CashoutStatus.CANCELLED:
+        return _format_qr_cancelled_caption(view)
+    return _format_qr_active_caption(view)
+
+
+def _format_qr_active_caption(view: CashoutTaskView) -> str:
+    return "\n".join(
+        [
+            f"💸 Cash Out — {view.request_number}",
+            f"Amount: ${view.requested_amount:,.2f}",
+        ]
+    )
+
+
+def _format_qr_completed_caption(view: CashoutTaskView) -> str:
+    paid_amount = view.actual_paid_amount or view.requested_amount
+    unpaid = view.requested_amount - paid_amount
+    lines = [
+        f"💸 Cash Out — {view.request_number}",
+        f"Amount: ${view.requested_amount:,.2f}",
+    ]
+    if view.completion_type == CashoutCompletionType.PARTIAL:
+        lines.extend(
+            [
+                f"Paid: ${paid_amount:,.2f}",
+                f"Remaining: ${unpaid:,.2f}",
+                "🟡 Partial Payment",
+            ]
+        )
+    else:
+        lines.extend([f"Paid: ${paid_amount:,.2f}", "✅ Paid in Full"])
+    if view.completed_by_label:
+        lines.append(f"Completed By: {view.completed_by_label}")
+    if view.completed_at is not None:
+        lines.append(f"Completed At: {view.completed_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    return "\n".join(lines)
+
+
+def _format_qr_cancelled_caption(view: CashoutTaskView) -> str:
+    lines = [
+        f"💸 Cash Out — {view.request_number}",
+        f"Amount: ${view.requested_amount:,.2f}",
+        "Status: Cancelled",
+    ]
+    if view.cancelled_by_label:
+        lines.append(f"Cancelled By: {view.cancelled_by_label}")
+    if view.cancelled_at is not None:
+        lines.append(f"Cancelled At: {view.cancelled_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    return "\n".join(lines)
+
+
 def _append_cashout_actor_lines(
     lines: list[str],
     *,

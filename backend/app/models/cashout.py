@@ -51,6 +51,13 @@ class CashoutTelegramStatus(StrEnum):
     FAILED_TO_SEND = "failed_to_send"
 
 
+class CashoutType(StrEnum):
+    """Cash-out delivery format."""
+
+    STANDARD = "standard"
+    QR = "qr"
+
+
 class CashoutAuditAction(StrEnum):
     """Append-only cashout workflow actions."""
 
@@ -102,6 +109,20 @@ class CashoutRequest(Base):
             ")",
             name="cashout_requests_partial_paid_less_than_amount",
         ),
+        CheckConstraint(
+            "("
+            "cashout_type != 'qr' "
+            "OR qr_media_asset_id IS NOT NULL"
+            ")",
+            name="cashout_requests_qr_media_required",
+        ),
+        CheckConstraint(
+            "("
+            "cashout_type = 'qr' "
+            "OR qr_media_asset_id IS NULL"
+            ")",
+            name="cashout_requests_standard_no_qr_media",
+        ),
         UniqueConstraint(
             "created_by_staff_id",
             "idempotency_key",
@@ -132,6 +153,21 @@ class CashoutRequest(Base):
     )
     idempotency_key: Mapped[str] = mapped_column(String(36), nullable=False)
     player_tag: Mapped[str] = mapped_column(String(128), nullable=False)
+    cashout_type: Mapped[CashoutType] = mapped_column(
+        Enum(
+            CashoutType,
+            name="cashout_type",
+            values_callable=lambda types: [cashout_type.value for cashout_type in types],
+        ),
+        nullable=False,
+        default=CashoutType.STANDARD,
+        server_default=CashoutType.STANDARD.value,
+    )
+    qr_media_asset_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("media_assets.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     actual_paid_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 2),

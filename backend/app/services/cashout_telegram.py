@@ -17,6 +17,7 @@ from app.models.cashout import (
     CashoutCompletionType,
     CashoutRequest,
     CashoutStatus,
+    CashoutType,
 )
 from app.models.cashout_partial_pending import CashoutPartialPendingInput
 from app.models.user import User
@@ -34,6 +35,7 @@ from app.telegram.cashout_bot.messages import (
     decode_callback_data,
     format_cashout_task_card,
     format_partial_prompt_message,
+    format_qr_cashout_caption,
 )
 from app.telegram.peer_ids import (
     authorize_configured_or_persisted_chat,
@@ -82,6 +84,15 @@ class CashoutTelegramGateway(Protocol):
         text: str,
         buttons: list[list[tuple[str, str]]],
     ) -> int | None: ...
+
+    async def edit_message_caption(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        caption: str,
+        buttons: list[list[tuple[str, str]]] | None = None,
+    ) -> None: ...
 
     async def get_updates(
         self,
@@ -362,10 +373,9 @@ class CashoutTelegramService:
 
         view = await self._build_persisted_view(cashout)
         try:
-            await gateway.edit_cashout_task_message(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=format_cashout_task_card(view),
+            await self._edit_task_message(
+                cashout,
+                view=view,
                 buttons=None,
             )
         except Exception:
@@ -588,17 +598,15 @@ class CashoutTelegramService:
             fallback_telegram_user_id=telegram_user_id,
             fallback_telegram_username=telegram_username,
         )
-        text = format_cashout_task_card(view)
         buttons = (
             None
             if cashout.status in (CashoutStatus.COMPLETED, CashoutStatus.CANCELLED)
             else build_active_task_markup(cashout.id)
         )
         try:
-            await self._require_gateway().edit_cashout_task_message(
-                chat_id=cashout.telegram_chat_id,
-                message_id=cashout.telegram_message_id,
-                text=text,
+            await self._edit_task_message(
+                cashout,
+                view=view,
                 buttons=buttons,
             )
         except Exception as error:
@@ -719,6 +727,31 @@ class CashoutTelegramService:
             requested_by=creator,
             completed_by_label=completed_by,
             cancelled_by_label=cancelled_by,
+        )
+
+    async def _edit_task_message(
+        self,
+        cashout: CashoutRequest,
+        *,
+        view: CashoutTaskView,
+        buttons: list[list[tuple[str, str]]] | None,
+    ) -> None:
+        gateway = self._require_gateway()
+        if cashout.telegram_chat_id is None or cashout.telegram_message_id is None:
+            raise RuntimeError("Cashout Telegram message is not linked")
+        if cashout.cashout_type == CashoutType.QR:
+            await gateway.edit_message_caption(
+                chat_id=cashout.telegram_chat_id,
+                message_id=cashout.telegram_message_id,
+                caption=format_qr_cashout_caption(view),
+                buttons=buttons,
+            )
+            return
+        await gateway.edit_cashout_task_message(
+            chat_id=cashout.telegram_chat_id,
+            message_id=cashout.telegram_message_id,
+            text=format_cashout_task_card(view),
+            buttons=buttons,
         )
 
     @staticmethod

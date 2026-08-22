@@ -45,6 +45,21 @@ export function createCashout(input: {
   });
 }
 
+export function createQrCashout(input: {
+  amount: string;
+  idempotencyKey: string;
+  qrImage: File;
+}): Promise<Cashout> {
+  const formData = new FormData();
+  formData.set("amount", input.amount);
+  formData.set("idempotency_key", input.idempotencyKey);
+  formData.set("qr_image", input.qrImage);
+  return apiRequest<Cashout>("/api/cashouts/qr", {
+    method: "POST",
+    body: formData,
+  });
+}
+
 export function updateCashoutNotes(
   cashoutId: number,
   notes: string,

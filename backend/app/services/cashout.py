@@ -17,6 +17,7 @@ from app.db.repositories.cashout import (
     CashoutRepository,
 )
 from app.db.repositories.cashout_partial_pending import CashoutPartialPendingRepository
+from app.db.repositories.media_asset import MediaAssetRepository
 from app.models.cashout import (
     CashoutAuditAction,
     CashoutCompletionType,
@@ -24,9 +25,12 @@ from app.models.cashout import (
     CashoutRequestAudit,
     CashoutStatus,
     CashoutTelegramStatus,
+    CashoutType,
 )
+from app.models.media_asset import MediaAsset
 from app.models.user import User, UserRole
 from app.services.base import ApplicationService
+from app.services.cashout_media import PreparedQrCashoutUpload, QR_PLAYER_TAG
 from app.telegram.peer_ids import chat_ids_equivalent
 from app.websocket.events import LiveEventType, event_broker
 
@@ -73,6 +77,7 @@ class CashoutService(ApplicationService):
         self._session = session
         self._repository = CashoutRepository(session)
         self._pending = CashoutPartialPendingRepository(session)
+        self._media_repository = MediaAssetRepository(session)
 
     async def create(
         self,
@@ -149,6 +154,97 @@ class CashoutService(ApplicationService):
                 amount=amount,
                 notes=notes,
             )
+            cashout = existing
+            created = False
+        if created:
+            await event_broker.publish(
+                LiveEventType.CASHOUT_CREATED,
+                cashout_id=cashout.id,
+            )
+            await _attempt_immediate_cashout_delivery(cashout.id)
+            await self._session.refresh(cashout)
+        return cashout
+
+    async def create_qr(
+        self,
+        *,
+        amount: Decimal,
+        idempotency_key: UUID,
+        upload: PreparedQrCashoutUpload | None,
+        actor: User,
+    ) -> CashoutRequest:
+        self._require_staff(actor)
+        if actor.coadmin_id is None:
+            raise CashoutAuthorizationError(
+                "Staff must be assigned to a coadmin before creating cashouts."
+            )
+        key = str(idempotency_key)
+        cashout: CashoutRequest
+        created = False
+        try:
+            async with self._session.begin():
+                existing = await self._repository.get_by_idempotency_key(actor.id, key)
+                if existing is not None:
+                    self._verify_qr_idempotent_payload(existing, amount=amount)
+                    cashout = existing
+                else:
+                    if upload is None:
+                        raise CashoutValidationError("QR image is required")
+                    media = await self._media_repository.add(
+                        MediaAsset(
+                            coadmin_id=actor.coadmin_id,
+                            storage_key=upload.storage_key,
+                            original_filename=upload.original_filename,
+                            mime_type=upload.mime_type,
+                            size_bytes=len(upload.content),
+                            checksum_sha256=upload.checksum_sha256,
+                            created_by_user_id=actor.id,
+                        )
+                    )
+                    cashout = await self._repository.add(
+                        CashoutRequest(
+                            request_number=None,
+                            idempotency_key=key,
+                            player_tag=QR_PLAYER_TAG,
+                            cashout_type=CashoutType.QR,
+                            qr_media_asset_id=media.id,
+                            amount=amount,
+                            notes=None,
+                            status=CashoutStatus.PENDING,
+                            telegram_status=CashoutTelegramStatus.PENDING,
+                            telegram_random_id=self._telegram_random_id(actor.id, key),
+                            created_by_staff_id=actor.id,
+                            coadmin_id=actor.coadmin_id,
+                        )
+                    )
+                    cashout.request_number = f"CR-{cashout.id:06d}"
+                    await self._repository.add_audit(
+                        CashoutRequestAudit(
+                            cashout_request_id=cashout.id,
+                            action=CashoutAuditAction.CREATED,
+                            actor_user_id=actor.id,
+                            previous_value=None,
+                            new_value={
+                                "request_number": cashout.request_number,
+                                "cashout_type": cashout.cashout_type.value,
+                                "player_tag": cashout.player_tag,
+                                "amount": str(cashout.amount),
+                                "qr_media_asset_id": media.id,
+                                "status": cashout.status.value,
+                                "telegram_status": cashout.telegram_status.value,
+                                "coadmin_id": actor.coadmin_id,
+                            },
+                        )
+                    )
+                    await self._session.flush()
+                    await self._session.refresh(cashout)
+                    created = True
+        except IntegrityError:
+            await self._session.rollback()
+            existing = await self._repository.get_by_idempotency_key(actor.id, key)
+            if existing is None:
+                raise
+            self._verify_qr_idempotent_payload(existing, amount=amount)
             cashout = existing
             created = False
         if created:
@@ -562,6 +658,17 @@ class CashoutService(ApplicationService):
             or cashout.amount != amount
             or cashout.notes != notes
         ):
+            raise CashoutIdempotencyConflictError(
+                "This submission key was already used for another cashout."
+            )
+
+    @staticmethod
+    def _verify_qr_idempotent_payload(
+        cashout: CashoutRequest,
+        *,
+        amount: Decimal,
+    ) -> None:
+        if cashout.cashout_type != CashoutType.QR or cashout.amount != amount:
             raise CashoutIdempotencyConflictError(
                 "This submission key was already used for another cashout."
             )

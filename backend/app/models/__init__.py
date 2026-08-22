@@ -7,6 +7,7 @@ from app.models.cashout import (
     CashoutRequestAudit,
     CashoutStatus,
     CashoutTelegramStatus,
+    CashoutType,
 )
 from app.models.cashout_partial_pending import CashoutPartialPendingInput
 from app.models.inquiry_message import (
@@ -51,6 +52,7 @@ __all__ = [
     "CashoutRequestAudit",
     "CashoutStatus",
     "CashoutTelegramStatus",
+    "CashoutType",
     "CashoutPartialPendingInput",
     "InquiryDirection",
     "InquiryMediaDownloadStatus",

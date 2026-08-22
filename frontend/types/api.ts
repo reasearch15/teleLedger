@@ -100,6 +100,7 @@ export type CashoutStatus =
 
 export type CashoutTelegramStatus = "pending" | "sent" | "failed_to_send";
 export type CashoutCompletionType = "full" | "partial";
+export type CashoutType = "standard" | "qr";
 
 export type InquiryMessage = {
   id: number;
@@ -153,6 +154,8 @@ export type Cashout = {
   id: number;
   request_number: string;
   player_tag: string;
+  cashout_type: CashoutType;
+  qr_media_asset_id: number | null;
   amount: string;
   actual_paid_amount: string | null;
   completion_type: CashoutCompletionType | null;

@@ -21,13 +21,17 @@ from app.models.cashout import (
     CashoutRequestAudit,
     CashoutStatus,
     CashoutTelegramStatus,
+    CashoutType,
 )
+from app.models.media_asset import MediaAsset
 from app.models.user import User
+from app.services.cashout_media import resolve_cashout_media_path
 from app.telegram.cashout_bot.api import TelegramBotApiError, TelegramBotFailureClass
 from app.telegram.cashout_bot.messages import (
     CashoutTaskView,
     build_active_task_markup,
     format_cashout_task_card,
+    format_qr_cashout_caption,
 )
 from app.telegram.inquiry_ingestion import register_cashout_panel_message
 from app.websocket.events import LiveEventType, event_broker
@@ -45,6 +49,7 @@ class CashoutDelivery:
     cashout_id: int
     request_number: str
     player_tag: str
+    cashout_type: CashoutType
     amount: Decimal
     notes: str | None
     requested_by: str
@@ -52,6 +57,9 @@ class CashoutDelivery:
     random_id: int
     attempt: int
     telegram_message_id: int | None = None
+    qr_media_storage_key: str | None = None
+    qr_media_mime_type: str | None = None
+    qr_media_filename: str | None = None
 
 
 def format_cashout_message(delivery: CashoutDelivery) -> str:
@@ -166,22 +174,44 @@ async def deliver_next_cashout(
         if bot_gateway is not None:
             if telegram_chat_id is None:
                 raise RuntimeError("telegram_chat_id is required for bot delivery")
-            message_id = await bot_gateway.send_cashout_task_message(
-                chat_id=telegram_chat_id,
-                text=format_cashout_task_card(
-                    CashoutTaskView(
-                        cashout_id=delivery.cashout_id,
-                        request_number=delivery.request_number,
-                        player_tag=delivery.player_tag,
-                        requested_amount=delivery.amount,
-                        status=CashoutStatus.PENDING,
-                        requested_by=delivery.requested_by,
-                        created_at=delivery.created_at.astimezone(UTC),
-                        notes=delivery.notes,
-                    )
-                ),
-                buttons=build_active_task_markup(delivery.cashout_id),
-            )
+            buttons = build_active_task_markup(delivery.cashout_id)
+            if delivery.cashout_type == CashoutType.QR:
+                if not delivery.qr_media_storage_key or not delivery.qr_media_mime_type:
+                    raise RuntimeError("QR cashout delivery is missing persisted media")
+                view = CashoutTaskView(
+                    cashout_id=delivery.cashout_id,
+                    request_number=delivery.request_number,
+                    player_tag=delivery.player_tag,
+                    requested_amount=delivery.amount,
+                    status=CashoutStatus.PENDING,
+                    requested_by=delivery.requested_by,
+                    created_at=delivery.created_at.astimezone(UTC),
+                )
+                message_id = await bot_gateway.send_photo(
+                    chat_id=telegram_chat_id,
+                    photo_path=resolve_cashout_media_path(delivery.qr_media_storage_key),
+                    caption=format_qr_cashout_caption(view),
+                    buttons=buttons,
+                    mime_type=delivery.qr_media_mime_type,
+                    filename=delivery.qr_media_filename,
+                )
+            else:
+                message_id = await bot_gateway.send_cashout_task_message(
+                    chat_id=telegram_chat_id,
+                    text=format_cashout_task_card(
+                        CashoutTaskView(
+                            cashout_id=delivery.cashout_id,
+                            request_number=delivery.request_number,
+                            player_tag=delivery.player_tag,
+                            requested_amount=delivery.amount,
+                            status=CashoutStatus.PENDING,
+                            requested_by=delivery.requested_by,
+                            created_at=delivery.created_at.astimezone(UTC),
+                            notes=delivery.notes,
+                        )
+                    ),
+                    buttons=buttons,
+                )
         else:
             request = SendMessageRequest(
                 peer=group_input,
@@ -260,6 +290,9 @@ async def _claim_delivery(cashout_id: int | None = None) -> CashoutDelivery | No
         username = await session.scalar(
             select(User.username).where(User.id == cashout.created_by_staff_id)
         )
+        qr_media: MediaAsset | None = None
+        if cashout.cashout_type == CashoutType.QR and cashout.qr_media_asset_id is not None:
+            qr_media = await session.get(MediaAsset, cashout.qr_media_asset_id)
         if username is None or cashout.request_number is None:
             cashout.telegram_status = CashoutTelegramStatus.FAILED_TO_SEND
             if cashout.status == CashoutStatus.PENDING:
@@ -273,10 +306,22 @@ async def _claim_delivery(cashout_id: int | None = None) -> CashoutDelivery | No
                 extra={"cashout_request_id": cashout.id},
             )
             return None
+        if cashout.cashout_type == CashoutType.QR and qr_media is None:
+            cashout.telegram_status = CashoutTelegramStatus.FAILED_TO_SEND
+            if cashout.status == CashoutStatus.PENDING:
+                cashout.status = CashoutStatus.FAILED_TO_SEND
+            cashout.telegram_last_error = "QR cashout delivery references missing media"
+            cashout.telegram_next_attempt_at = None
+            logger.error(
+                "cashout_telegram_claim_missing_qr_media",
+                extra={"cashout_request_id": cashout.id},
+            )
+            return None
         return CashoutDelivery(
             cashout_id=cashout.id,
             request_number=cashout.request_number,
             player_tag=cashout.player_tag,
+            cashout_type=cashout.cashout_type,
             amount=cashout.amount,
             notes=cashout.notes,
             requested_by=username,
@@ -284,6 +329,9 @@ async def _claim_delivery(cashout_id: int | None = None) -> CashoutDelivery | No
             random_id=cashout.telegram_random_id,
             attempt=cashout.telegram_attempts,
             telegram_message_id=cashout.telegram_message_id,
+            qr_media_storage_key=qr_media.storage_key if qr_media is not None else None,
+            qr_media_mime_type=qr_media.mime_type if qr_media is not None else None,
+            qr_media_filename=qr_media.original_filename if qr_media is not None else None,
         )
 
 

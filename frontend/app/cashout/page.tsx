@@ -12,6 +12,7 @@ import {
   CASHOUT_PAGE_SIZE,
   completeCashout,
   createCashout,
+  createQrCashout,
   listCashoutAudit,
   listCashouts,
   retryCashoutTelegram,
@@ -24,6 +25,7 @@ import type {
   CashoutFilters,
   CashoutStatus,
   CashoutTelegramStatus,
+  CashoutType,
 } from "@/types/api";
 
 const statusLabels: Record<CashoutStatus, string> = {
@@ -101,6 +103,8 @@ export default function CashoutPage() {
   const [playerTag, setPlayerTag] = useState("");
   const [amount, setAmount] = useState("");
   const [notes, setNotes] = useState("");
+  const [cashoutType, setCashoutType] = useState<CashoutType>("standard");
+  const [qrImage, setQrImage] = useState<File | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -155,8 +159,12 @@ export default function CashoutPage() {
 
     const trimmedTag = playerTag.trim();
     const numericAmount = Number(amount);
-    if (!trimmedTag) {
+    if (cashoutType === "standard" && !trimmedTag) {
       setError("Player Tag is required.");
+      return;
+    }
+    if (cashoutType === "qr" && !qrImage) {
+      setError("QR image is required.");
       return;
     }
     if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
@@ -172,12 +180,19 @@ export default function CashoutPage() {
       idempotencyKey.current = crypto.randomUUID();
     }
     try {
-      const created = await createCashout({
-        playerTag: trimmedTag,
-        amount,
-        notes: notes.trim(),
-        idempotencyKey: idempotencyKey.current,
-      });
+      const created =
+        cashoutType === "qr"
+          ? await createQrCashout({
+              amount,
+              idempotencyKey: idempotencyKey.current,
+              qrImage: qrImage as File,
+            })
+          : await createCashout({
+              playerTag: trimmedTag,
+              amount,
+              notes: notes.trim(),
+              idempotencyKey: idempotencyKey.current,
+            });
       setCashouts((current) => [
         created,
         ...current.filter((cashout) => cashout.id !== created.id),
@@ -185,6 +200,8 @@ export default function CashoutPage() {
       setPlayerTag("");
       setAmount("");
       setNotes("");
+      setQrImage(null);
+      setCashoutType("standard");
       idempotencyKey.current = "";
       setSuccess(`${created.request_number} was created and queued for delivery.`);
     } catch (submitError) {
@@ -295,43 +312,99 @@ export default function CashoutPage() {
               Your request is saved before delivery is attempted.
             </p>
           </div>
-          <div className="grid gap-4 md:grid-cols-2">
-            <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
-              Player Tag
-              <input
-                required
-                maxLength={128}
-                value={playerTag}
-                onChange={(event) => setPlayerTag(event.target.value)}
-                className="rounded-lg border border-slate-300 px-3 py-2.5"
-                placeholder="ABC12345"
-              />
-            </label>
-            <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
-              Amount
-              <input
-                required
-                min="0.01"
-                step="0.01"
-                type="number"
-                value={amount}
-                onChange={(event) => setAmount(event.target.value)}
-                className="rounded-lg border border-slate-300 px-3 py-2.5"
-                placeholder="250.00"
-              />
-            </label>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setCashoutType("standard")}
+              className={`rounded-lg px-4 py-2 text-sm font-bold ${
+                cashoutType === "standard"
+                  ? "bg-indigo-600 text-white"
+                  : "border border-slate-300 bg-white text-slate-700"
+              }`}
+            >
+              Normal Cash Out
+            </button>
+            <button
+              type="button"
+              onClick={() => setCashoutType("qr")}
+              className={`rounded-lg px-4 py-2 text-sm font-bold ${
+                cashoutType === "qr"
+                  ? "bg-indigo-600 text-white"
+                  : "border border-slate-300 bg-white text-slate-700"
+              }`}
+            >
+              QR Cash Out
+            </button>
           </div>
-          <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
-            Optional Notes
-            <textarea
-              maxLength={2000}
-              rows={3}
-              value={notes}
-              onChange={(event) => setNotes(event.target.value)}
-              className="rounded-lg border border-slate-300 px-3 py-2.5"
-              placeholder="VIP Player"
-            />
-          </label>
+          {cashoutType === "standard" ? (
+            <>
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+                  Player Tag
+                  <input
+                    required
+                    maxLength={128}
+                    value={playerTag}
+                    onChange={(event) => setPlayerTag(event.target.value)}
+                    className="rounded-lg border border-slate-300 px-3 py-2.5"
+                    placeholder="ABC12345"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+                  Amount
+                  <input
+                    required
+                    min="0.01"
+                    step="0.01"
+                    type="number"
+                    value={amount}
+                    onChange={(event) => setAmount(event.target.value)}
+                    className="rounded-lg border border-slate-300 px-3 py-2.5"
+                    placeholder="250.00"
+                  />
+                </label>
+              </div>
+              <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+                Optional Notes
+                <textarea
+                  maxLength={2000}
+                  rows={3}
+                  value={notes}
+                  onChange={(event) => setNotes(event.target.value)}
+                  className="rounded-lg border border-slate-300 px-3 py-2.5"
+                  placeholder="VIP Player"
+                />
+              </label>
+            </>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+                Amount
+                <input
+                  required
+                  min="0.01"
+                  step="0.01"
+                  type="number"
+                  value={amount}
+                  onChange={(event) => setAmount(event.target.value)}
+                  className="rounded-lg border border-slate-300 px-3 py-2.5"
+                  placeholder="250.00"
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+                QR Code Image
+                <input
+                  required
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={(event) =>
+                    setQrImage(event.target.files?.[0] ?? null)
+                  }
+                  className="rounded-lg border border-slate-300 px-3 py-2.5"
+                />
+              </label>
+            </div>
+          )}
           <button
             type="submit"
             disabled={submitting}
@@ -506,23 +579,31 @@ export default function CashoutPage() {
                             : cashout.amount,
                         )}
                       </strong>
-                      <span className="font-bold">{cashout.player_tag}</span>
+                      {cashout.cashout_type === "qr" ? (
+                        <span className="rounded-full border border-violet-300 bg-violet-50 px-2.5 py-1 text-xs font-bold text-violet-900">
+                          QR Cash Out
+                        </span>
+                      ) : (
+                        <span className="font-bold">{cashout.player_tag}</span>
+                      )}
                     </div>
                   </div>
 
                   <div className="flex flex-wrap gap-2">
                     {!immutable || user?.role === "admin" ? (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => {
-                          setEditingNotesId(cashout.id);
-                          setNotesDraft(cashout.notes ?? "");
-                        }}
-                        className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50"
-                      >
-                        Edit notes
-                      </button>
+                      cashout.cashout_type === "standard" ? (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => {
+                            setEditingNotesId(cashout.id);
+                            setNotesDraft(cashout.notes ?? "");
+                          }}
+                          className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50"
+                        >
+                          Edit notes
+                        </button>
+                      ) : null
                     ) : null}
                     {user?.role === "admin" && !immutable ? (
                       <>

@@ -1,6 +1,10 @@
+from decimal import Decimal
 from typing import Annotated, NoReturn
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Path, Query, status
+import asyncio
+
+from fastapi import APIRouter, File, Form, HTTPException, Path, Query, UploadFile, status
 
 from app.api.dependencies import (
     CashoutServiceDependency,
@@ -25,6 +29,11 @@ from app.services.cashout import (
     CashoutService,
     CashoutStateConflictError,
     CashoutValidationError,
+)
+from app.services.cashout_media import (
+    PreparedQrCashoutUpload,
+    prepare_qr_image_upload,
+    write_cashout_media,
 )
 
 router = APIRouter(prefix="/api/cashouts", tags=["cashouts"])
@@ -54,6 +63,62 @@ async def create_cashout(
     except CashoutIdempotencyConflictError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    return _serialize_cashout(
+        cashout,
+        requester=CashoutStaffResponse(
+            id=current_user.id,
+            username=current_user.username,
+            color=current_user.staff_color,
+        ),
+    )
+
+
+@router.post("/qr", response_model=CashoutResponse, status_code=status.HTTP_201_CREATED)
+async def create_qr_cashout(
+    current_user: CurrentUser,
+    service: CashoutServiceDependency,
+    amount: Annotated[Decimal, Form(gt=0, max_digits=18, decimal_places=2)],
+    idempotency_key: Annotated[UUID, Form()],
+    qr_image: Annotated[UploadFile | None, File()] = None,
+) -> CashoutResponse:
+    """Create one QR cash-out with amount and uploaded QR image only."""
+    upload: PreparedQrCashoutUpload | None = None
+    if qr_image is not None:
+        content = await qr_image.read(1)
+        if content:
+            await qr_image.seek(0)
+            if current_user.coadmin_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Staff must be assigned to a coadmin before creating cashouts.",
+                )
+            upload = await prepare_qr_image_upload(
+                qr_image,
+                coadmin_id=current_user.coadmin_id,
+            )
+            await asyncio.to_thread(write_cashout_media, upload.storage_key, upload.content)
+    try:
+        cashout = await service.create_qr(
+            amount=amount,
+            idempotency_key=idempotency_key,
+            upload=upload,
+            actor=current_user,
+        )
+    except CashoutAuthorizationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(error),
+        ) from error
+    except CashoutIdempotencyConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except CashoutValidationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(error),
         ) from error
     return _serialize_cashout(

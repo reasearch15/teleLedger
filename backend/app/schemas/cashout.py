@@ -10,6 +10,7 @@ from app.models.cashout import (
     CashoutCompletionType,
     CashoutStatus,
     CashoutTelegramStatus,
+    CashoutType,
 )
 
 
@@ -68,6 +69,8 @@ class CashoutResponse(BaseModel):
     id: int
     request_number: str
     player_tag: str
+    cashout_type: CashoutType = CashoutType.STANDARD
+    qr_media_asset_id: int | None = None
     amount: Decimal
     actual_paid_amount: Decimal | None
     completion_type: CashoutCompletionType | None
