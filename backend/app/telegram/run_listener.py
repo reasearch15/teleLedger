@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from telethon import events  # type: ignore[import-untyped]
 
@@ -29,6 +30,14 @@ logger = get_logger(__name__)
 TerminalReporter = Callable[[str], None]
 RECONNECT_BASE_SECONDS = 2
 RECONNECT_MAX_SECONDS = 60
+
+
+class TelegramListenerCriticalWorkerError(Exception):
+    """A critical listener worker died; the process must exit for systemd restart."""
+
+    def __init__(self, task_name: str, message: str | None = None) -> None:
+        self.task_name = task_name
+        super().__init__(message or f"critical listener worker {task_name} failed")
 
 
 def _session_file_name(session_name: str | None) -> str:
@@ -129,6 +138,15 @@ async def run_listener(report: TerminalReporter = print) -> None:
             reconnect_delay = RECONNECT_BASE_SECONDS
         except asyncio.CancelledError:
             raise
+        except TelegramListenerCriticalWorkerError as error:
+            logger.exception(
+                "telegram_listener_critical_worker_unrecoverable",
+                extra={
+                    "task_name": error.task_name,
+                    "poll_failure_kind": "critical_worker_unrecoverable",
+                },
+            )
+            raise
         except Exception:
             listener_health.mark_restart()
             logger.exception("telegram_listener_session_failed")
@@ -165,6 +183,7 @@ async def _run_listener_session(
     delivery_task: asyncio.Task[None] | None = None
     venmo_delivery_task: asyncio.Task[None] | None = None
     bot_update_task: asyncio.Task[None] | None = None
+    disconnect_task: asyncio.Task[Any] | None = None
     bot_gateway: TelegramBotApiGateway | None = None
 
     try:
@@ -261,24 +280,19 @@ async def _run_listener_session(
         async def run_venmo_delivery() -> None:
             await run_venmo_confirmation_delivery_worker()
 
-        delivery_task = asyncio.create_task(
-            _run_supervised_background_task("cashout-delivery", run_delivery),
-            name="cashout-delivery",
-        )
+        delivery_task = asyncio.create_task(run_delivery(), name="cashout-delivery")
         venmo_delivery_task = asyncio.create_task(
-            _run_supervised_background_task(
-                "venmo-confirmation-delivery",
-                run_venmo_delivery,
-            ),
+            run_venmo_delivery(),
             name="venmo-confirmation-delivery",
         )
         bot_update_task = asyncio.create_task(
             run_cashout_bot_update_loop(bot_gateway, report=report),
             name="cashout-bot-updates",
         )
-        delivery_task.add_done_callback(_log_background_task_failure)
-        venmo_delivery_task.add_done_callback(_log_background_task_failure)
-        bot_update_task.add_done_callback(_log_background_task_failure)
+        disconnect_task = asyncio.create_task(
+            client.run_until_disconnected(),
+            name="telegram-client-disconnect",
+        )
         report("Listening for new text messages and cashout bot actions. Press Ctrl+C to stop.")
         logger.info(
             "telegram_listener_connected",
@@ -291,59 +305,84 @@ async def _run_listener_session(
                 ),
             },
         )
-        await client.run_until_disconnected()
+        await _await_critical_listener_tasks(
+            session_task=disconnect_task,
+            critical_tasks=(bot_update_task, delivery_task, venmo_delivery_task),
+        )
     finally:
         listener_health.mark_disconnected()
-        for task in (delivery_task, venmo_delivery_task, bot_update_task):
-            if task is not None:
-                task.cancel()
-        await asyncio.gather(
-            *(
-                task
-                for task in (delivery_task, venmo_delivery_task, bot_update_task)
-                if task is not None
-            ),
-            return_exceptions=True,
+        await _shutdown_listener_session_tasks(
+            bot_update_task=bot_update_task,
+            other_tasks=(delivery_task, venmo_delivery_task, disconnect_task),
+            bot_gateway=bot_gateway,
         )
-        if bot_gateway is not None:
-            await bot_gateway.__aexit__(None, None, None)
         await client.disconnect()
         logger.info("telegram_listener_stopped")
 
 
-async def _run_supervised_background_task(
-    name: str,
-    factory: Callable[[], Awaitable[None]],
+async def _await_critical_listener_tasks(
+    *,
+    session_task: asyncio.Task[Any],
+    critical_tasks: Sequence[asyncio.Task[None]],
 ) -> None:
-    """Restart a listener background worker after unexpected failure."""
-    while True:
-        try:
-            await factory()
-            logger.warning(
-                "telegram_listener_background_task_exited",
-                extra={"task_name": name},
-            )
-            return
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "telegram_listener_background_task_failed",
-                extra={"task_name": name},
-            )
-            await asyncio.sleep(RECONNECT_BASE_SECONDS)
+    """Block until Telethon disconnects or a critical worker dies.
 
-
-def _log_background_task_failure(task: asyncio.Task[None]) -> None:
-    if task.cancelled():
-        return
-    try:
-        task.result()
-    except Exception:
-        logger.exception(
-            "telegram_listener_background_task_failed",
-            extra={"task_name": task.get_name()},
+    A finished critical worker must fail the listener process. Telegram send
+    failures belong inside workers; this only observes task termination.
+    """
+    done, _pending = await asyncio.wait(
+        {session_task, *critical_tasks},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for task in critical_tasks:
+        if task not in done:
+            continue
+        name = task.get_name()
+        if task.cancelled():
+            raise asyncio.CancelledError
+        exception = task.exception()
+        if exception is not None:
+            logger.error(
+                "telegram_listener_critical_worker_failed",
+                extra={
+                    "task_name": name,
+                    "poll_failure_kind": "critical_worker_exception",
+                },
+                exc_info=exception,
+            )
+            raise TelegramListenerCriticalWorkerError(name) from exception
+        logger.error(
+            "telegram_listener_critical_worker_exited",
+            extra={
+                "task_name": name,
+                "poll_failure_kind": "critical_worker_returned",
+            },
         )
+        raise TelegramListenerCriticalWorkerError(
+            name,
+            f"critical listener worker {name} exited unexpectedly",
+        )
+    if session_task in done:
+        session_task.result()
+
+
+async def _shutdown_listener_session_tasks(
+    *,
+    bot_update_task: asyncio.Task[None] | None,
+    other_tasks: Sequence[asyncio.Task[Any] | None],
+    bot_gateway: TelegramBotApiGateway | None,
+) -> None:
+    """Cancel the getUpdates poller, await it, then release remaining resources."""
+    if bot_update_task is not None:
+        bot_update_task.cancel()
+        await asyncio.gather(bot_update_task, return_exceptions=True)
+    remaining = [task for task in other_tasks if task is not None]
+    for task in remaining:
+        task.cancel()
+    if remaining:
+        await asyncio.gather(*remaining, return_exceptions=True)
+    if bot_gateway is not None:
+        await bot_gateway.__aexit__(None, None, None)
 
 
 def main() -> None:

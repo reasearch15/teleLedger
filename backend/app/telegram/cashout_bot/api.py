@@ -24,6 +24,7 @@ class TelegramBotFailureClass(StrEnum):
     RETRYABLE = "retryable"
     NON_RETRYABLE = "non_retryable"
     CONFIGURATION = "configuration"
+    CONFLICT = "conflict"
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,10 +338,16 @@ class TelegramBotApiGateway:
                 status_code=status_code,
                 retry_after_seconds=retry_after,
             )
-        if status_code in (401, 403, 400, 409):
+        if status_code == 409:
+            return TelegramBotApiError(
+                message,
+                failure_class=TelegramBotFailureClass.CONFLICT,
+                status_code=status_code,
+            )
+        if status_code in (401, 403, 400):
             failure_class = (
                 TelegramBotFailureClass.CONFIGURATION
-                if status_code in (401, 403, 409)
+                if status_code in (401, 403)
                 else TelegramBotFailureClass.NON_RETRYABLE
             )
             parameters = body.get("parameters")

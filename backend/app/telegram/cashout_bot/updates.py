@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -26,10 +27,25 @@ from app.websocket.events import LiveEventType, event_broker
 
 logger = get_logger(__name__)
 TerminalReporter = Callable[[str], None]
+POLL_BACKOFF_BASE_SECONDS = 1.0
+POLL_BACKOFF_MAX_SECONDS = 30.0
+CONFLICT_BACKOFF_BASE_SECONDS = 2.0
+CONFLICT_MAX_CONSECUTIVE = 6
+CONFLICT_BUDGET_SECONDS = 120.0
 _VENMO_CONFIRMATION_CAPTION_RE = re.compile(
     r"Confirmation request #(?P<request_id>\d+)\s+Attempt #(?P<attempt_number>\d+)",
     re.IGNORECASE,
 )
+
+
+class TelegramBotPollingUnrecoverableError(Exception):
+    """Polling cannot continue; the listener process must exit for systemd restart."""
+
+
+def _backoff_delay_seconds(consecutive: int, *, base: float, cap: float) -> float:
+    if consecutive <= 1:
+        return min(cap, base)
+    return min(cap, base * (2 ** (consecutive - 1)))
 
 
 async def run_cashout_bot_update_loop(
@@ -41,6 +57,10 @@ async def run_cashout_bot_update_loop(
     """Poll Telegram Bot API updates and route cashout interactions."""
     offset: int | None = None
     settings = get_settings()
+    consecutive_failures = 0
+    consecutive_conflicts = 0
+    first_conflict_at: float | None = None
+    last_failure_class: str | None = None
     report("Listening for cashout bot callbacks.")
     await gateway.delete_webhook(drop_pending_updates=False)
     logger.info("cashout_bot_webhook_cleared_for_polling")
@@ -48,29 +68,119 @@ async def run_cashout_bot_update_loop(
         try:
             updates = await gateway.get_updates(offset=offset)
         except TelegramBotApiError as error:
+            if error.failure_class == TelegramBotFailureClass.CONFIGURATION:
+                logger.exception(
+                    "cashout_bot_update_poll_failed",
+                    extra={
+                        "failure_class": error.failure_class.value,
+                        "telegram_status_code": error.status_code,
+                        "poll_failure_kind": "fatal_authentication_or_configuration",
+                    },
+                )
+                raise
+            if error.failure_class == TelegramBotFailureClass.CONFLICT:
+                now = time.monotonic()
+                if first_conflict_at is None:
+                    first_conflict_at = now
+                consecutive_conflicts += 1
+                consecutive_failures += 1
+                last_failure_class = error.failure_class.value
+                elapsed = now - first_conflict_at
+                if (
+                    consecutive_conflicts >= CONFLICT_MAX_CONSECUTIVE
+                    or elapsed >= CONFLICT_BUDGET_SECONDS
+                ):
+                    logger.error(
+                        "cashout_bot_get_updates_conflict_unrecoverable",
+                        extra={
+                            "failure_class": error.failure_class.value,
+                            "telegram_status_code": error.status_code,
+                            "consecutive_conflicts": consecutive_conflicts,
+                            "conflict_elapsed_seconds": round(elapsed, 3),
+                            "conflict_budget_seconds": CONFLICT_BUDGET_SECONDS,
+                            "poll_failure_kind": "persistent_competing_getupdates_consumer",
+                        },
+                    )
+                    report(
+                        "Cashout bot polling failed: persistent getUpdates conflict; "
+                        "listener must restart."
+                    )
+                    raise TelegramBotPollingUnrecoverableError(
+                        "Persistent Telegram getUpdates 409 conflict; "
+                        "another getUpdates consumer is likely still running"
+                    ) from error
+                delay = _backoff_delay_seconds(
+                    consecutive_conflicts,
+                    base=CONFLICT_BACKOFF_BASE_SECONDS,
+                    cap=POLL_BACKOFF_MAX_SECONDS,
+                )
+                logger.warning(
+                    "cashout_bot_get_updates_conflict_retry",
+                    extra={
+                        "failure_class": error.failure_class.value,
+                        "telegram_status_code": error.status_code,
+                        "consecutive_conflicts": consecutive_conflicts,
+                        "retry_delay_seconds": delay,
+                        "conflict_elapsed_seconds": round(elapsed, 3),
+                        "conflict_budget_seconds": CONFLICT_BUDGET_SECONDS,
+                        "poll_failure_kind": "transient_getupdates_overlap",
+                    },
+                )
+                await asyncio.sleep(delay)
+                continue
             if error.failure_class != TelegramBotFailureClass.RETRYABLE:
                 logger.exception(
                     "cashout_bot_update_poll_failed",
                     extra={
                         "failure_class": error.failure_class.value,
                         "telegram_status_code": error.status_code,
+                        "poll_failure_kind": "unrecoverable_polling_failure",
                     },
                 )
                 raise
-            delay = float(error.retry_after_seconds or settings.telegram_bot_poll_seconds)
+            consecutive_conflicts = 0
+            first_conflict_at = None
+            consecutive_failures += 1
+            last_failure_class = error.failure_class.value
+            delay = _backoff_delay_seconds(
+                consecutive_failures,
+                base=POLL_BACKOFF_BASE_SECONDS,
+                cap=POLL_BACKOFF_MAX_SECONDS,
+            )
+            if error.retry_after_seconds is not None:
+                delay = max(delay, float(error.retry_after_seconds))
             logger.warning(
                 "cashout_bot_update_poll_retryable_failed",
                 extra={
                     "failure_class": error.failure_class.value,
                     "telegram_status_code": error.status_code,
+                    "consecutive_failures": consecutive_failures,
                     "retry_delay_seconds": delay,
+                    "poll_failure_kind": "retryable_telegram_or_network_failure",
                 },
             )
             await asyncio.sleep(delay)
             continue
         except Exception:
-            logger.exception("cashout_bot_update_poll_failed")
+            logger.exception(
+                "cashout_bot_update_poll_failed",
+                extra={"poll_failure_kind": "unrecoverable_polling_failure"},
+            )
             raise
+        if consecutive_failures:
+            logger.info(
+                "cashout_bot_update_poll_recovered",
+                extra={
+                    "previous_failure_class": last_failure_class,
+                    "recovered_after_failures": consecutive_failures,
+                    "poll_failure_kind": "polling_recovered",
+                },
+            )
+            report("Cashout bot polling recovered after a transient Telegram failure.")
+        consecutive_failures = 0
+        consecutive_conflicts = 0
+        first_conflict_at = None
+        last_failure_class = None
         for update in updates:
             offset = update.update_id + 1
             logger.info("cashout_bot_update_received", extra={"update_id": update.update_id})

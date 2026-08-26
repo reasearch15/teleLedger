@@ -45,7 +45,10 @@ from app.telegram.cashout_bot.messages import (
     build_active_task_markup,
     encode_callback_data,
 )
-from app.telegram.cashout_bot.updates import run_cashout_bot_update_loop
+from app.telegram.cashout_bot.updates import (
+    TelegramBotPollingUnrecoverableError,
+    run_cashout_bot_update_loop,
+)
 
 test_engine = create_async_engine(
     "sqlite+aiosqlite://",
@@ -631,7 +634,7 @@ async def test_update_loop_fatal_bot_auth_error_still_fails() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status_code", [401, 403, 409])
+@pytest.mark.parametrize("status_code", [401, 403])
 async def test_gateway_bot_configuration_errors_are_fatal(status_code: int) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -646,6 +649,29 @@ async def test_gateway_bot_configuration_errors_are_fatal(status_code: int) -> N
 
     assert error.value.failure_class == TelegramBotFailureClass.CONFIGURATION
     assert error.value.status_code == status_code
+
+
+@pytest.mark.asyncio
+async def test_gateway_get_updates_409_is_conflict_not_configuration() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={
+                "ok": False,
+                "description": (
+                    "Conflict: terminated by other getUpdates request; "
+                    "make sure that only one bot instance is running"
+                ),
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = TelegramBotApiGateway(token="123:test-token", client=client)
+        with pytest.raises(TelegramBotApiError) as error:
+            await gateway.get_updates(offset=None)
+
+    assert error.value.failure_class == TelegramBotFailureClass.CONFLICT
+    assert error.value.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -699,6 +725,291 @@ async def test_update_loop_exits_cleanly_only_when_cancelled() -> None:
             session_factory=TestSessionFactory,
             report=lambda _: None,
         )
+
+
+def _callback_update(
+    update_id: int,
+    query_id: str,
+    cashout_id: int,
+    *,
+    message_id: int = 555,
+) -> TelegramBotUpdate:
+    return TelegramBotUpdate(
+        update_id=update_id,
+        payload={
+            "callback_query": {
+                "id": query_id,
+                "from": {"id": 9001, "username": "operator"},
+                "message": {
+                    "message_id": message_id,
+                    "chat": {"id": -1001234567890, "type": "supergroup"},
+                },
+                "data": encode_callback_data(cashout_id, CashoutCallbackAction.FULL),
+            }
+        },
+    )
+
+
+def _conflict_error() -> TelegramBotApiError:
+    return TelegramBotApiError(
+        "Conflict: terminated by other getUpdates request; "
+        "make sure that only one bot instance is running",
+        failure_class=TelegramBotFailureClass.CONFLICT,
+        status_code=409,
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_loop_recovers_from_transient_409_and_processes_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    await seed_cashout()
+    sleeps: list[float] = []
+    caplog.set_level(logging.INFO)
+
+    class TransientConflictGateway(FakeBotGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+            self.offsets: list[int | None] = []
+            self.in_flight = 0
+            self.max_in_flight = 0
+
+        async def get_updates(self, *, offset: int | None) -> list[TelegramBotUpdate]:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            self.offsets.append(offset)
+            self.calls += 1
+            try:
+                if self.calls == 1:
+                    raise _conflict_error()
+                if self.calls == 2:
+                    return [_callback_update(100, "q-after-409", 1)]
+                raise asyncio.CancelledError
+            finally:
+                self.in_flight -= 1
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    gateway = TransientConflictGateway()
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.asyncio.sleep", record_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_cashout_bot_update_loop(
+            gateway,
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+    stored = await cashout()
+    assert gateway.calls == 3
+    assert gateway.max_in_flight == 1
+    assert gateway.offsets[:2] == [None, None]
+    assert sleeps == [2.0]
+    assert stored.status == CashoutStatus.COMPLETED
+    assert "cashout_bot_get_updates_conflict_retry" in caplog.messages
+    assert "cashout_bot_update_poll_recovered" in caplog.messages
+    assert "cashout_bot_get_updates_conflict_unrecoverable" not in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_update_loop_bounded_backoff_on_repeated_retryable_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    await seed_cashout()
+    sleeps: list[float] = []
+    caplog.set_level(logging.INFO)
+
+    class RetryThenRecoverGateway(FakeBotGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def get_updates(self, *, offset: int | None) -> list[TelegramBotUpdate]:
+            del offset
+            self.calls += 1
+            if self.calls <= 6:
+                raise TelegramBotApiError(
+                    "Telegram Bot API transport error",
+                    failure_class=TelegramBotFailureClass.RETRYABLE,
+                )
+            if self.calls == 7:
+                return [_callback_update(100, "q-after-retries", 1)]
+            raise asyncio.CancelledError
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.asyncio.sleep", record_sleep)
+    gateway = RetryThenRecoverGateway()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_cashout_bot_update_loop(
+            gateway,
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+    stored = await cashout()
+    assert sleeps[:6] == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0]
+    assert stored.status == CashoutStatus.COMPLETED
+    assert "cashout_bot_update_poll_retryable_failed" in caplog.messages
+    assert "cashout_bot_update_poll_recovered" in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_update_loop_resets_backoff_after_successful_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    class RecoverThenFailGateway(FakeBotGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def get_updates(self, *, offset: int | None) -> list[object]:
+            del offset
+            self.calls += 1
+            if self.calls in {1, 2, 4}:
+                raise TelegramBotApiError(
+                    "Telegram Bot API transport error",
+                    failure_class=TelegramBotFailureClass.RETRYABLE,
+                )
+            if self.calls == 3:
+                return []
+            raise asyncio.CancelledError
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.asyncio.sleep", record_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_cashout_bot_update_loop(
+            RecoverThenFailGateway(),
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+    assert sleeps == [1.0, 2.0, 1.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_update_loop_persistent_409_raises_unrecoverable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sleeps: list[float] = []
+    caplog.set_level(logging.ERROR)
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.CONFLICT_MAX_CONSECUTIVE", 3)
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.CONFLICT_BUDGET_SECONDS", 999.0)
+
+    class AlwaysConflictGateway(FakeBotGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def get_updates(self, *, offset: int | None) -> list[object]:
+            del offset
+            self.calls += 1
+            raise _conflict_error()
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    gateway = AlwaysConflictGateway()
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.asyncio.sleep", record_sleep)
+
+    with pytest.raises(TelegramBotPollingUnrecoverableError):
+        await run_cashout_bot_update_loop(
+            gateway,
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+    assert gateway.calls == 3
+    assert sleeps == [2.0, 4.0]
+    assert "cashout_bot_get_updates_conflict_unrecoverable" in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_update_loop_persistent_409_budget_escalates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.CONFLICT_MAX_CONSECUTIVE", 99)
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.CONFLICT_BUDGET_SECONDS", 5.0)
+    clock = {"t": 0.0}
+
+    class AlwaysConflictGateway(FakeBotGateway):
+        async def get_updates(self, *, offset: int | None) -> list[object]:
+            del offset
+            raise _conflict_error()
+
+    async def advance_sleep(delay: float) -> None:
+        clock["t"] += delay
+
+    monkeypatch.setattr(
+        "app.telegram.cashout_bot.updates.time.monotonic",
+        lambda: clock["t"],
+    )
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.asyncio.sleep", advance_sleep)
+
+    with pytest.raises(TelegramBotPollingUnrecoverableError):
+        await run_cashout_bot_update_loop(
+            AlwaysConflictGateway(),
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_loop_retains_offset_across_409_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await seed_cashout(1, telegram_message_id=555)
+    await seed_cashout(2, telegram_message_id=556)
+
+    class OffsetGateway(FakeBotGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.offsets: list[int | None] = []
+            self.calls = 0
+
+        async def get_updates(self, *, offset: int | None) -> list[TelegramBotUpdate]:
+            self.offsets.append(offset)
+            self.calls += 1
+            if self.calls == 1:
+                return [_callback_update(100, "q-first", 1)]
+            if self.calls == 2:
+                raise _conflict_error()
+            if self.calls == 3:
+                return [_callback_update(101, "q-second", 2, message_id=556)]
+            raise asyncio.CancelledError
+
+    async def fast_sleep(delay: float) -> None:
+        assert delay >= 0
+
+    monkeypatch.setattr("app.telegram.cashout_bot.updates.asyncio.sleep", fast_sleep)
+    gateway = OffsetGateway()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_cashout_bot_update_loop(
+            gateway,
+            session_factory=TestSessionFactory,
+            report=lambda _: None,
+        )
+
+    assert gateway.offsets == [None, 101, 101, 102]
+    async with TestSessionFactory() as session:
+        first = await session.get(CashoutRequest, 1)
+        second = await session.get(CashoutRequest, 2)
+    assert first is not None and first.status == CashoutStatus.COMPLETED
+    assert second is not None and second.status == CashoutStatus.COMPLETED
+    assert [answer["query_id"] for answer in gateway.answers] == ["q-first", "q-second"]
 
 
 @pytest.mark.asyncio
