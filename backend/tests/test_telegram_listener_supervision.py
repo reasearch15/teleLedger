@@ -30,6 +30,10 @@ class _RecordingGateway:
     def __init__(self) -> None:
         self.events: list[str] = []
 
+    async def __aenter__(self) -> _RecordingGateway:
+        self.events.append("gateway_opened")
+        return self
+
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         del exc_type, exc, tb
         self.events.append("gateway_closed")
@@ -136,11 +140,11 @@ async def test_cancelled_worker_propagates_cancellation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shutdown_cancels_poller_before_closing_gateway() -> None:
+async def test_shutdown_cancels_long_lived_tasks_before_closing_gateway() -> None:
     gateway = _RecordingGateway()
     events = gateway.events
     poller_started = asyncio.Event()
-    other_started = asyncio.Event()
+    telethon_started = asyncio.Event()
 
     async def poller() -> None:
         events.append("poller_started")
@@ -151,27 +155,28 @@ async def test_shutdown_cancels_poller_before_closing_gateway() -> None:
             events.append("poller_cancelled")
             raise
 
-    async def other_worker() -> None:
-        other_started.set()
+    async def telethon_runtime() -> None:
+        telethon_started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            events.append("other_cancelled")
+            events.append("telethon_cancelled")
             raise
 
     bot_update_task = asyncio.create_task(poller(), name="cashout-bot-updates")
-    other_task = asyncio.create_task(other_worker(), name="cashout-delivery")
+    telethon_task = asyncio.create_task(telethon_runtime(), name="telegram-telethon-runtime")
     await poller_started.wait()
-    await other_started.wait()
-    await run_listener._shutdown_listener_session_tasks(
+    await telethon_started.wait()
+    await run_listener._shutdown_listener_runtime(
         bot_update_task=bot_update_task,
-        other_tasks=(other_task,),
+        telethon_runtime_task=telethon_task,
         bot_gateway=gateway,  # type: ignore[arg-type]
     )
     assert events[0] == "poller_started"
     assert events.index("poller_cancelled") < events.index("gateway_closed")
-    assert events.index("poller_cancelled") < events.index("other_cancelled")
+    assert events.index("telethon_cancelled") < events.index("gateway_closed")
     assert events.count("poller_started") == 1
+    assert events.count("gateway_closed") == 1
 
 
 @pytest.mark.asyncio
@@ -228,20 +233,89 @@ async def test_run_listener_exits_on_critical_worker_error(
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:test-token")
     run_listener.get_settings.cache_clear()
     calls = 0
+    gateway = _RecordingGateway()
 
-    async def fail_session(*_args: Any, **_kwargs: Any) -> None:
+    async def fail_poller(*_args: Any, **_kwargs: Any) -> None:
+        raise TelegramBotPollingUnrecoverableError("poller failed")
+
+    async def wait_for_cancellation(*_args: Any, **_kwargs: Any) -> None:
         nonlocal calls
         calls += 1
-        raise run_listener.TelegramListenerCriticalWorkerError("cashout-bot-updates")
+        await asyncio.Event().wait()
 
-    monkeypatch.setattr(run_listener, "_run_listener_session", fail_session)
+    monkeypatch.setattr(run_listener, "TelegramBotApiGateway", lambda: gateway)
+    monkeypatch.setattr(run_listener, "run_cashout_bot_update_loop", fail_poller)
+    monkeypatch.setattr(run_listener, "_run_telethon_reconnect_loop", wait_for_cancellation)
     monkeypatch.setattr(run_listener, "configure_logging", lambda *_args, **_kwargs: None)
     try:
-        with pytest.raises(run_listener.TelegramListenerCriticalWorkerError):
+        with pytest.raises(run_listener.TelegramListenerCriticalWorkerError) as error:
             await run_listener.run_listener(report=lambda _: None)
+        assert error.value.task_name == "cashout-bot-updates"
+        assert isinstance(error.value.__cause__, TelegramBotPollingUnrecoverableError)
         assert calls == 1
+        assert gateway.events.count("gateway_closed") == 1
     finally:
         run_listener.get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_telethon_failures_and_reconnects_keep_one_bot_poller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_enabled_telegram_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-1009876543210")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:test-token")
+    run_listener.get_settings.cache_clear()
+    gateway = _RecordingGateway()
+    poller_started = asyncio.Event()
+    third_session_started = asyncio.Event()
+    poller_starts = 0
+    poller_cancellations = 0
+    session_attempts = 0
+
+    async def poller(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal poller_starts, poller_cancellations
+        poller_starts += 1
+        poller_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            poller_cancellations += 1
+            raise
+
+    async def session(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal session_attempts
+        session_attempts += 1
+        if session_attempts == 1:
+            assert poller_started.is_set()
+            raise ConnectionError("Telethon start failed")
+        if session_attempts == 2:
+            return
+        third_session_started.set()
+        await asyncio.Event().wait()
+
+    async def no_delay(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(run_listener, "TelegramBotApiGateway", lambda: gateway)
+    monkeypatch.setattr(run_listener, "run_cashout_bot_update_loop", poller)
+    monkeypatch.setattr(run_listener, "_run_listener_session", session)
+    monkeypatch.setattr(run_listener.asyncio, "sleep", no_delay)
+    monkeypatch.setattr(run_listener, "configure_logging", lambda *_args, **_kwargs: None)
+    task = asyncio.create_task(run_listener.run_listener(report=lambda _: None))
+    try:
+        await asyncio.wait_for(third_session_started.wait(), timeout=1)
+        assert session_attempts == 3
+        assert poller_starts == 1
+        assert poller_cancellations == 0
+        assert gateway.events.count("gateway_opened") == 1
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        run_listener.get_settings.cache_clear()
+
+    assert poller_cancellations == 1
+    assert gateway.events.count("gateway_closed") == 1
 
 
 @pytest.mark.asyncio

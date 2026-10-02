@@ -126,6 +126,52 @@ async def run_listener(report: TerminalReporter = print) -> None:
         )
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required when the listener is enabled")
 
+    bot_gateway = await TelegramBotApiGateway().__aenter__()
+    bot_update_task = asyncio.create_task(
+        run_cashout_bot_update_loop(bot_gateway, report=report),
+        name="cashout-bot-updates",
+    )
+    telethon_runtime_task = asyncio.create_task(
+        _run_telethon_reconnect_loop(
+            settings,
+            payment_group_target=payment_group_target,
+            cashout_group_target=cashout_group_target,
+            bot_gateway=bot_gateway,
+            report=report,
+        ),
+        name="telegram-telethon-runtime",
+    )
+    try:
+        await _await_critical_listener_tasks(
+            session_task=telethon_runtime_task,
+            critical_tasks=(bot_update_task,),
+        )
+    except TelegramListenerCriticalWorkerError as error:
+        logger.exception(
+            "telegram_listener_critical_worker_unrecoverable",
+            extra={
+                "task_name": error.task_name,
+                "poll_failure_kind": "critical_worker_unrecoverable",
+            },
+        )
+        raise
+    finally:
+        await _shutdown_listener_runtime(
+            bot_update_task=bot_update_task,
+            telethon_runtime_task=telethon_runtime_task,
+            bot_gateway=bot_gateway,
+        )
+
+
+async def _run_telethon_reconnect_loop(
+    settings: Settings,
+    *,
+    payment_group_target: str | int,
+    cashout_group_target: int,
+    bot_gateway: TelegramBotApiGateway,
+    report: TerminalReporter,
+) -> None:
+    """Reconnect Telethon sessions without owning the Bot API callback runtime."""
     reconnect_delay = RECONNECT_BASE_SECONDS
     while True:
         try:
@@ -133,19 +179,13 @@ async def run_listener(report: TerminalReporter = print) -> None:
                 settings,
                 payment_group_target=payment_group_target,
                 cashout_group_target=cashout_group_target,
+                bot_gateway=bot_gateway,
                 report=report,
             )
             reconnect_delay = RECONNECT_BASE_SECONDS
         except asyncio.CancelledError:
             raise
-        except TelegramListenerCriticalWorkerError as error:
-            logger.exception(
-                "telegram_listener_critical_worker_unrecoverable",
-                extra={
-                    "task_name": error.task_name,
-                    "poll_failure_kind": "critical_worker_unrecoverable",
-                },
-            )
+        except TelegramListenerCriticalWorkerError:
             raise
         except Exception:
             listener_health.mark_restart()
@@ -170,6 +210,7 @@ async def _run_listener_session(
     *,
     payment_group_target: str | int,
     cashout_group_target: int,
+    bot_gateway: TelegramBotApiGateway,
     report: TerminalReporter,
 ) -> None:
     """Connect once, register handlers, and block until disconnected."""
@@ -182,9 +223,7 @@ async def _run_listener_session(
     )
     delivery_task: asyncio.Task[None] | None = None
     venmo_delivery_task: asyncio.Task[None] | None = None
-    bot_update_task: asyncio.Task[None] | None = None
     disconnect_task: asyncio.Task[Any] | None = None
-    bot_gateway: TelegramBotApiGateway | None = None
 
     try:
         await client.start()
@@ -267,8 +306,6 @@ async def _run_listener_session(
             "telegram_reaction_completion_disabled",
             extra={"telegram_group": cashout_group_chat_id},
         )
-        bot_gateway = await TelegramBotApiGateway().__aenter__()
-
         async def run_delivery() -> None:
             await run_cashout_delivery_worker(
                 client,
@@ -284,10 +321,6 @@ async def _run_listener_session(
         venmo_delivery_task = asyncio.create_task(
             run_venmo_delivery(),
             name="venmo-confirmation-delivery",
-        )
-        bot_update_task = asyncio.create_task(
-            run_cashout_bot_update_loop(bot_gateway, report=report),
-            name="cashout-bot-updates",
         )
         disconnect_task = asyncio.create_task(
             client.run_until_disconnected(),
@@ -307,14 +340,12 @@ async def _run_listener_session(
         )
         await _await_critical_listener_tasks(
             session_task=disconnect_task,
-            critical_tasks=(bot_update_task, delivery_task, venmo_delivery_task),
+            critical_tasks=(delivery_task, venmo_delivery_task),
         )
     finally:
         listener_health.mark_disconnected()
         await _shutdown_listener_session_tasks(
-            bot_update_task=bot_update_task,
-            other_tasks=(delivery_task, venmo_delivery_task, disconnect_task),
-            bot_gateway=bot_gateway,
+            tasks=(delivery_task, venmo_delivery_task, disconnect_task),
         )
         await client.disconnect()
         logger.info("telegram_listener_stopped")
@@ -368,21 +399,31 @@ async def _await_critical_listener_tasks(
 
 async def _shutdown_listener_session_tasks(
     *,
-    bot_update_task: asyncio.Task[None] | None,
-    other_tasks: Sequence[asyncio.Task[Any] | None],
-    bot_gateway: TelegramBotApiGateway | None,
+    tasks: Sequence[asyncio.Task[Any] | None],
 ) -> None:
-    """Cancel the getUpdates poller, await it, then release remaining resources."""
-    if bot_update_task is not None:
-        bot_update_task.cancel()
-        await asyncio.gather(bot_update_task, return_exceptions=True)
-    remaining = [task for task in other_tasks if task is not None]
+    """Cancel and await workers owned by one Telethon session."""
+    remaining = [task for task in tasks if task is not None]
     for task in remaining:
         task.cancel()
     if remaining:
         await asyncio.gather(*remaining, return_exceptions=True)
-    if bot_gateway is not None:
-        await bot_gateway.__aexit__(None, None, None)
+
+
+async def _shutdown_listener_runtime(
+    *,
+    bot_update_task: asyncio.Task[None],
+    telethon_runtime_task: asyncio.Task[None],
+    bot_gateway: TelegramBotApiGateway,
+) -> None:
+    """Stop both long-lived runtimes and close their shared gateway once."""
+    bot_update_task.cancel()
+    telethon_runtime_task.cancel()
+    await asyncio.gather(
+        bot_update_task,
+        telethon_runtime_task,
+        return_exceptions=True,
+    )
+    await bot_gateway.__aexit__(None, None, None)
 
 
 def main() -> None:
