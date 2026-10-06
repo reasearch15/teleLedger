@@ -39,6 +39,7 @@ from app.telegram.cashout_bot.api import (
     TelegramBotApiGateway,
     TelegramBotFailureClass,
     TelegramBotUpdate,
+    TelegramMessageDeleteOutcome,
 )
 from app.telegram.cashout_bot.messages import (
     CashoutCallbackAction,
@@ -545,6 +546,36 @@ async def test_gateway_edit_removes_buttons_with_empty_inline_keyboard_payload()
 
     assert observed_payload is not None
     assert observed_payload["reply_markup"] == {"inline_keyboard": []}
+
+
+@pytest.mark.asyncio
+async def test_gateway_delete_treats_precise_missing_message_as_already_absent() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"ok": False, "description": "Bad Request: message to delete not found"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = TelegramBotApiGateway(token="123:test-token", client=client)
+        outcome = await gateway.delete_message_outcome(chat_id=-1001, message_id=50)
+
+    assert outcome == TelegramMessageDeleteOutcome.ALREADY_ABSENT
+
+
+@pytest.mark.asyncio
+async def test_gateway_delete_preserves_genuine_failure() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={"ok": False, "description": "Forbidden: bot is not an administrator"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = TelegramBotApiGateway(token="123:test-token", client=client)
+        outcome = await gateway.delete_message_outcome(chat_id=-1001, message_id=50)
+
+    assert outcome == TelegramMessageDeleteOutcome.FAILED
 
 
 @pytest.mark.asyncio

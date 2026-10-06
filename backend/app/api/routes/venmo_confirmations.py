@@ -34,6 +34,7 @@ from app.services.venmo_confirmation import (
     VenmoConfirmationNotFoundError,
     VenmoConfirmationService,
     VenmoConfirmationStateConflictError,
+    VenmoConfirmationTelegramDeleteError,
 )
 from app.telegram.cashout_bot.api import TelegramBotApiGateway
 from app.telegram.inquiry_media import ALLOWED_IMAGE_MIME_TYPES
@@ -384,8 +385,16 @@ async def delete_venmo_confirmation(
 ) -> None:
     service = VenmoConfirmationService(session)
     try:
-        await service.delete_request(request_id, actor=current_user)
+        media_storage_key = await service.delete_request(
+            request_id,
+            actor=current_user,
+            gateway_factory=TelegramBotApiGateway,
+        )
         await session.commit()
+        await service.finalize_request_deletion(
+            request_id,
+            media_storage_key=media_storage_key,
+        )
     except Exception as error:
         _raise_venmo_error(error)
 
@@ -626,6 +635,8 @@ def _raise_venmo_error(error: Exception) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
     if isinstance(error, VenmoConfirmationStateConflictError):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    if isinstance(error, VenmoConfirmationTelegramDeleteError):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
     raise error
 
 

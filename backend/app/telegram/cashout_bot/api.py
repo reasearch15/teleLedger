@@ -27,6 +27,14 @@ class TelegramBotFailureClass(StrEnum):
     CONFLICT = "conflict"
 
 
+class TelegramMessageDeleteOutcome(StrEnum):
+    """Result of deleting one exact Telegram message."""
+
+    DELETED = "deleted"
+    ALREADY_ABSENT = "already_absent"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True, slots=True)
 class TelegramBotUpdate:
     update_id: int
@@ -139,12 +147,33 @@ class TelegramBotApiGateway:
         await self._post("editMessageText", payload)
 
     async def delete_message(self, *, chat_id: int, message_id: int) -> bool:
+        outcome = await self.delete_message_outcome(chat_id=chat_id, message_id=message_id)
+        return outcome in (
+            TelegramMessageDeleteOutcome.DELETED,
+            TelegramMessageDeleteOutcome.ALREADY_ABSENT,
+        )
+
+    async def delete_message_outcome(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+    ) -> TelegramMessageDeleteOutcome:
         try:
             await self._post(
                 "deleteMessage",
                 {"chat_id": chat_id, "message_id": message_id},
             )
         except TelegramBotApiError as error:
+            if _is_message_already_absent(error):
+                logger.info(
+                    "telegram_bot_delete_already_absent",
+                    extra={
+                        "telegram_chat_id": chat_id,
+                        "telegram_message_id": message_id,
+                    },
+                )
+                return TelegramMessageDeleteOutcome.ALREADY_ABSENT
             logger.warning(
                 "telegram_bot_delete_failed",
                 extra={
@@ -154,8 +183,8 @@ class TelegramBotApiGateway:
                     "telegram_status_code": error.status_code,
                 },
             )
-            return False
-        return True
+            return TelegramMessageDeleteOutcome.FAILED
+        return TelegramMessageDeleteOutcome.DELETED
 
     async def send_message(
         self,
@@ -462,3 +491,8 @@ def _install_httpx_token_redaction(token: str) -> None:
     logging.getLogger("httpx").addFilter(token_filter)
     logging.getLogger("httpcore").addFilter(token_filter)
     _installed_redaction_filters.add(token)
+
+
+def _is_message_already_absent(error: TelegramBotApiError) -> bool:
+    """Recognize only Telegram's precise missing-message deletion response."""
+    return error.status_code == 400 and "message to delete not found" in str(error).casefold()

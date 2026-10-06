@@ -11,7 +11,7 @@ import {
 import type { VenmoConfirmationListResponse } from "@/types/api";
 
 const mockAuthState = vi.hoisted(() => ({
-  role: "staff" as "admin" | "staff",
+  role: "staff" as "admin" | "coadmin" | "staff",
 }));
 
 vi.mock("@/components/app-shell", () => ({
@@ -254,7 +254,22 @@ describe("VenmoConfirmationsPage", () => {
     );
   });
 
-  it("shows admin delete only for pending requests and removes card after confirm", async () => {
+  it.each(["pending", "confirmed", "not_received", "cancelled"] as const)(
+    "shows admin delete for %s requests",
+    async (requestStatus) => {
+      mockAuthState.role = "admin";
+      vi.mocked(listVenmoConfirmations).mockResolvedValueOnce({
+        ...listResponse,
+        items: [{ ...listResponse.items[0], status: requestStatus }],
+      });
+
+      render(<VenmoConfirmationsPage />);
+
+      expect(await screen.findByRole("button", { name: "Delete" })).toBeInTheDocument();
+    },
+  );
+
+  it("requires confirmation and removes the card after successful delete", async () => {
     mockAuthState.role = "admin";
     vi.mocked(deleteVenmoConfirmation).mockResolvedValue(undefined);
 
@@ -263,10 +278,10 @@ describe("VenmoConfirmationsPage", () => {
     expect(await screen.findByRole("button", { name: "Delete" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveTextContent("Delete Request #77?");
-    expect(dialog).toHaveTextContent(
-      "This removes the request from TeleLedger only. It will not delete any Telegram message.",
-    );
+    expect(dialog).toHaveTextContent("Delete this Venmo request?");
+    expect(dialog).toHaveTextContent("permanently delete the request from TeleLedger");
+    expect(dialog).toHaveTextContent("remove its associated Telegram message(s)");
+    expect(dialog).toHaveTextContent("This action cannot be undone.");
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
 
@@ -282,5 +297,48 @@ describe("VenmoConfirmationsPage", () => {
 
     expect(await screen.findByText("Request #77")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+  });
+
+  it("does not show delete for coadmin users", async () => {
+    mockAuthState.role = "coadmin";
+    render(<VenmoConfirmationsPage />);
+
+    expect(await screen.findByText("Request #77")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+  });
+
+  it("cancels without calling delete", async () => {
+    mockAuthState.role = "admin";
+    render(<VenmoConfirmationsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+
+    expect(deleteVenmoConfirmation).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("disables modal actions while deleting", async () => {
+    mockAuthState.role = "admin";
+    vi.mocked(deleteVenmoConfirmation).mockReturnValue(new Promise(() => undefined));
+    render(<VenmoConfirmationsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    expect(within(dialog).getByRole("button", { name: "Deleting..." })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
+  });
+
+  it("leaves the request visible when delete fails", async () => {
+    mockAuthState.role = "admin";
+    vi.mocked(deleteVenmoConfirmation).mockRejectedValue(new Error("Telegram unavailable"));
+    render(<VenmoConfirmationsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Something went wrong. Please try again.",
+    );
+    expect(screen.getByText("Request #77")).toBeInTheDocument();
   });
 });

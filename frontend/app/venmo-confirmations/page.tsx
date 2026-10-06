@@ -346,7 +346,7 @@ export default function VenmoConfirmationsPage() {
                 </Link>
               </div>
               <div className="flex items-start gap-2">
-                {isAdmin && request.status === "pending" ? (
+                {isAdmin ? (
                   <button
                     type="button"
                     disabled={deletingId === request.id}
@@ -417,11 +417,14 @@ export default function VenmoConfirmationsPage() {
             onClick={(event) => event.stopPropagation()}
           >
             <h2 id="delete-venmo-title" className="text-lg font-black text-slate-950">
-              Delete Request #{deleteTarget.id}?
+              Delete this Venmo request?
             </h2>
             <p className="mt-2 text-sm text-slate-600">
-              This removes the request from TeleLedger only. It will not delete any Telegram
-              message.
+              This will permanently delete the request from TeleLedger and remove its associated
+              Telegram message(s).
+            </p>
+            <p className="mt-2 text-sm font-bold text-red-700">
+              This action cannot be undone.
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button

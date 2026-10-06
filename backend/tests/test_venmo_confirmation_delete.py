@@ -13,11 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.api.dependencies import get_current_user
+from app.api.routes import venmo_confirmations as venmo_routes
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_session
 from app.main import app
 from app.models.media_asset import MediaAsset
+from app.models.notification import NotificationType, PersistentNotification
 from app.models.user import User, UserRole
 from app.models.venmo_confirmation import (
     VenmoConfirmationAttempt,
@@ -28,7 +30,11 @@ from app.models.venmo_confirmation import (
     VenmoConfirmationRequest,
     VenmoConfirmationStatus,
 )
-from app.services.venmo_confirmation import VenmoConfirmationService
+from app.services.venmo_confirmation import (
+    VenmoConfirmationService,
+    _telegram_delete_targets,
+)
+from app.telegram.cashout_bot.api import TelegramMessageDeleteOutcome
 from app.telegram.venmo_confirmation import (
     VenmoConfirmationCallbackAction,
     encode_venmo_confirmation_callback,
@@ -73,6 +79,27 @@ COADMIN = make_user(10, "default_coadmin", UserRole.COADMIN)
 ADMIN = make_user(1, "admin", UserRole.ADMIN)
 
 
+class _DeleteGateway:
+    calls: list[tuple[int, int]] = []
+    outcomes: dict[tuple[int, int], TelegramMessageDeleteOutcome] = {}
+
+    async def __aenter__(self) -> _DeleteGateway:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    async def delete_message_outcome(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+    ) -> TelegramMessageDeleteOutcome:
+        target = (chat_id, message_id)
+        self.calls.append(target)
+        return self.outcomes.get(target, TelegramMessageDeleteOutcome.DELETED)
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def reset_database(
     monkeypatch: pytest.MonkeyPatch,
@@ -80,6 +107,9 @@ async def reset_database(
 ) -> AsyncIterator[None]:
     monkeypatch.setenv("INQUIRY_MEDIA_DIR", str(tmp_path))
     monkeypatch.setenv("TELEGRAM_CASHOUT_GROUP_ID", "-1001234567890")
+    _DeleteGateway.calls = []
+    _DeleteGateway.outcomes = {}
+    monkeypatch.setattr(venmo_routes, "TelegramBotApiGateway", _DeleteGateway)
     get_settings.cache_clear()
     async with test_engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -193,10 +223,12 @@ async def test_admin_can_delete_pending_request(tmp_path: Path) -> None:
         response = await client.delete(f"/api/venmo-confirmations/{request_id}")
 
     assert response.status_code == 204
+    assert _DeleteGateway.calls == []
     async with TestSessionFactory() as session:
         assert await session.get(VenmoConfirmationRequest, request_id) is None
         assert await session.get(VenmoConfirmationAttempt, attempt_id) is None
         assert await session.get(MediaAsset, request_id) is None
+    assert not (tmp_path / "evidence" / f"venmo-{request_id}.png").exists()
 
 
 @pytest.mark.asyncio
@@ -222,22 +254,38 @@ async def test_coadmin_cannot_delete_pending_request(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirmed_request_cannot_be_deleted(tmp_path: Path) -> None:
+async def test_admin_can_delete_confirmed_request_and_notification(tmp_path: Path) -> None:
     request_id, _ = await seed_pending_request(
         tmp_path,
         request_id=301,
         status=VenmoConfirmationStatus.CONFIRMED,
         with_posted_message=True,
     )
+    async with TestSessionFactory() as session:
+        session.add(
+            PersistentNotification(
+                recipient_user_id=42,
+                coadmin_id=10,
+                type=NotificationType.VENMO_CONFIRMATION_CONFIRMED,
+                related_entity_type="venmo_confirmation_request",
+                related_entity_id=request_id,
+                title="Venmo payment confirmed",
+            )
+        )
+        await session.commit()
 
     async with api_client_for(ADMIN) as client:
         response = await client.delete(f"/api/venmo-confirmations/{request_id}")
 
-    assert response.status_code == 409
+    assert response.status_code == 204
+    assert _DeleteGateway.calls == [(-100123, 9301)]
+    async with TestSessionFactory() as session:
+        assert await session.get(VenmoConfirmationRequest, request_id) is None
+        assert await session.scalar(select(func.count()).select_from(PersistentNotification)) == 0
 
 
 @pytest.mark.asyncio
-async def test_not_received_request_cannot_be_deleted(tmp_path: Path) -> None:
+async def test_admin_can_delete_not_received_request(tmp_path: Path) -> None:
     request_id, _ = await seed_pending_request(
         tmp_path,
         request_id=302,
@@ -248,7 +296,24 @@ async def test_not_received_request_cannot_be_deleted(tmp_path: Path) -> None:
     async with api_client_for(ADMIN) as client:
         response = await client.delete(f"/api/venmo-confirmations/{request_id}")
 
-    assert response.status_code == 409
+    assert response.status_code == 204
+    assert _DeleteGateway.calls == [(-100123, 9302)]
+
+
+@pytest.mark.asyncio
+async def test_admin_can_delete_cancelled_request(tmp_path: Path) -> None:
+    request_id, _ = await seed_pending_request(
+        tmp_path,
+        request_id=309,
+        status=VenmoConfirmationStatus.CANCELLED,
+        with_posted_message=True,
+    )
+
+    async with api_client_for(ADMIN) as client:
+        response = await client.delete(f"/api/venmo-confirmations/{request_id}")
+
+    assert response.status_code == 204
+    assert _DeleteGateway.calls == [(-100123, 9309)]
 
 
 @pytest.mark.asyncio
@@ -369,7 +434,7 @@ async def test_delete_removes_related_rows_without_orphans(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_delete_does_not_edit_telegram_messages(tmp_path: Path) -> None:
+async def test_delete_removes_linked_telegram_message(tmp_path: Path) -> None:
     request_id, _ = await seed_pending_request(
         tmp_path,
         request_id=307,
@@ -379,6 +444,110 @@ async def test_delete_does_not_edit_telegram_messages(tmp_path: Path) -> None:
     async with api_client_for(ADMIN) as client:
         response = await client.delete(f"/api/venmo-confirmations/{request_id}")
     assert response.status_code == 204
+    assert _DeleteGateway.calls == [(-100123, 9307)]
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_every_distinct_attempt_message(tmp_path: Path) -> None:
+    request_id, _ = await seed_pending_request(
+        tmp_path,
+        request_id=310,
+        with_posted_message=True,
+    )
+    async with TestSessionFactory() as session:
+        session.add(
+            VenmoConfirmationAttempt(
+                id=3101,
+                request_id=request_id,
+                attempt_number=2,
+                status=VenmoConfirmationAttemptStatus.POSTED,
+                telegram_chat_id=-100124,
+                telegram_message_id=9311,
+            )
+        )
+        await session.commit()
+
+    async with api_client_for(ADMIN) as client:
+        response = await client.delete(f"/api/venmo-confirmations/{request_id}")
+
+    assert response.status_code == 204
+    assert _DeleteGateway.calls == [(-100124, 9311), (-100123, 9310)]
+
+
+def test_telegram_targets_are_deduplicated_and_ignore_partial_ids() -> None:
+    attempts = [
+        VenmoConfirmationAttempt(telegram_chat_id=-1001, telegram_message_id=50),
+        VenmoConfirmationAttempt(telegram_chat_id=-1001, telegram_message_id=50),
+        VenmoConfirmationAttempt(telegram_chat_id=-1001, telegram_message_id=None),
+    ]
+    assert _telegram_delete_targets(attempts) == {(-1001, 50)}
+
+
+@pytest.mark.asyncio
+async def test_already_absent_telegram_message_allows_delete(tmp_path: Path) -> None:
+    request_id, _ = await seed_pending_request(
+        tmp_path,
+        request_id=311,
+        with_posted_message=True,
+    )
+    _DeleteGateway.outcomes[(-100123, 9311)] = TelegramMessageDeleteOutcome.ALREADY_ABSENT
+
+    async with api_client_for(ADMIN) as client:
+        response = await client.delete(f"/api/venmo-confirmations/{request_id}")
+
+    assert response.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_telegram_failure_preserves_request_and_message_ids(tmp_path: Path) -> None:
+    request_id, attempt_id = await seed_pending_request(
+        tmp_path,
+        request_id=312,
+        with_posted_message=True,
+    )
+    _DeleteGateway.outcomes[(-100123, 9312)] = TelegramMessageDeleteOutcome.FAILED
+
+    async with api_client_for(ADMIN) as client:
+        response = await client.delete(f"/api/venmo-confirmations/{request_id}")
+
+    assert response.status_code == 502
+    async with TestSessionFactory() as session:
+        assert await session.get(VenmoConfirmationRequest, request_id) is not None
+        attempt = await session.get(VenmoConfirmationAttempt, attempt_id)
+        assert attempt is not None
+        assert (attempt.telegram_chat_id, attempt.telegram_message_id) == (-100123, 9312)
+
+
+@pytest.mark.asyncio
+async def test_repeated_delete_fails_safely(tmp_path: Path) -> None:
+    request_id, _ = await seed_pending_request(tmp_path, request_id=313)
+    async with api_client_for(ADMIN) as client:
+        assert (await client.delete(f"/api/venmo-confirmations/{request_id}")).status_code == 204
+        assert (await client.delete(f"/api/venmo-confirmations/{request_id}")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_preserves_shared_media(tmp_path: Path) -> None:
+    request_id, _ = await seed_pending_request(tmp_path, request_id=314)
+    async with TestSessionFactory() as session:
+        session.add(
+            VenmoConfirmationRequest(
+                id=315,
+                coadmin_id=10,
+                requested_by_staff_id=42,
+                screenshot_media_asset_id=request_id,
+                status=VenmoConfirmationStatus.PENDING,
+            )
+        )
+        await session.commit()
+
+    async with api_client_for(ADMIN) as client:
+        response = await client.delete(f"/api/venmo-confirmations/{request_id}")
+
+    assert response.status_code == 204
+    async with TestSessionFactory() as session:
+        assert await session.get(MediaAsset, request_id) is not None
+    assert (tmp_path / "evidence" / f"venmo-{request_id}.png").exists()
 
 
 @pytest.mark.asyncio

@@ -211,7 +211,7 @@ describe("VenmoConfirmationDetailPage", () => {
     expect(screen.getByText(/Inquiry #12/)).toBeInTheDocument();
     expect(screen.getByText("attempt posted")).toBeInTheDocument();
     expect(useLiveUpdates).toHaveBeenCalledWith(
-      ["venmo_confirmation_updated"],
+      ["venmo_confirmation_updated", "venmo_confirmation_deleted"],
       expect.any(Function),
       true,
     );

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,7 +14,7 @@ from app.core.logging import get_logger
 from app.db.repositories.media_asset import MediaAssetRepository
 from app.db.repositories.venmo_confirmation import VenmoConfirmationRepository
 from app.models.media_asset import MediaAsset
-from app.models.notification import NotificationType
+from app.models.notification import NotificationType, PersistentNotification
 from app.models.user import User, UserRole
 from app.models.venmo_confirmation import (
     VenmoConfirmationAttempt,
@@ -27,7 +28,11 @@ from app.models.venmo_confirmation import (
 )
 from app.services.base import ApplicationService
 from app.services.notification import NotificationService
-from app.telegram.cashout_bot.api import TelegramBotApiError
+from app.telegram.cashout_bot.api import (
+    TelegramBotApiError,
+    TelegramBotApiGateway,
+    TelegramMessageDeleteOutcome,
+)
 from app.telegram.peer_ids import (
     authorize_configured_or_persisted_chat,
     chat_ids_equivalent,
@@ -55,6 +60,10 @@ class VenmoConfirmationNotFoundError(Exception):
 
 class VenmoConfirmationStateConflictError(Exception):
     """Raised when a Venmo confirmation transition is invalid."""
+
+
+class VenmoConfirmationTelegramDeleteError(Exception):
+    """Raised when an exact linked Telegram message could not be deleted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,7 +324,7 @@ class VenmoConfirmationService(ApplicationService):
             return VenmoConfirmationTelegramActionResult(status="not_venmo_confirmation")
 
         attempt_id, action = decoded
-        attempt = await self._repository.get_attempt_by_id(attempt_id, for_update=True)
+        attempt = await self._repository.get_attempt_by_id(attempt_id)
         if attempt is None:
             await _answer_gateway_callback(
                 gateway,
@@ -327,8 +336,20 @@ class VenmoConfirmationService(ApplicationService):
                 status="not_found",
                 attempt_id=attempt_id,
             )
-        request = await self._repository.get_by_id(attempt.request_id)
+        request = await self._repository.get_by_id(attempt.request_id, for_update=True)
         if request is None:
+            await _answer_gateway_callback(
+                gateway,
+                query_id=query_id,
+                text="Confirmation request was not found.",
+                alert=True,
+            )
+            return VenmoConfirmationTelegramActionResult(
+                status="not_found",
+                attempt_id=attempt_id,
+            )
+        attempt = await self._repository.get_attempt_by_id(attempt_id, for_update=True)
+        if attempt is None or attempt.request_id != request.id:
             await _answer_gateway_callback(
                 gateway,
                 query_id=query_id,
@@ -619,23 +640,23 @@ class VenmoConfirmationService(ApplicationService):
             raise VenmoConfirmationNotFoundError("Venmo confirmation was not found.")
         return request
 
-    async def delete_request(self, request_id: int, *, actor: User) -> None:
-        """Permanently remove a pending Venmo confirmation request from TeleLedger."""
+    async def delete_request(
+        self,
+        request_id: int,
+        *,
+        actor: User,
+        gateway_factory: Callable[[], object] = TelegramBotApiGateway,
+    ) -> str | None:
+        """Delete exact Telegram targets, then permanently remove a request."""
         self._require_admin(actor)
         request = await self._repository.get_by_id(request_id, for_update=True)
         if request is None:
             raise VenmoConfirmationNotFoundError("Venmo confirmation was not found.")
-        if request.status != VenmoConfirmationStatus.PENDING:
-            raise VenmoConfirmationStateConflictError(
-                "Only pending Venmo confirmation requests can be deleted."
-            )
 
         attempts = await self._repository.list_attempts(request_id, for_update=True)
         now = datetime.now(UTC)
-        telegram_message_existed = False
+        telegram_targets = _telegram_delete_targets(attempts)
         for attempt in attempts:
-            if attempt.telegram_message_id is not None:
-                telegram_message_existed = True
             if (
                 attempt.status == VenmoConfirmationAttemptStatus.PENDING
                 and attempt.telegram_message_id is None
@@ -651,6 +672,18 @@ class VenmoConfirmationService(ApplicationService):
                 attempt.next_retry_at = None
                 attempt.delivery_lease_until = None
 
+        if telegram_targets:
+            async with gateway_factory() as gateway:  # type: ignore[attr-defined]
+                for chat_id, message_id in sorted(telegram_targets):
+                    outcome = await gateway.delete_message_outcome(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                    )
+                    if outcome == TelegramMessageDeleteOutcome.FAILED:
+                        raise VenmoConfirmationTelegramDeleteError(
+                            "A linked Telegram message could not be deleted. Try again."
+                        )
+
         media_asset_id = request.screenshot_media_asset_id
         previous_status = request.status.value
         logger.info(
@@ -659,7 +692,7 @@ class VenmoConfirmationService(ApplicationService):
                 "venmo_confirmation_request_id": request.id,
                 "admin_user_id": actor.id,
                 "previous_status": previous_status,
-                "telegram_message_existed": telegram_message_existed,
+                "telegram_message_count": len(telegram_targets),
                 "deleted_at": now.isoformat(),
                 "coadmin_id": request.coadmin_id,
             },
@@ -670,9 +703,37 @@ class VenmoConfirmationService(ApplicationService):
             await self._session.delete(inquiry)
         for attempt in attempts:
             await self._session.delete(attempt)
+        notifications = list(
+            await self._session.scalars(
+                select(PersistentNotification).where(
+                    PersistentNotification.related_entity_type
+                    == "venmo_confirmation_request",
+                    PersistentNotification.related_entity_id == request_id,
+                )
+            )
+        )
+        for notification in notifications:
+            await self._session.delete(notification)
         await self._session.delete(request)
         await self._session.flush()
-        await self._delete_orphan_media_asset(media_asset_id)
+        media_storage_key = await self._delete_orphan_media_asset(media_asset_id)
+        return media_storage_key
+
+    async def finalize_request_deletion(
+        self,
+        request_id: int,
+        *,
+        media_storage_key: str | None,
+    ) -> None:
+        """Run non-transactional cleanup only after the database commit succeeds."""
+        if media_storage_key is not None:
+            try:
+                await asyncio.to_thread(self._delete_media_file, media_storage_key)
+            except OSError:
+                logger.exception(
+                    "venmo_confirmation_media_file_delete_failed",
+                    extra={"venmo_confirmation_request_id": request_id},
+                )
         await event_broker.publish(
             LiveEventType.VENMO_CONFIRMATION_DELETED,
             venmo_confirmation_request_id=request_id,
@@ -1038,17 +1099,17 @@ class VenmoConfirmationService(ApplicationService):
         )
         return media
 
-    async def _delete_orphan_media_asset(self, media_asset_id: int) -> None:
+    async def _delete_orphan_media_asset(self, media_asset_id: int) -> str | None:
         remaining = await self._repository.count_requests_for_media_asset(media_asset_id)
         if remaining > 0:
-            return
+            return None
         media = await self._media_repository.get_by_id(media_asset_id)
         if media is None:
-            return
+            return None
         storage_key = media.storage_key
         await self._session.delete(media)
         await self._session.flush()
-        await asyncio.to_thread(self._delete_media_file, storage_key)
+        return storage_key
 
     @staticmethod
     def _delete_media_file(storage_key: str) -> None:
@@ -1137,6 +1198,16 @@ async def _answer_gateway_callback(
         await gateway.answer_callback_query(query_id=query_id, text=text, alert=alert)
     except Exception:
         logger.warning("venmo_confirmation_callback_answer_failed", exc_info=True)
+
+
+def _telegram_delete_targets(
+    attempts: list[VenmoConfirmationAttempt],
+) -> set[tuple[int, int]]:
+    return {
+        (attempt.telegram_chat_id, attempt.telegram_message_id)
+        for attempt in attempts
+        if attempt.telegram_chat_id is not None and attempt.telegram_message_id is not None
+    }
 
 
 def _is_telegram_message_not_modified(error: TelegramBotApiError) -> bool:
